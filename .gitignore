@@ -1,0 +1,45 @@
+# ---- build artifacts ------------------------------------------------------
+.pio/
+platformio/.pio/
+.pioenvs/
+.piolibdeps/
+build/
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+*.map
+*.d
+
+# ---- the Arduino sketch folder is generated from src/ ---------------------
+# There is one copy of the firmware, in src/. arduino/sync.sh mirrors it into
+# arduino/CanLogger/ for the Arduino IDE; those copies are not checked in,
+# because a second committed copy of every file is a second thing to keep
+# correct. Only the .ino wrapper is tracked.
+arduino/CanLogger/*.h
+arduino/CanLogger/*.cpp
+
+# ---- captured data --------------------------------------------------------
+# Recordings never belong in the repository: they are large, and they are
+# somebody's machine data.
+*.csv
+*.log
+!examples/*.csv
+logs/
+recordings/
+
+# ---- editors and tooling --------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- local overrides ------------------------------------------------------
+config.txt
+!examples/config.txt
+frames.dbc
+!examples/*.dbc

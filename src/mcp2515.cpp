@@ -1,0 +1,247 @@
+#include "mcp2515.h"
+
+/* ---- SPI instructions (datasheet table 12-1) ---------------------------- */
+#define CMD_RESET        0xC0
+#define CMD_READ         0x03
+#define CMD_WRITE        0x02
+#define CMD_BIT_MODIFY   0x05
+#define CMD_READ_STATUS  0xA0
+#define CMD_READ_RX0     0x90   /* starts at RXB0SIDH, auto-clears RX0IF     */
+#define CMD_READ_RX1     0x94   /* starts at RXB1SIDH, auto-clears RX1IF     */
+
+/* ---- registers ---------------------------------------------------------- */
+#define REG_CANSTAT      0x0E
+#define REG_CANCTRL      0x0F
+#define REG_TEC          0x1C
+#define REG_REC          0x1D
+#define REG_CNF3         0x28
+#define REG_CNF2         0x29
+#define REG_CNF1         0x2A
+#define REG_CANINTE      0x2B
+#define REG_CANINTF      0x2C
+#define REG_EFLG         0x2D
+#define REG_RXB0CTRL     0x60
+#define REG_RXB1CTRL     0x70
+
+/* CANINTE / CANINTF bits */
+#define INT_RX0          0x01
+#define INT_RX1          0x02
+#define INT_ERR          0x20
+#define INT_MERR         0x80
+
+/* EFLG bits */
+#define EFLG_RX0OVR      0x40
+#define EFLG_RX1OVR      0x80
+
+/* CANCTRL modes (top three bits) */
+#define MODE_NORMAL      0x00
+#define MODE_LISTENONLY  0x60
+#define MODE_CONFIG      0x80
+#define MODE_MASK        0xE0
+
+MCP2515::MCP2515(SPIClass &spi, int8_t csPin, uint32_t spiHz)
+    : _spi(spi), _cs(csPin), _cfg(spiHz, MSBFIRST, SPI_MODE0) {}
+
+/* -------------------------------------------------------------------------
+ *  Low-level register access. Each call is one self-contained SPI
+ *  transaction, so the bus can be shared (it is not, here) and so a
+ *  higher-priority task preempting us cannot leave CS asserted.
+ * ---------------------------------------------------------------------- */
+void MCP2515::reset() {
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(CMD_RESET);
+  deselect();
+  _spi.endTransaction();
+  delay(10);                       /* datasheet: oscillator start-up time */
+}
+
+uint8_t MCP2515::readReg(uint8_t addr) {
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(CMD_READ);
+  _spi.transfer(addr);
+  uint8_t v = _spi.transfer(0x00);
+  deselect();
+  _spi.endTransaction();
+  return v;
+}
+
+void MCP2515::readRegs(uint8_t addr, uint8_t *buf, uint8_t n) {
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(CMD_READ);
+  _spi.transfer(addr);
+  for (uint8_t i = 0; i < n; i++) buf[i] = _spi.transfer(0x00);
+  deselect();
+  _spi.endTransaction();
+}
+
+void MCP2515::writeReg(uint8_t addr, uint8_t val) {
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(CMD_WRITE);
+  _spi.transfer(addr);
+  _spi.transfer(val);
+  deselect();
+  _spi.endTransaction();
+}
+
+void MCP2515::modifyReg(uint8_t addr, uint8_t mask, uint8_t val) {
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(CMD_BIT_MODIFY);
+  _spi.transfer(addr);
+  _spi.transfer(mask);
+  _spi.transfer(val);
+  deselect();
+  _spi.endTransaction();
+}
+
+uint8_t MCP2515::readStatus() {
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(CMD_READ_STATUS);
+  uint8_t v = _spi.transfer(0x00);
+  deselect();
+  _spi.endTransaction();
+  return v;
+}
+
+bool MCP2515::setMode(uint8_t mode) {
+  modifyReg(REG_CANCTRL, MODE_MASK, mode);
+  for (uint8_t i = 0; i < 20; i++) {           /* mode change is not instant */
+    if ((readReg(REG_CANSTAT) & MODE_MASK) == mode) return true;
+    delay(1);
+  }
+  return false;
+}
+
+/* -------------------------------------------------------------------------
+ *  Bit timing.
+ *
+ *  Both tables below produce 16 time quanta per bit with the sample point at
+ *  10/16 = 62.5 %, which is what CANopen and J1939 tooling expects:
+ *      SYNC 1 + PROP 2 + PS1 7 + PS2 6 = 16 TQ
+ *
+ *  8 MHz : TQ = 2*(BRP+1)/8 MHz  = 250 ns -> 16 TQ = 4 us = 250 kbit/s
+ *  16 MHz: TQ = 2*(BRP+1)/16 MHz = 250 ns -> 16 TQ = 4 us = 250 kbit/s
+ * ---------------------------------------------------------------------- */
+bool MCP2515::setBitrate(uint16_t kbps, uint8_t crystalMHz) {
+  uint8_t cnf1, cnf2, cnf3;
+
+  if (crystalMHz == 8) {
+    switch (kbps) {
+      case 1000: cnf1 = 0x00; cnf2 = 0x80; cnf3 = 0x00; break;
+      case  500: cnf1 = 0x00; cnf2 = 0x90; cnf3 = 0x02; break;
+      case  250: cnf1 = 0x00; cnf2 = 0xB1; cnf3 = 0x05; break;
+      case  125: cnf1 = 0x01; cnf2 = 0xB1; cnf3 = 0x05; break;
+      case  100: cnf1 = 0x01; cnf2 = 0xB4; cnf3 = 0x06; break;
+      default: return false;
+    }
+  } else if (crystalMHz == 16) {
+    switch (kbps) {
+      case 1000: cnf1 = 0x00; cnf2 = 0xD0; cnf3 = 0x82; break;
+      case  500: cnf1 = 0x00; cnf2 = 0xF0; cnf3 = 0x86; break;
+      case  250: cnf1 = 0x41; cnf2 = 0xF1; cnf3 = 0x85; break;
+      case  125: cnf1 = 0x03; cnf2 = 0xF0; cnf3 = 0x86; break;
+      case  100: cnf1 = 0x03; cnf2 = 0xFA; cnf3 = 0x87; break;
+      default: return false;
+    }
+  } else {
+    return false;
+  }
+
+  writeReg(REG_CNF1, cnf1);
+  writeReg(REG_CNF2, cnf2);
+  writeReg(REG_CNF3, cnf3);
+  return true;
+}
+
+bool MCP2515::begin(uint16_t bitrateKbps, uint8_t crystalMHz, bool listenOnly) {
+  pinMode(_cs, OUTPUT);
+  deselect();
+
+  reset();
+
+  /* After reset the chip must be in configuration mode. If it is not, the
+   * chip is not answering at all - almost always wiring, CS or 3V3 power. */
+  if ((readReg(REG_CANSTAT) & MODE_MASK) != MODE_CONFIG) return false;
+
+  /* Prove the SPI link both ways before trusting anything else. */
+  writeReg(REG_CNF1, 0x55);
+  if (readReg(REG_CNF1) != 0x55) return false;
+  writeReg(REG_CNF1, 0xAA);
+  if (readReg(REG_CNF1) != 0xAA) return false;
+
+  if (!setBitrate(bitrateKbps, crystalMHz)) return false;
+
+  /* Receive everything: RXM = 11 disables the acceptance filters entirely. A
+   * logger that filters is a logger that lies about what was on the bus.
+   * BUKT on RXB0 lets an overflowing RXB0 roll into RXB1, which doubles the
+   * time available to service an interrupt before the chip drops a frame. */
+  writeReg(REG_RXB0CTRL, 0x64);
+  writeReg(REG_RXB1CTRL, 0x60);
+
+  /* Interrupt on either receive buffer, plus the error/message-error lines so
+   * bus problems are visible instead of silent. */
+  writeReg(REG_CANINTE, INT_RX0 | INT_RX1 | INT_ERR | INT_MERR);
+  writeReg(REG_CANINTF, 0x00);
+
+  return setMode(listenOnly ? MODE_LISTENONLY : MODE_NORMAL);
+}
+
+bool MCP2515::framePending() {
+  return (readStatus() & (INT_RX0 | INT_RX1)) != 0;
+}
+
+bool MCP2515::readFrame(CanFrame &out) {
+  uint8_t st = readStatus();
+  uint8_t cmd;
+
+  if      (st & INT_RX0) cmd = CMD_READ_RX0;
+  else if (st & INT_RX1) cmd = CMD_READ_RX1;
+  else                   return false;
+
+  /* One burst: SIDH, SIDL, EID8, EID0, DLC, D0..D7. Terminating the
+   * transaction also clears the matching RXnIF flag in hardware. */
+  uint8_t b[13];
+  _spi.beginTransaction(_cfg);
+  select();
+  _spi.transfer(cmd);
+  for (uint8_t i = 0; i < 13; i++) b[i] = _spi.transfer(0x00);
+  deselect();
+  _spi.endTransaction();
+
+  const uint8_t sidh = b[0], sidl = b[1], dlc = b[4];
+
+  if (sidl & 0x08) {                       /* extended identifier */
+    out.ext = 1;
+    out.id  = ((uint32_t)sidh << 21) |
+              ((uint32_t)(sidl & 0xE0) << 13) |
+              ((uint32_t)(sidl & 0x03) << 16) |
+              ((uint32_t)b[2] << 8) | b[3];
+    out.rtr = (dlc & 0x40) ? 1 : 0;
+  } else {
+    out.ext = 0;
+    out.id  = ((uint32_t)sidh << 3) | (sidl >> 5);
+    out.rtr = (sidl & 0x10) ? 1 : 0;
+  }
+
+  out.len = dlc & 0x0F;
+  if (out.len > 8) out.len = 8;
+  for (uint8_t i = 0; i < 8; i++) out.data[i] = b[5 + i];
+
+  return true;
+}
+
+uint8_t MCP2515::takeRxOverflow() {
+  uint8_t eflg = readReg(REG_EFLG) & (EFLG_RX0OVR | EFLG_RX1OVR);
+  if (eflg) modifyReg(REG_EFLG, EFLG_RX0OVR | EFLG_RX1OVR, 0x00);
+  return eflg;
+}
+
+uint8_t MCP2515::txErrorCount() { return readReg(REG_TEC); }
+uint8_t MCP2515::rxErrorCount() { return readReg(REG_REC); }
+uint8_t MCP2515::errorFlags()   { return readReg(REG_EFLG); }
+uint8_t MCP2515::mode()         { return readReg(REG_CANSTAT) >> 5; }

@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native-tests:
+    name: Native tests (g++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain
+        run: g++ --version
+
+      # These compile the real sources from src/ against the shims in
+      # test/shim/, so they exercise the code the firmware runs - the DBC
+      # parser, bit extraction, scaling, the CSV schema, CANopen framing and
+      # the logger - with no ESP32 and no CAN hardware.
+      - name: Run the test suite
+        run: ./test/run_tests.sh
+
+  platformio:
+    name: PlatformIO build (ESP32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The espressif32 platform and the xtensa toolchain are a large download;
+      # caching them keeps the job to about a minute after the first run.
+      - name: Cache the PlatformIO toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+
+      # This is the check the host shims cannot make: the real Arduino-ESP32
+      # SDK signatures, the real FreeRTOS headers, and whether the firmware
+      # fits the partition table.
+      - name: Build
+        run: pio run -d platformio -e esp32dev
+
+      - name: Report the size
+        run: pio run -d platformio -e esp32dev -t size | tail -20
+
+  arduino-sketch:
+    name: Arduino sketch folder
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The sketch folder is generated, not committed. This proves the
+      # generator still works and that what it produces compiles.
+      - name: Generate the sketch folder
+        run: ./arduino/sync.sh
+
+      - name: Type-check what the Arduino IDE would see
+        run: |
+          for f in arduino/CanLogger/*.cpp; do
+            g++ -std=c++17 -Wall -Wextra -Wno-unused-parameter \
+                -I test/shim -I arduino/CanLogger -c "$f" -o /dev/null
+          done
+          echo "sketch folder compiles"
+
+  tools:
+    name: Host tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile
+        run: python -m compileall -q tools/
+
+      # Feed the tools a recording so the CSV contract is exercised end to end,
+      # rather than only being asserted about in C++.
+      - name: Round-trip a synthetic recording
+        run: |
+          python - <<'PY'
+          rows = [
+              "# generated in CI",
+              "t_us;id;name;signal;value;unit;raw",
+              "0;0x100;NodeStatus;Uptime;42;s;",
+              "0;0x100;NodeStatus;State;running;;",
+              "1000;0x101;MotorFeedback;Speed;-250.00;rpm;",
+              "2000;0x200;;;;;1122",
+          ]
+          open("sample.csv", "w").write("\n".join(rows) + "\n")
+          PY
+          python tools/parse_log.py sample.csv
+          python tools/parse_log.py sample.csv --list
+          python tools/parse_log.py sample.csv --wide wide.csv
+          test -s wide.csv

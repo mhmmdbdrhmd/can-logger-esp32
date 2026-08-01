@@ -1,0 +1,35 @@
+# ============================================================
+#  CAN logger - network configuration
+#
+#  Copy this to the root of the SD card as /config.txt. The
+#  logger also writes a commented copy on first boot if there
+#  is none, so you can simply let it create one and edit that.
+#
+#  Edit on any computer, put the card back, power cycle.
+#  Lines starting with # are ignored.
+# ============================================================
+
+# Which mode to use:
+#   ap  = the logger creates its own hotspot (no infrastructure
+#         needed - connect a phone or laptop directly to it)
+#   sta = the logger joins an existing Wi-Fi network
+mode = ap
+
+# --- hotspot mode (mode = ap) -------------------------------
+# ap_pass must be at least 8 characters, or empty for an open network.
+ap_ssid = CAN-Logger
+ap_pass = canlogger
+
+# --- join an existing network (mode = sta) ------------------
+wifi_ssid = MyNetwork
+wifi_pass = MyPassword
+
+# If the network cannot be joined within this many milliseconds the
+# logger falls back to hotspot mode, so the dashboard is always
+# reachable. Set to 0 to keep retrying instead.
+sta_timeout_ms = 15000
+
+# --- both modes ---------------------------------------------
+# Reachable as http://<hostname>.local on networks with mDNS.
+hostname = can-logger
+http_port = 80

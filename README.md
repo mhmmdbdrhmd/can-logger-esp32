@@ -595,4 +595,28 @@ MIT — see [LICENSE](LICENSE).
 
 ## Author
 
-**Mohammad Badri Ahmadi** · [github.com/mhmmdbdrhmd](https://github.com/mhmmdbdrhmd) · [biss.qzz.io](https://biss.qzz.io)
+**Mohammad Badri Ahmadi** — embedded systems & on-device AI
+
+<br><br>
+
+<div align="center"><p align="center">
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <a href="mailto:contact@biss.qzz.io" style="text-decoration: none;" alt="Email">
+        <img src="https://github.com/mhmmdbdrhmd/Data/blob/main/Icons/ICON%20_Black%20-%20GMail.png" width="6%" />
+    </a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <a href="https://github.com/mhmmdbdrhmd" style="text-decoration: none;" alt="GitHub">
+        <img src="https://github.com/mhmmdbdrhmd/Data/blob/main/Icons/ICON%20_Black-%20Github.png" width="6%" />
+    </a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <a href="https://www.linkedin.com/in/mohamad-badri-ahmadi-aa2a1a8a" style="text-decoration: none;" alt="LinkedIn">
+        <img src="https://github.com/mhmmdbdrhmd/Data/blob/main/Icons/ICON%20_Black%20-%20Linkding.png" width="6%" />
+    </a>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://twitter.com/mhmmdbdrhmd" style="text-decoration: none;" alt="Twitter">
+        <img src="https://github.com/mhmmdbdrhmd/Data/blob/main/Icons/ICON%20_Black%20-%20Twitter%20X.png" width="6%"/>
+    </a>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://biss.qzz.io" style="text-decoration: none;" alt="Website">
+        <img src="https://github.com/mhmmdbdrhmd/Data/blob/main/Icons/ICON%20_Black%20-%20Website.png" width="6%"/>
+    </a>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+</p></div>
+

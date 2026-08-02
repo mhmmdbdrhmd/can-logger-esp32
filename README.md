@@ -1,4 +1,31 @@
-# can-logger-esp32
+<h1 align="center">can-logger-esp32</h1>
+<p align="center"><i>ESP32 CAN logger with optional DBC decoding</i></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-verified%20on%20hardware%20toolchain-58A6FF?style=flat-square"></p>
+
+> Log a CAN bus to SD with **nothing bus-specific compiled in** — identifiers, scaling and units all come from a DBC file on the card.
+
+<details open>
+<summary><b>Contents</b></summary>
+<br>
+
+- [1. Hardware](#1-hardware)
+- [2. Wiring](#2-wiring)
+- [3. The frame map (`/frames.dbc`)](#3-the-frame-map-framesdbc)
+- [4. Building and flashing](#4-building-and-flashing)
+- [5. What gets recorded](#5-what-gets-recorded)
+- [6. The live web app](#6-the-live-web-app)
+- [7. Why it does not lose frames](#7-why-it-does-not-lose-frames)
+- [8. Surviving a power cut](#8-surviving-a-power-cut)
+- [9. Host-side tools](#9-host-side-tools)
+- [10. Tuning](#10-tuning)
+- [11. Troubleshooting](#11-troubleshooting)
+- [12. Verification status](#12-verification-status)
+- [License](#license)
+- [Author](#author)
+
+</details>
+
+---
 
 A CAN bus logger built from an ESP32 and an MCP2515: it captures **every frame
 on the wire**, decodes it against a **DBC file you put on the SD card**, and
@@ -526,6 +553,11 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 
 ## 11. Troubleshooting
 
+<details>
+<summary><i>expand</i></summary>
+<br>
+
+
 | Symptom | Cause |
 |---|---|
 | `CAN CONTROLLER NOT RESPONDING` | MCP2515 wiring or power. The driver verifies the SPI link both ways at boot, so this means CS, MISO/MOSI or 3V3 is wrong. |
@@ -547,7 +579,14 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 
 ---
 
+</details>
+
 ## 12. Verification status
+
+<details>
+<summary><i>expand</i></summary>
+<br>
+
 
 Being straight about what has and has not been proven.
 
@@ -591,6 +630,8 @@ Only a real `pio run` covers those — which is why CI runs both, and why the
 result above matters.
 
 ---
+
+</details>
 
 ## License
 

@@ -30,6 +30,9 @@ nothing and it logs raw frames. The same binary does both.
 
 ---
 
+![Wiring diagram](docs/wiring.svg)
+
+
 ## 1. Hardware
 
 | Part | Notes |

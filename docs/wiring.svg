@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 680" width="1420" height="680" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+<defs><style>.t{fill:#E6EDF3}.m{fill:#8B949E}.f{fill:#6E7681}.pin{font-size:13px}.lbl{font-size:12px}.board{fill:#161B22;stroke:#30363D;stroke-width:1.5;rx:10}.wire{stroke-width:2.4;fill:none;stroke-linecap:round}</style></defs>
+<rect width="1420" height="680" fill="#0D1117"/>
+<text x="46" y="56" class="t" font-size="21" font-weight="600">ESP32 CAN logger — wiring</text>
+<text x="46" y="80" class="m" font-size="13">MCP2515 on VSPI · SD card on HSPI · two independent buses, so SD writes never stall CAN reception</text>
+<line x1="46" y1="98" x2="1374" y2="98" stroke="#30363D" stroke-width="1"/>
+<rect x="250" y="160" width="250" height="276" class="board"/>
+<text x="375.0" y="186" class="t" font-size="14.5" font-weight="600" text-anchor="middle">MCP2515 + TJA1050</text>
+<text x="375.0" y="205" class="f" font-size="11" text-anchor="middle">CAN controller</text>
+<rect x="640" y="150" width="260" height="286" class="board"/>
+<text x="770.0" y="176" class="t" font-size="14.5" font-weight="600" text-anchor="middle">ESP32 DevKit v1</text>
+<text x="770.0" y="195" class="f" font-size="11" text-anchor="middle">30-pin</text>
+<rect x="1040" y="178" width="250" height="241" class="board"/>
+<text x="1165.0" y="204" class="t" font-size="14.5" font-weight="600" text-anchor="middle">Micro-SD module</text>
+<text x="1165.0" y="223" class="f" font-size="11" text-anchor="middle">SPI, 3V3 logic</text>
+<path d="M 500 196 H 640" class="wire" stroke="#F85149"/>
+<circle cx="500" cy="196" r="4.2" fill="#F85149"/>
+<text x="487" y="200.5" class="pin t" text-anchor="end">VCC</text>
+<circle cx="640" cy="196" r="4.2" fill="#F85149"/>
+<text x="653" y="200.5" class="pin t" text-anchor="start">3V3</text>
+<path d="M 500 230 H 640" class="wire" stroke="#6E7681"/>
+<circle cx="500" cy="230" r="4.2" fill="#6E7681"/>
+<text x="487" y="234.5" class="pin t" text-anchor="end">GND</text>
+<circle cx="640" cy="230" r="4.2" fill="#6E7681"/>
+<text x="653" y="234.5" class="pin t" text-anchor="start">GND</text>
+<path d="M 500 264 H 640" class="wire" stroke="#F59E0B"/>
+<circle cx="500" cy="264" r="4.2" fill="#F59E0B"/>
+<text x="487" y="268.5" class="pin t" text-anchor="end">CS</text>
+<circle cx="640" cy="264" r="4.2" fill="#F59E0B"/>
+<text x="653" y="268.5" class="pin t" text-anchor="start">D5</text>
+<path d="M 500 298 H 640" class="wire" stroke="#A78BFA"/>
+<circle cx="500" cy="298" r="4.2" fill="#A78BFA"/>
+<text x="487" y="302.5" class="pin t" text-anchor="end">INT</text>
+<circle cx="640" cy="298" r="4.2" fill="#A78BFA"/>
+<text x="653" y="302.5" class="pin t" text-anchor="start">D17</text>
+<path d="M 500 332 H 640" class="wire" stroke="#58A6FF"/>
+<circle cx="500" cy="332" r="4.2" fill="#58A6FF"/>
+<text x="487" y="336.5" class="pin t" text-anchor="end">SCK</text>
+<circle cx="640" cy="332" r="4.2" fill="#58A6FF"/>
+<text x="653" y="336.5" class="pin t" text-anchor="start">D18</text>
+<path d="M 500 366 H 640" class="wire" stroke="#3FB950"/>
+<circle cx="500" cy="366" r="4.2" fill="#3FB950"/>
+<text x="487" y="370.5" class="pin t" text-anchor="end">MISO</text>
+<circle cx="640" cy="366" r="4.2" fill="#3FB950"/>
+<text x="653" y="370.5" class="pin t" text-anchor="start">D19</text>
+<path d="M 500 400 H 640" class="wire" stroke="#FF7B72"/>
+<circle cx="500" cy="400" r="4.2" fill="#FF7B72"/>
+<text x="487" y="404.5" class="pin t" text-anchor="end">MOSI</text>
+<circle cx="640" cy="400" r="4.2" fill="#FF7B72"/>
+<text x="653" y="404.5" class="pin t" text-anchor="start">D23</text>
+<path d="M 900 230 H 1040" class="wire" stroke="#F85149"/>
+<circle cx="900" cy="230" r="4.2" fill="#F85149"/>
+<text x="887" y="234.5" class="pin t" text-anchor="end">3V3</text>
+<circle cx="1040" cy="230" r="4.2" fill="#F85149"/>
+<text x="1053" y="234.5" class="pin t" text-anchor="start">VCC</text>
+<path d="M 900 264 H 1040" class="wire" stroke="#6E7681"/>
+<circle cx="900" cy="264" r="4.2" fill="#6E7681"/>
+<text x="887" y="268.5" class="pin t" text-anchor="end">GND</text>
+<circle cx="1040" cy="264" r="4.2" fill="#6E7681"/>
+<text x="1053" y="268.5" class="pin t" text-anchor="start">GND</text>
+<path d="M 900 298 H 1040" class="wire" stroke="#F59E0B"/>
+<circle cx="900" cy="298" r="4.2" fill="#F59E0B"/>
+<text x="887" y="302.5" class="pin t" text-anchor="end">D4</text>
+<circle cx="1040" cy="298" r="4.2" fill="#F59E0B"/>
+<text x="1053" y="302.5" class="pin t" text-anchor="start">CS</text>
+<path d="M 900 332 H 1040" class="wire" stroke="#58A6FF"/>
+<circle cx="900" cy="332" r="4.2" fill="#58A6FF"/>
+<text x="887" y="336.5" class="pin t" text-anchor="end">D14</text>
+<circle cx="1040" cy="332" r="4.2" fill="#58A6FF"/>
+<text x="1053" y="336.5" class="pin t" text-anchor="start">SCK</text>
+<path d="M 900 366 H 1040" class="wire" stroke="#3FB950"/>
+<circle cx="900" cy="366" r="4.2" fill="#3FB950"/>
+<text x="887" y="370.5" class="pin t" text-anchor="end">D27</text>
+<circle cx="1040" cy="366" r="4.2" fill="#3FB950"/>
+<text x="1053" y="370.5" class="pin t" text-anchor="start">MISO</text>
+<path d="M 900 400 H 1040" class="wire" stroke="#FF7B72"/>
+<circle cx="900" cy="400" r="4.2" fill="#FF7B72"/>
+<text x="887" y="404.5" class="pin t" text-anchor="end">D13</text>
+<circle cx="1040" cy="400" r="4.2" fill="#FF7B72"/>
+<text x="1053" y="404.5" class="pin t" text-anchor="start">MOSI</text>
+<path d="M 78 264 H 250" class="wire" stroke="#2DD4BF"/>
+<circle cx="250" cy="264" r="4.2" fill="#2DD4BF"/>
+<text x="263" y="268.5" class="pin t" text-anchor="start">CAN_H</text>
+<path d="M 78 298 H 250" class="wire" stroke="#2DD4BF"/>
+<circle cx="250" cy="298" r="4.2" fill="#2DD4BF"/>
+<text x="263" y="302.5" class="pin t" text-anchor="start">CAN_L</text>
+<path d="M 78 264 V 298" class="wire" stroke="#2DD4BF" stroke-dasharray="5 4" opacity="0.8"/>
+<text x="88" y="285.5" class="pin" fill="#2DD4BF">120 Ω</text>
+<text x="64" y="234" class="lbl t" font-weight="600">to vehicle bus</text>
+<text x="64" y="252" class="lbl f">CAN_H / CAN_L</text>
+<text x="64" y="334" class="lbl f">terminate only if the logger</text>
+<text x="64" y="350" class="lbl f">sits at the end of the bus</text>
+<text x="375.0" y="462" class="lbl m" text-anchor="middle">VSPI · GPIO 18/19/23</text>
+<text x="1165.0" y="445" class="lbl m" text-anchor="middle">HSPI · GPIO 14/27/13</text>
+<line x1="46" y1="526" x2="1374" y2="526" stroke="#30363D" stroke-width="1"/>
+<line x1="46" y1="556" x2="72" y2="556" class="wire" stroke="#F85149"/>
+<text x="80" y="560.5" class="lbl m">3V3</text>
+<line x1="138.8" y1="556" x2="164.8" y2="556" class="wire" stroke="#6E7681"/>
+<text x="172.8" y="560.5" class="lbl m">GND</text>
+<line x1="231.60000000000002" y1="556" x2="257.6" y2="556" class="wire" stroke="#F59E0B"/>
+<text x="265.6" y="560.5" class="lbl m">CS</text>
+<line x1="316.8" y1="556" x2="342.8" y2="556" class="wire" stroke="#A78BFA"/>
+<text x="350.8" y="560.5" class="lbl m">INT</text>
+<line x1="409.6" y1="556" x2="435.6" y2="556" class="wire" stroke="#58A6FF"/>
+<text x="443.6" y="560.5" class="lbl m">SCK</text>
+<line x1="502.40000000000003" y1="556" x2="528.4000000000001" y2="556" class="wire" stroke="#3FB950"/>
+<text x="536.4000000000001" y="560.5" class="lbl m">MISO</text>
+<line x1="602.8000000000001" y1="556" x2="628.8000000000001" y2="556" class="wire" stroke="#FF7B72"/>
+<text x="636.8000000000001" y="560.5" class="lbl m">MOSI</text>
+<line x1="703.2" y1="556" x2="729.2" y2="556" class="wire" stroke="#2DD4BF"/>
+<text x="737.2" y="560.5" class="lbl m">CAN</text>
+<text x="46" y="598" class="lbl t" font-weight="600">Check the MCP2515 crystal.</text>
+<text x="243.79999999999998" y="598" class="lbl m">8 MHz or 16 MHz — set CAN_CRYSTAL_MHZ in src/config.h. The wrong value reports “NO CAN TRAFFIC” on a perfectly healthy bus.</text>
+<text x="46" y="620" class="lbl t" font-weight="600">Card format.</text>
+<text x="141.6" y="620" class="lbl m">Micro-SD must be FAT32. Cards over 32 GB usually ship as exFAT and have to be reformatted.</text>
+</svg>

@@ -71,11 +71,17 @@ jobs:
 
       - name: Type-check what the Arduino IDE would see
         run: |
+          # app.cpp is the ESP32 application layer: FreeRTOS task notifications,
+          # esp_timer, GPIO interrupts. Host-compiling it would mean shimming half
+          # of ESP-IDF, and it buys nothing -- the PlatformIO job below builds it
+          # for the real target. This step covers the portable library code, where
+          # a host compiler genuinely catches things the IDE would not.
           for f in arduino/CanLogger/*.cpp; do
+            case "$(basename "$f")" in app.cpp) continue ;; esac
             g++ -std=c++17 -Wall -Wextra -Wno-unused-parameter \
                 -I test/shim -I arduino/CanLogger -c "$f" -o /dev/null
           done
-          echo "sketch folder compiles"
+          echo "portable sketch sources compile"
 
   tools:
     name: Host tools

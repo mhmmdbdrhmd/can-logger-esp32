@@ -28,6 +28,7 @@ struct RecStatus {
   uint16_t fileIndex   = 0;
   char     csvName[20] = "";
   char     logName[20] = "";
+  char     metaName[20] = "";
   uint32_t startMs     = 0;
   uint64_t rows        = 0;
   uint64_t bytes       = 0;
@@ -42,6 +43,28 @@ struct RecStatus {
   uint32_t writeMaxUs    = 0;
   uint32_t lastFrameMs   = 0;
   bool     canOk         = false;
+
+  /* ---- receive-path diagnostics ----
+   * Without these, a wedged interrupt is invisible: the logger keeps writing
+   * rows, just ninety percent fewer of them. */
+  uint32_t irqCount      = 0;   /* times the INT line actually fired          */
+  uint32_t irqRate       = 0;   /* per second                                 */
+  uint32_t wakeCount     = 0;   /* reader wake-ups, interrupt or timeout      */
+  uint32_t wakeRate      = 0;
+  uint8_t  intLevel      = 1;   /* current level of the MCP2515 INT pin       */
+  bool     intStuck      = false;/* frames arriving but the line never fires  */
+  uint32_t canIntfSticky = 0;   /* ERRIF/MERRF events cleared                 */
+
+  /* ---- bus load ---- */
+  uint64_t rxBits        = 0;   /* bits seen, incl. stuffing and IFS estimate */
+  uint32_t busLoadPct    = 0;   /* percent of CAN_BITRATE_KBPS in use         */
+
+  /* Lifetime totals. The counters above are zeroed when a recording starts so
+   * that "lost" describes THAT recording and not something that happened at
+   * boot - otherwise one frame lost before any file existed marks every later
+   * recording as lossy forever. */
+  uint32_t lifeDropped   = 0;
+  uint32_t lifeOverflow  = 0;
   bool     powerFail     = false; /* a recording was closed by a supply loss */
   uint32_t syncCount     = 0;
   uint32_t syncMaxUs     = 0;     /* worst metadata sync - the exposure window*/

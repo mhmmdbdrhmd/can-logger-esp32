@@ -27,9 +27,20 @@ class MCP2515 {
 public:
   MCP2515(SPIClass &spi, int8_t csPin, uint32_t spiHz);
 
-  /* Hard-resets the controller, programs the bit timing and opens the bus.
-   * Returns false if the chip does not answer (wiring / power problem). */
-  bool begin(uint16_t bitrateKbps, uint8_t crystalMHz, bool listenOnly);
+  /* Hard-resets the controller and programs the bit timing, but deliberately
+   * LEAVES IT IN CONFIGURATION MODE - it does not touch the bus and receives
+   * nothing yet. Returns false if the chip does not answer (wiring / power).
+   *
+   * Separated from startReceiving() because the controller holds only two
+   * frames: on a busy bus it overflows a couple of milliseconds after it
+   * starts listening. If reception began here, every boot would lose frames in
+   * the gap before the reader task and the interrupt exist. */
+  bool begin(uint16_t bitrateKbps, uint8_t crystalMHz);
+
+  /* Opens the bus. Call this LAST, once the reader task is running and the
+   * interrupt is attached, so the very first frame is already being watched
+   * for. */
+  bool startReceiving(bool listenOnly);
 
   /* True while at least one of the two receive buffers holds a frame. */
   bool framePending();
@@ -40,6 +51,21 @@ public:
   /* EFLG receive-overflow flags; reading clears them. Non-zero means the
    * controller itself dropped a frame because we were too slow. */
   uint8_t takeRxOverflow();
+
+  /* Raw CANINTF. Bit 0/1 are the receive buffers, bit 5 ERRIF, bit 7 MERRF. */
+  uint8_t interruptFlags();
+
+  /* Clears everything in CANINTF EXCEPT the two receive-buffer flags, and
+   * returns what was cleared.
+   *
+   * This is not optional housekeeping. The INT pin is LEVEL active-low: it
+   * stays asserted until every flag enabled in CANINTE is clear. Reading a
+   * receive buffer auto-clears its own flag, but ERRIF and MERRF are sticky.
+   * The moment one of them latches - a single receive overflow is enough - INT
+   * never rises again, so a FALLING-edge interrupt never fires again either,
+   * and reception silently degrades to whatever the fallback poll manages
+   * (~100 frames/s). Call this on every service pass. */
+  uint8_t clearErrorInterrupts();
 
   uint8_t txErrorCount();
   uint8_t rxErrorCount();

@@ -354,23 +354,55 @@ so the logger can be moved between sites by editing a text file, no reflash. In
 `ap` mode it makes its own hotspot; in `sta` mode it joins your network and falls
 back to the hotspot if it cannot.
 
-The page shows:
+![The dashboard with a frame map loaded](docs/img/dashboard-dbc.png)
 
-- **four status cards** — SD Card, Recording (with START/STOP), Bus, and Data
-  Integrity;
-- **Live Signals** — every signal the frame map describes, with its current
-  value and unit, updated twice a second;
-- **Identifiers on the wire** — every id seen, its most recent payload, its frame
-  count and rate, and whether the map describes it;
-- **Live Log** — the serial log, mirrored.
+### Layout
 
-Like the firmware, the page names nothing. It renders whatever the status
-document contains, and that document is built from the DBC and the traffic. With
-a frame map you get named signals in engineering units; without one the signal
-table says so and the identifier table shows raw payloads live. Nothing about it
-changes when you swap buses — only the file on the card does.
+**Five status cards across the top**, all driven by measurements rather than
+assumptions:
 
-Preview it with no hardware at all:
+| Card | Shows | Turns red when |
+|---|---|---|
+| **SD Card** | type and capacity | no card, or a write failed |
+| **Bus** | frames/s arriving | nothing has arrived for 500 ms |
+| **Interrupt Path** | interrupts/s and the INT pin level | the ISR stops firing — see below |
+| **Data Integrity** | frames lost this recording, and how much is at risk from a power cut | anything was lost, or nothing is arriving to check |
+| **CAN Bus Load** | percent of the configured bit rate, with a meter | above 80 % (amber from 60 %) |
+
+**Interrupt Path deserves its own card.** The MCP2515 holds two frames, and the
+reader has a 20 ms fallback poll behind the interrupt. If the INT line ever
+stops firing, the poll silently caps throughput at **~100 frames/s** — 50
+wake-ups a second times two buffers — and *nothing else looks wrong*. The logger
+keeps writing rows, just ninety percent fewer of them. This card is what makes
+that visible instead of invisible.
+
+**Live Signals** — every signal the frame map describes, with its current value
+and unit, updated twice a second. Values are right-aligned and tabular so the
+digits line up while they change.
+
+**Identifiers on the wire** — every id seen since the recording started, its most
+recent payload, frame count, rate, and whether the frame map describes it.
+
+**Live Log** — the serial log, mirrored.
+
+**Two control cards at the bottom** — Recording, with START/STOP and the current
+file, rows and size; and Logger, with uptime, free memory and RESTART. They sit
+below the data on purpose: the things you read constantly belong at the top, the
+things you press occasionally at the bottom.
+
+### With no frame map
+
+Without a DBC the page does not pretend. The signal table says so and the
+identifier table becomes the live view, showing raw payloads as they change:
+
+![The dashboard with no frame map](docs/img/dashboard-raw.png)
+
+Like the firmware, the page names nothing of its own. It renders whatever the
+status document contains, and that document is built from the DBC and the
+traffic. Nothing about it changes when you swap buses — only the file on the
+card does.
+
+### Preview it with no hardware
 
 ```bash
 python3 tools/preview_dashboard.py                          # raw-frame view
@@ -378,7 +410,17 @@ python3 tools/preview_dashboard.py --dbc examples/example.dbc
 ```
 
 That serves the real page, extracted from `src/webui.cpp`, against simulated
-data — so the preview can never drift from what the firmware ships.
+data — so the preview can never drift from what the firmware ships. The
+screenshots above are generated from it:
+
+```bash
+python3 tools/capture_screenshots.py     # regenerates docs/img/
+```
+
+Re-run that after changing the page, or this section will document a dashboard
+that no longer exists.
+
+### Why plain polling
 
 It is a plain `WebServer` with 2 Hz polling rather than an async server with
 websockets, on purpose: no third-party libraries, and the HTTP handler runs at

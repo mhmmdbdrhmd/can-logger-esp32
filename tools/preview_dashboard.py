@@ -69,6 +69,8 @@ def make_status(signals, t):
         "rows": int(t * 220), "kb": int(t * 15),
         "pf": 0, "risk": 1000,
         "can": 1, "fps": 220, "lost": 0,
+        # Receive-path health and bus load, as the firmware reports them.
+        "irq": 220, "intStuck": 0, "intLevel": 1, "load": 11,
         "dbc": 1 if signals else 0,
         "dbcMsg": len({m for m, _, _ in signals}),
         "dbcSig": len(signals),

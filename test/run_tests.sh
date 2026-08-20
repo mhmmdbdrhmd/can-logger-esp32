@@ -51,6 +51,7 @@ run_test "DBC parser and signal decoding" "$here/test_dbc.cpp"     "$src/dbc.cpp
 run_test "CANopen framing"                "$here/test_canopen.cpp" "$src/canopen.cpp"
 run_test "CSV schema"                     "$here/test_decode.cpp"  "$src/decode.cpp" "$src/dbc.cpp"
 run_test "logger"                         "$here/test_logger.cpp"  "$src/logger.cpp"
+run_test "MCP2515 driver"                 "$here/test_mcp2515.cpp" "$src/mcp2515.cpp"
 
 echo
 echo "=== example DBC parses ==="

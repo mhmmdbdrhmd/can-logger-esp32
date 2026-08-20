@@ -158,7 +158,7 @@ bool MCP2515::setBitrate(uint16_t kbps, uint8_t crystalMHz) {
   return true;
 }
 
-bool MCP2515::begin(uint16_t bitrateKbps, uint8_t crystalMHz, bool listenOnly) {
+bool MCP2515::begin(uint16_t bitrateKbps, uint8_t crystalMHz) {
   pinMode(_cs, OUTPUT);
   deselect();
 
@@ -188,7 +188,31 @@ bool MCP2515::begin(uint16_t bitrateKbps, uint8_t crystalMHz, bool listenOnly) {
   writeReg(REG_CANINTE, INT_RX0 | INT_RX1 | INT_ERR | INT_MERR);
   writeReg(REG_CANINTF, 0x00);
 
+  /* Stays in configuration mode - silent, receiving nothing - until
+   * startReceiving() is called. */
+  return true;
+}
+
+bool MCP2515::startReceiving(bool listenOnly) {
+  /* Discard anything that leaked in and clear every flag, so the first frame
+   * the reader sees is genuinely the first frame on the bus. */
+  writeReg(REG_CANINTF, 0x00);
+  modifyReg(REG_EFLG, EFLG_RX0OVR | EFLG_RX1OVR, 0x00);
+
   return setMode(listenOnly ? MODE_LISTENONLY : MODE_NORMAL);
+}
+
+uint8_t MCP2515::interruptFlags() { return readReg(REG_CANINTF); }
+
+uint8_t MCP2515::clearErrorInterrupts() {
+  const uint8_t sticky = readReg(REG_CANINTF) & (uint8_t)~(INT_RX0 | INT_RX1);
+  if (sticky) {
+    /* Bit-modify rather than a plain write: a receive buffer may fill between
+     * the read and the write, and clobbering its flag would strand the frame
+     * in the controller with no interrupt to announce it. */
+    modifyReg(REG_CANINTF, sticky, 0x00);
+  }
+  return sticky;
 }
 
 bool MCP2515::framePending() {

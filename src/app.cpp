@@ -81,6 +81,8 @@ static void IRAM_ATTR canIsr() {
     s_tsHead   = next;
   }
 
+  g_rec.irqCount++;               /* proves the INT line is actually firing */
+
   BaseType_t woken = pdFALSE;
   vTaskNotifyGiveFromISR(s_canTask, &woken);
   if (woken) portYIELD_FROM_ISR();
@@ -105,7 +107,12 @@ static void canTaskFn(void *arg) {
   for (;;) {
     /* Woken by the ISR, or every 20 ms as a safety net so a lost edge can
      * never wedge the receiver. */
+    /* That safety net is a last resort, not a mode of operation: 50 wake-ups/s
+     * x 2 receive buffers caps throughput at ~100 frames/s. If the status line
+     * ever shows a healthy rx with irq=0/s, the interrupt is dead and this
+     * poll is all that is left. */
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    g_rec.wakeCount++;
 
     /* Drain until the controller is empty. Both receive buffers are checked on
      * every pass, which is what covers the missed-edge case. */
@@ -114,6 +121,14 @@ static void canTaskFn(void *arg) {
 
       g_rec.framesRx++;
       g_rec.lastFrameMs = millis();
+
+      /* Bits this frame occupied on the wire, for the bus-load figure. A
+       * standard data frame is 44 fixed bits + 8 per data byte, plus 3 bits of
+       * inter-frame space, plus stuffing - which applies to the 34 + 8*len
+       * bits from SOF to CRC and adds at most one bit per five. Extended
+       * frames carry 20 more bits of identifier. */
+      g_rec.rxBits += (f.ext ? 67u : 47u) + 8u * f.len
+                    + ((f.ext ? 54u : 34u) + 8u * f.len) / 5u;
 
       if (xQueueSend(g_frameQueue, &f, 0) != pdTRUE) {
         /* The writer could not keep up for a full second. Count it - a
@@ -128,6 +143,18 @@ static void canTaskFn(void *arg) {
       g_rec.canOverflow++;
       LOG_FILE(LVL_WARN, "MCP2515 receive overflow (EFLG=0x%02X) - a frame was lost", ovf);
     }
+
+    /* MUST happen every pass. ERRIF and MERRF are sticky and the INT pin is
+     * level active-low, so one latched flag kills every future edge and drops
+     * the receiver into the 20 ms poll above - permanently. */
+    const uint8_t sticky = s_can.clearErrorInterrupts();
+    if (sticky) {
+      g_rec.canIntfSticky++;
+      LOG_FILE(LVL_DEBUG, "cleared sticky CANINTF=0x%02X (would have wedged INT)",
+               sticky);
+    }
+
+    g_rec.intLevel = (uint8_t)digitalRead(PIN_CAN_INT);
   }
 }
 
@@ -271,8 +298,10 @@ void appSetup() {
   s_canSpi.begin(PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI, PIN_CAN_CS);
   pinMode(PIN_CAN_INT, INPUT_PULLUP);
 
-  if (s_can.begin(CAN_BITRATE_KBPS, CAN_CRYSTAL_MHZ, CAN_LISTEN_ONLY)) {
-    LOG_LIVE(LVL_INFO, "CAN controller OK: %d kbit/s, %s mode",
+  /* Configured but still silent - it does not open the bus until
+   * startReceiving() below, once the reader task and the ISR exist. */
+  if (s_can.begin(CAN_BITRATE_KBPS, CAN_CRYSTAL_MHZ)) {
+    LOG_LIVE(LVL_INFO, "CAN controller OK: %d kbit/s, %s mode (not listening yet)",
              CAN_BITRATE_KBPS, CAN_LISTEN_ONLY ? "listen-only" : "normal");
     LOG_FILE(LVL_INFO, "MCP2515: %u MHz crystal, mode=%u, filters disabled, "
                        "RXB0 rollover enabled",
@@ -293,6 +322,15 @@ void appSetup() {
    * otherwise notify a null handle. FALLING is correct for the MCP2515's
    * active-low INT; the drain loop covers the level-triggered corner case. */
   attachInterrupt(digitalPinToInterrupt(PIN_CAN_INT), canIsr, FALLING);
+
+  /* NOW open the bus. Everything that has to watch it already exists, so the
+   * controller's two receive buffers cannot overflow in a gap - which used to
+   * cost frames on every single boot. */
+  if (s_can.startReceiving(CAN_LISTEN_ONLY)) {
+    LOG_LIVE(LVL_INFO, "CAN bus open - listening");
+  } else {
+    LOG_LIVE(LVL_ERROR, "CAN controller would not leave configuration mode");
+  }
 
 #if PIN_POWER_FAIL >= 0
   pinMode(PIN_POWER_FAIL, INPUT);
@@ -331,6 +369,18 @@ void appLoop() {
 #endif
   webService();
   netService();
+
+  if (webRebootRequested()) {
+    /* Close the CSV before restarting, or the rows written since the last sync
+     * are lost - the same discipline as the power-fail path. */
+    LOG_LIVE(LVL_WARN, "restarting - closing files first");
+    if (!recorderStopAndWait(4000)) {
+      LOG_LIVE(LVL_ERROR, "recording did not close in time - restarting anyway");
+    }
+    logService();
+    delay(250);          /* let the HTTP reply and the log actually go out */
+    ESP.restart();
+  }
   serviceLed();
   delay(2);          /* yields to the idle task; the real work is in tasks */
 }

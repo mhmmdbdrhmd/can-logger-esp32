@@ -18,4 +18,9 @@
 #include <Arduino.h>
 
 void webBegin();     /* starts the server on the configured port */
-void webService();   /* call from loop() */
+void webService();
+
+/* True once the dashboard's RESTART button has been pressed. The restart is
+ * deliberately NOT done in the HTTP handler: an open CSV has to be flushed and
+ * closed first, and that belongs to the writer task. appLoop() polls this. */
+bool webRebootRequested();   /* call from loop() */

@@ -1,4 +1,5 @@
 #include "decode.h"
+#include <stdarg.h>
 #include "fmt.h"
 #include "config.h"
 
@@ -235,6 +236,130 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
   (void)rawDone;
   if (rowsOut) *rowsOut = emitted;
   return (size_t)(p - buf);
+}
+
+
+/* ==========================================================================
+ *  The CSV header, and the sidecar that explains it
+ *
+ *  These used to be one thing: a block of '#' comments above the column names.
+ *  That made every recording self-describing, but it also made the file awkward
+ *  to open - plenty of tools have no way to skip a comment block.
+ *
+ *  So the CSV now carries only its column names, and the legend moves to
+ *  <n>.meta beside <n>.csv and <n>.log. JSON, so a tool reads it directly.
+ *  The frame map is included, because the DBC that produced a recording may
+ *  well have been edited by the time anyone reads it back.
+ * ======================================================================== */
+size_t csvColumnHeader(char *buf, size_t cap) {
+  const int n = snprintf(buf, cap, "t_us;id;name;signal;value;unit;raw\n");
+  return (n < 0 || (size_t)n >= cap) ? 0 : (size_t)n;
+}
+
+/* Appends at *n, keeping the overflow check in one place. */
+static bool mAppend(char *buf, size_t cap, int *n, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  const int k = vsnprintf(buf + *n, cap - (size_t)*n, fmt, ap);
+  va_end(ap);
+  if (k < 0 || (size_t)(*n + k) >= cap) return false;
+  *n += k;
+  return true;
+}
+
+/* JSON string escaping. Signal names and units come from a user-supplied DBC,
+ * so they are not trusted to be free of quotes or backslashes. */
+static bool mStr(char *buf, size_t cap, int *n, const char *s) {
+  if (!mAppend(buf, cap, n, "\"")) return false;
+  for (const char *p = s; p && *p; ++p) {
+    const char c = *p;
+    bool ok;
+    if      (c == '"')  ok = mAppend(buf, cap, n, "\\\"");
+    else if (c == '\\') ok = mAppend(buf, cap, n, "\\\\");
+    else if ((uint8_t)c < 0x20) continue;
+    else                ok = mAppend(buf, cap, n, "%c", c);
+    if (!ok) return false;
+  }
+  return mAppend(buf, cap, n, "\"");
+}
+
+size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
+                const DbcDb &db) {
+  int n = 0;
+
+  if (!mAppend(buf, cap, &n,
+      "{\n"
+      "  \"firmware\": \"%s\",\n"
+      "  \"version\": \"%s\",\n"
+      "  \"csv\": \"%s\",\n"
+      "  \"log\": \"%s\",\n"
+      "  \"bus\": { \"bitrate_kbps\": %d, \"listen_only\": %d },\n",
+      FIRMWARE_NAME, FIRMWARE_VERSION, csvName, logName,
+      CAN_BITRATE_KBPS, CAN_LISTEN_ONLY ? 1 : 0)) return 0;
+
+  if (!mAppend(buf, cap, &n,
+      "  \"columns\": [\n"
+      "    { \"name\": \"t_us\",   \"unit\": \"us\", \"zero\": \"start of this file\",\n"
+      "      \"desc\": \"arrival time, captured in the CAN interrupt\" },\n"
+      "    { \"name\": \"id\",     \"desc\": \"CAN identifier, hex\" },\n"
+      "    { \"name\": \"name\",   \"desc\": \"message name from the frame map, "
+      "empty if unmapped\" },\n"
+      "    { \"name\": \"signal\", \"desc\": \"signal name, empty for a raw row\" },\n"
+      "    { \"name\": \"value\",  \"desc\": \"scaled value, or the value-table "
+      "label when one applies\" },\n"
+      "    { \"name\": \"unit\",   \"desc\": \"unit from the frame map\" },\n"
+      "    { \"name\": \"raw\",    \"desc\": \"payload bytes, hex; present once "
+      "per frame\" }\n"
+      "  ],\n"
+      "  \"layout\": \"one row per SIGNAL; a frame with several signals "
+      "produces several rows sharing t_us and id\",\n")) return 0;
+
+  if (!mAppend(buf, cap, &n,
+      "  \"dbc\": { \"loaded\": %d, \"path\": \"%s\", \"messages\": %u, "
+      "\"signals\": %u, \"line_errors\": %u, \"overflow\": %d, \"inexact\": %d,\n"
+      "    \"version\": ", db.loaded ? 1 : 0, DBC_PATH,
+      (unsigned)db.msgCount, (unsigned)db.sigCount,
+      (unsigned)db.lineErrors, db.overflow ? 1 : 0, db.inexact ? 1 : 0)) return 0;
+  if (!mStr(buf, cap, &n, db.version)) return 0;
+  if (!mAppend(buf, cap, &n, " },\n")) return 0;
+
+  /* The frame map as it was when this recording was made. */
+  if (!mAppend(buf, cap, &n, "  \"messages\": [\n")) return 0;
+  for (uint16_t i = 0; i < db.msgCount; i++) {
+    const DbcMessage &m = db.msg[i];
+    if (!mAppend(buf, cap, &n, "    { \"id\": \"0x%lX\", \"ext\": %d, \"dlc\": %u, "
+                 "\"name\": ", (unsigned long)m.id, m.ext ? 1 : 0,
+                 (unsigned)m.dlc)) return 0;
+    if (!mStr(buf, cap, &n, m.name)) return 0;
+    if (!mAppend(buf, cap, &n, ", \"signals\": [")) return 0;
+    for (uint16_t k = 0; k < m.signalCount; k++) {
+      const DbcSignal &sg = db.sig[m.firstSignal + k];
+      if (!mAppend(buf, cap, &n, "%s{ \"name\": ", k ? ", " : "")) return 0;
+      if (!mStr(buf, cap, &n, sg.name)) return 0;
+      if (!mAppend(buf, cap, &n, ", \"unit\": ")) return 0;
+      if (!mStr(buf, cap, &n, sg.unit)) return 0;
+      if (!mAppend(buf, cap, &n,
+                   ", \"bits\": %u, \"signed\": %d, \"exact\": %d }",
+                   (unsigned)sg.bits, sg.isSigned ? 1 : 0,
+                   sg.exact ? 1 : 0)) return 0;
+    }
+    if (!mAppend(buf, cap, &n, "] }%s\n",
+                 (i + 1 < db.msgCount) ? "," : "")) return 0;
+  }
+  if (!mAppend(buf, cap, &n, "  ],\n")) return 0;
+
+  if (!mAppend(buf, cap, &n,
+      "  \"notes\": [\n"
+      "    \"An unmapped identifier is still logged: the row carries the raw "
+      "payload and no signal name.\",\n"
+      "    \"Values marked inexact in the dbc block were scaled in floating "
+      "point; everything else is exact integer arithmetic.\",\n"
+      "    \"t_us is the recorder's clock. If a node stamps its own time into "
+      "the payload, prefer that for signal timing.\"\n"
+      "  ]\n"
+      "}\n")) return 0;
+
+  return (size_t)n;
 }
 
 /* ==========================================================================

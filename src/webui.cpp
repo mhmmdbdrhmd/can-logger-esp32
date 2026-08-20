@@ -32,6 +32,15 @@ h1{font-size:19px;margin:0;letter-spacing:.2px}
 header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 #conn{margin-left:auto;font-size:13px;color:var(--dim)}
 .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+/* Five status tiles across on a desktop, wrapping to one on a phone. */
+.grid5{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+.ctl{margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.meter{height:6px;border-radius:3px;background:#0d1219;margin-top:12px;overflow:hidden}
+.meter span{display:block;height:100%;width:0;background:var(--ok);
+  transition:width .4s ease,background .4s ease}
+button.reboot{background:transparent;border:1px solid var(--line);color:var(--dim);
+  font-weight:500}
+button.reboot:hover{border-color:var(--bad);color:var(--bad)}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
 .card h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;
   color:var(--dim);margin:0 0 10px;font-weight:600}
@@ -51,9 +60,19 @@ button{font:inherit;font-weight:650;border:0;border-radius:11px;padding:15px 22p
 button:active{transform:translateY(1px)}
 .scroll{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+/* Headers and cells must share an alignment or the columns visibly disagree,
+   which is what happened when th was right-aligned and td was not. Alignment
+   is set per column instead, on both. */
 th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
-  text-align:right;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
-th:first-child,td:first-child{text-align:left}
+  text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+th.num,td.num{text-align:right;font-variant-numeric:tabular-nums}
+/* Fixed layout so the columns do not jump about as values change width. */
+table.sig{table-layout:fixed}
+table.sig th.c1,table.sig td.c1{width:30%}
+table.sig th.c2,table.sig td.c2{width:30%}
+table.sig th.c3,table.sig td.c3{width:22%}
+table.sig th.c4,table.sig td.c4{width:18%;padding-left:14px}
+td.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 td{padding:6px 8px;border-bottom:1px solid #1b212b;font-size:14px}
 td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 tr.un td{color:var(--dim)}
@@ -71,18 +90,11 @@ tr.un td{color:var(--dim)}
   <span id="conn">connecting...</span>
 </header>
 
-<div class="grid">
+<div class="grid grid5">
   <div class="card">
     <h2>SD Card</h2>
     <div class="state"><span class="dot" id="d_sd"></span>
       <div><div class="big" id="t_sd">--</div><div class="sub" id="s_sd"></div></div></div>
-  </div>
-
-  <div class="card">
-    <h2>Recording</h2>
-    <div class="state"><span class="dot" id="d_rec"></span>
-      <div><div class="big" id="t_rec">--</div><div class="sub" id="s_rec"></div></div></div>
-    <button id="btn" class="start" onclick="toggle()">START</button>
   </div>
 
   <div class="card">
@@ -92,17 +104,31 @@ tr.un td{color:var(--dim)}
   </div>
 
   <div class="card">
+    <h2>Interrupt Path</h2>
+    <div class="state"><span class="dot" id="d_irq"></span>
+      <div><div class="big" id="t_irq">--</div><div class="sub" id="s_irq"></div></div></div>
+  </div>
+
+  <div class="card">
     <h2>Data Integrity</h2>
     <div class="state"><span class="dot" id="d_lost"></span>
       <div><div class="big" id="t_lost">--</div><div class="sub" id="s_lost"></div></div></div>
+  </div>
+
+  <div class="card">
+    <h2>CAN Bus Load</h2>
+    <div class="state"><span class="dot" id="d_load"></span>
+      <div><div class="big" id="t_load">--</div><div class="sub" id="s_load"></div></div></div>
+    <div class="meter"><span id="loadbar"></span></div>
   </div>
 </div>
 
 <div class="card" style="margin-top:12px">
   <h2>Live Signals</h2>
   <div class="scroll">
-    <table><thead><tr>
-      <th>Message</th><th>Signal</th><th>Value</th><th>Unit</th>
+    <table class="sig"><thead><tr>
+      <th class="c1">Message</th><th class="c2">Signal</th>
+      <th class="c3 num">Value</th><th class="c4">Unit</th>
     </tr></thead><tbody id="sigs"></tbody></table>
   </div>
   <div class="sub" id="s_sigs">&nbsp;</div>
@@ -123,6 +149,22 @@ tr.un td{color:var(--dim)}
   <div id="term"></div>
 </div>
 
+<div class="grid ctl">
+  <div class="card">
+    <h2>Recording</h2>
+    <div class="state"><span class="dot" id="d_rec"></span>
+      <div><div class="big" id="t_rec">--</div><div class="sub" id="s_rec"></div></div></div>
+    <button id="btn" class="start" onclick="toggle()">START</button>
+  </div>
+
+  <div class="card">
+    <h2>Logger</h2>
+    <div class="state"><span class="dot ok"></span>
+      <div><div class="big">RUNNING</div><div class="sub" id="s_up">&nbsp;</div></div></div>
+    <button class="reboot" onclick="reboot()">RESTART</button>
+  </div>
+</div>
+
 <div class="foot" id="foot">&nbsp;</div>
 
 <script>
@@ -138,6 +180,14 @@ function hms(s){
 function toggle(){
   fetch(rec ? '/api/stop' : '/api/start', {method:'POST'});
   q('btn').textContent = '...';
+}
+
+function reboot(){
+  if(!confirm('Restart the logger?\n\nAny running recording is closed and '+
+              'saved first. The next recording goes to a new file.')) return;
+  fetch('/api/reboot', {method:'POST'});
+  q('conn').textContent = 'restarting...';
+  setTimeout(function(){ location.reload(); }, 8000);
 }
 
 /* Everything below renders whatever the payload contains. No signal, message
@@ -165,8 +215,10 @@ function paintSigs(list, mapped){
   var body = q('sigs'), html = '', i;
   for(i=0;i<list.length;i++){
     var e = list[i];
-    html += '<tr><td>'+esc(e.m)+'</td><td>'+esc(e.s)+
-            '</td><td class="mono">'+esc(e.v)+'</td><td>'+esc(e.u)+'</td></tr>';
+    html += '<tr><td class="c1 ell" title="'+esc(e.m)+'">'+esc(e.m)+
+            '</td><td class="c2 ell" title="'+esc(e.s)+'">'+esc(e.s)+
+            '</td><td class="c3 num mono">'+esc(e.v)+
+            '</td><td class="c4">'+esc(e.u)+'</td></tr>';
   }
   if(!html){
     html = '<tr><td colspan="4">' + (mapped
@@ -186,6 +238,32 @@ function paint(d){
              q('s_sd').textContent='Card may be full or was removed'; }
   else { setDot('d_sd','ok'); q('t_sd').textContent='READY';
              q('s_sd').textContent=d.sdType+', '+(d.sdMB/1024).toFixed(1)+' GB'; }
+
+  /* --- interrupt path ---
+     The receive path only keeps up if the controller's INT line actually
+     fires. When it does not, the 20 ms fallback poll caps throughput at about
+     100 frames/s no matter what the bus is doing, so it gets its own tile
+     rather than being buried in the log. */
+  if(!d.can){
+    setDot('d_irq','warn'); q('t_irq').textContent='IDLE';
+    q('s_irq').textContent='No traffic, nothing to interrupt on';
+  } else if(d.intStuck){
+    setDot('d_irq','bad'); q('t_irq').textContent='NOT FIRING';
+    q('s_irq').textContent='Running on the fallback poll - check the INT wire';
+  } else {
+    setDot('d_irq','ok'); q('t_irq').textContent=d.irq.toLocaleString()+' /s';
+    q('s_irq').textContent='ISR healthy - INT line '+(d.intLevel?'idle high':'asserted');
+  }
+
+  /* --- CAN bus load --- */
+  var L = d.load;
+  q('t_load').textContent = L+'%';
+  q('s_load').textContent = d.fps.toLocaleString()+' frames/s';
+  var bar = q('loadbar');
+  bar.style.width = Math.min(L,100)+'%';
+  if(L < 60){ setDot('d_load','ok');   bar.style.background='var(--ok)'; }
+  else if(L < 80){ setDot('d_load','warn'); bar.style.background='var(--warn)'; }
+  else { setDot('d_load','bad'); bar.style.background='var(--bad)'; }
 
   /* --- recording --- */
   rec = !!d.rec;
@@ -233,9 +311,11 @@ function paint(d){
          'are still recorded')
       : 'every identifier seen since the recording started';
 
-  q('foot').textContent = 'up '+hms(Math.floor(d.up/1000))+
-                          '  -  free memory '+Math.round(d.heap/1024)+' KB'+
-                          '  -  '+d.fw;
+  q('s_up').textContent = 'up '+hms(Math.floor(d.up/1000))+
+                          ', '+Math.round(d.heap/1024)+' KB free';
+  /* Uptime and free memory live in the Logger card now, so the footer is just
+     the firmware string - no leading separator. */
+  q('foot').textContent = d.fw;
 }
 
 function pollStatus(){
@@ -306,6 +386,10 @@ static void handleStatus() {
   j += ",\"risk\":";    j += (uint32_t)SD_SYNC_INTERVAL_MS;
   j += ",\"can\":";     j += g_rec.canOk ? 1 : 0;
   j += ",\"fps\":";     j += g_rec.frameRate;
+  j += ",\"irq\":";     j += g_rec.irqRate;
+  j += ",\"intStuck\":"; j += g_rec.intStuck ? 1 : 0;
+  j += ",\"intLevel\":"; j += (uint32_t)g_rec.intLevel;
+  j += ",\"load\":";    j += g_rec.busLoadPct;
   j += ",\"lost\":";    j += lost;
   j += ",\"dbc\":";     j += g_rec.dbcLoaded ? 1 : 0;
   j += ",\"dbcMsg\":";  j += (uint32_t)g_rec.dbcMessages;
@@ -384,6 +468,19 @@ static void handleStart() {
   s_srv->send(200, "application/json", "{\"ok\":1}");
 }
 
+static volatile bool s_wantReboot = false;
+
+bool webRebootRequested() { return s_wantReboot; }
+
+static void handleReboot() {
+  /* Answer first, restart later. Rebooting inside the handler would drop the
+   * connection before the browser sees a reply, and would abandon an open CSV
+   * mid-write. appLoop() picks this up and shuts down properly. */
+  s_srv->send(200, "application/json", "{\"ok\":1}");
+  LOG_LIVE(LVL_WARN, "REBOOT requested from the web dashboard");
+  s_wantReboot = true;
+}
+
 static void handleStop() {
   recorderRequestStop();
   LOG_LIVE(LVL_INFO, "stop requested from the web dashboard");
@@ -400,6 +497,7 @@ void webBegin() {
   s_srv->on("/api/start",   HTTP_GET,  handleStart);   /* convenience */
   s_srv->on("/api/stop",    HTTP_POST, handleStop);
   s_srv->on("/api/stop",    HTTP_GET,  handleStop);
+  s_srv->on("/api/reboot",  HTTP_POST, handleReboot);
 
   /* Anything else goes to the dashboard, including the captive-portal probes
    * phones fire when they join the hotspot. */

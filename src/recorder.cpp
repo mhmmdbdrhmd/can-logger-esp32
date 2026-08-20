@@ -32,6 +32,10 @@ static volatile bool s_powerFail = false;
 static uint32_t s_lastSyncMs   = 0;
 static uint32_t s_lastStatusMs = 0;
 static uint32_t s_framesAtLastStatus = 0;
+static uint32_t s_irqAtLastStatus    = 0;
+static uint32_t s_wakeAtLastStatus   = 0;
+static bool     s_warnedIntStuck     = false;
+static uint64_t s_bitsAtLastStatus   = 0;
 
 void recorderRequestStart() { s_wantStart = true; s_wantStop = false; }
 void recorderRequestStop()  { s_wantStop  = true; s_wantStart = false; }
@@ -156,11 +160,12 @@ void recorderLoadDbc() {
 /* Lowest free index: 1.csv, 2.csv, ... A slot counts as taken if either the
  * .csv or the .log exists, so the pair always shares a number. */
 static uint16_t nextFileIndex() {
-  char a[20], b[20];
+  char a[20], b[20], c[20];
   for (uint16_t i = 1; i < 10000; i++) {
-    snprintf(a, sizeof(a), "/%u.csv", i);
-    snprintf(b, sizeof(b), "/%u.log", i);
-    if (!SD.exists(a) && !SD.exists(b)) return i;
+    snprintf(a, sizeof(a), "/%u.csv",  i);
+    snprintf(b, sizeof(b), "/%u.log",  i);
+    snprintf(c, sizeof(c), "/%u.meta", i);
+    if (!SD.exists(a) && !SD.exists(b) && !SD.exists(c)) return i;
   }
   return 0;
 }
@@ -216,8 +221,9 @@ static void startRecording() {
   const uint16_t idx = nextFileIndex();
   if (!idx) { LOG_LIVE(LVL_ERROR, "cannot start: no free file index"); return; }
 
-  snprintf(g_rec.csvName, sizeof(g_rec.csvName), "/%u.csv", idx);
-  snprintf(g_rec.logName, sizeof(g_rec.logName), "/%u.log", idx);
+  snprintf(g_rec.csvName,  sizeof(g_rec.csvName),  "/%u.csv",  idx);
+  snprintf(g_rec.logName,  sizeof(g_rec.logName),  "/%u.log",  idx);
+  snprintf(g_rec.metaName, sizeof(g_rec.metaName), "/%u.meta", idx);
 
   s_csv = SD.open(g_rec.csvName, FILE_WRITE);
   if (!s_csv) { LOG_LIVE(LVL_ERROR, "cannot create %s", g_rec.csvName); return; }
@@ -231,7 +237,26 @@ static void startRecording() {
   }
 
   /* Self-describing preamble, written before a single sample. */
-  const size_t hdr = csvHeaderBlock(s_buf, sizeof(s_buf), g_rec.csvName + 1, g_dbc);
+  /* The legend goes to its own file, written and closed immediately so it is
+   * safe on the card before a single sample is taken. The CSV itself gets
+   * nothing but its column names - see the note in decode.cpp. */
+  {
+    File meta = SD.open(g_rec.metaName, FILE_WRITE);
+    if (!meta) {
+      LOG_LIVE(LVL_WARN, "cannot create %s - the CSV will have no legend",
+               g_rec.metaName);
+    } else {
+      const size_t mn = metaJson(s_buf, sizeof(s_buf),
+                                 g_rec.csvName + 1, g_rec.logName + 1, g_dbc);
+      if (mn) meta.write((const uint8_t *)s_buf, mn);
+      else    LOG_LIVE(LVL_WARN, "meta did not fit the buffer - frame map too "
+                                 "large for %u bytes", (unsigned)sizeof(s_buf));
+      meta.flush();
+      meta.close();
+    }
+  }
+
+  const size_t hdr = csvColumnHeader(s_buf, sizeof(s_buf));
   if (hdr) {
     s_used = hdr;
     flushBuffer(true);
@@ -256,6 +281,17 @@ static void startRecording() {
   g_rec.syncCount  = 0;
   g_rec.syncMaxUs  = 0;
   g_rec.powerFail  = false;
+
+  /* Health counters describe THIS recording. Without this, a single frame lost
+   * during boot - before any file existed - would mark every later recording
+   * as lossy forever, which trains you to ignore the one number that matters.
+   * Lifetime totals are preserved separately for the detailed log. */
+  g_rec.lifeDropped  += g_rec.queueDropped;
+  g_rec.lifeOverflow += g_rec.canOverflow;
+  g_rec.queueDropped  = 0;
+  g_rec.canOverflow   = 0;
+  g_rec.queuePeak     = 0;
+  g_rec.canIntfSticky = 0;
   g_rec.recording  = true;
 
   LOG_LIVE(LVL_INFO, "RECORDING STARTED -> %s (+ %s), %s",
@@ -349,13 +385,50 @@ static void statusTick() {
     snprintf(state, sizeof(state), "IDLE");
   }
 
+  /* Interrupt-path health, measured rather than assumed. */
+  g_rec.irqRate  = (uint32_t)(((uint64_t)(g_rec.irqCount  - s_irqAtLastStatus)
+                               * 1000ULL) / (dt ? dt : 1));
+  g_rec.wakeRate = (uint32_t)(((uint64_t)(g_rec.wakeCount - s_wakeAtLastStatus)
+                               * 1000ULL) / (dt ? dt : 1));
+  s_irqAtLastStatus  = g_rec.irqCount;
+  s_wakeAtLastStatus = g_rec.wakeCount;
+
+  /* Frames arriving but the line never firing means we are running purely on
+   * the 20 ms fallback poll, which caps at ~100 frames/s. */
+  g_rec.intStuck = (g_rec.frameRate > 0) && (g_rec.irqRate == 0);
+
+  /* Bus load: bits/s seen, as a percentage of the configured bit rate. */
+  const uint64_t bits = g_rec.rxBits - s_bitsAtLastStatus;
+  s_bitsAtLastStatus  = g_rec.rxBits;
+  g_rec.busLoadPct = (uint32_t)((bits * 1000ULL * 100ULL) /
+                                ((uint64_t)(dt ? dt : 1) *
+                                 (uint64_t)CAN_BITRATE_KBPS * 1000ULL));
+
+  if (g_rec.intStuck && !s_warnedIntStuck) {
+    s_warnedIntStuck = true;
+    LOG_LIVE(LVL_ERROR,
+      "CAN INTERRUPT NOT FIRING - running on the 20 ms fallback poll, which "
+      "caps at ~100 frames/s. Check the INT wire (MCP2515 INT -> D%d).",
+      PIN_CAN_INT);
+  } else if (!g_rec.intStuck && s_warnedIntStuck) {
+    s_warnedIntStuck = false;
+    LOG_LIVE(LVL_INFO, "CAN interrupt recovered - %lu irq/s",
+             (unsigned long)g_rec.irqRate);
+  }
+
   if (g_rec.canOk) {
-    LOG_LIVE(LVL_INFO,
-      "%s | %lu rows %lu KB | %lu f/s | %u ids%s | lost %lu",
+    LOG_LIVE(g_rec.intStuck ? LVL_WARN : LVL_INFO,
+      "%s | %lu rows %lu KB | rx=%lu/s irq=%lu/s INT=%s(%d) | %u ids%s | "
+      "q=%lu/%u peak=%lu sticky=%lu | lost %lu",
       state,
       (unsigned long)g_rec.rows, (unsigned long)(g_rec.bytes / 1024ULL),
-      (unsigned long)g_rec.frameRate, (unsigned)g_bus.used,
-      g_rec.dbcLoaded ? "" : " (raw)",
+      (unsigned long)g_rec.frameRate, (unsigned long)g_rec.irqRate,
+      g_rec.intStuck ? (g_rec.intLevel ? "DEAD" : "STUCK-LOW")
+                     : (g_rec.irqRate ? "ok" : "idle"),
+      (int)g_rec.intLevel,
+      (unsigned)g_bus.used, g_rec.dbcLoaded ? "" : " (raw)",
+      (unsigned long)qNow, (unsigned)FRAME_QUEUE_LEN,
+      (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.canIntfSticky,
       (unsigned long)(g_rec.queueDropped + g_rec.canOverflow));
   } else {
     LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC - check the wiring, the bit rate "

@@ -132,5 +132,20 @@ private:
 
 /* Writes the explanatory '#' header block plus the column header line. Returns
  * the number of bytes written, or 0 if it did not fit. */
+/* The CSV's one and only header line: just the column names.
+ *
+ * The legend that used to sit above this as a block of '#' comments now lives
+ * in a separate <n>.meta file. Tools that cannot be told to skip comments
+ * choked on it, and stripping it by hand before every analysis is not a
+ * workflow. The CSV is now pure data. */
+size_t csvColumnHeader(char *buf, size_t cap);
+
+/* The companion <n>.meta: everything needed to interpret the CSV, including
+ * the frame map that was active when the recording was made, as JSON so a tool
+ * can read it directly instead of parsing prose. Needs ~4 KB plus roughly
+ * 120 bytes per mapped signal. */
+size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
+                const DbcDb &db);
+
 size_t csvHeaderBlock(char *buf, size_t cap, const char *filename,
                       const DbcDb &db);

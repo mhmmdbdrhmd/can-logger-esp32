@@ -12,7 +12,7 @@
 <text x="770.0" y="195" class="f" font-size="11" text-anchor="middle">30-pin</text>
 <rect x="1040" y="178" width="250" height="241" class="board"/>
 <text x="1165.0" y="204" class="t" font-size="14.5" font-weight="600" text-anchor="middle">Micro-SD module</text>
-<text x="1165.0" y="223" class="f" font-size="11" text-anchor="middle">SPI, 3V3 logic</text>
+<text x="1165.0" y="223" class="f" font-size="11" text-anchor="middle">SPI, 3V3 logic, 5V power</text>
 <path d="M 500 196 H 640" class="wire" stroke="#F85149"/>
 <circle cx="500" cy="196" r="4.2" fill="#F85149"/>
 <text x="487" y="200.5" class="pin t" text-anchor="end">VCC</text>
@@ -48,10 +48,10 @@
 <text x="487" y="404.5" class="pin t" text-anchor="end">MOSI</text>
 <circle cx="640" cy="400" r="4.2" fill="#FF7B72"/>
 <text x="653" y="404.5" class="pin t" text-anchor="start">D23</text>
-<path d="M 900 230 H 1040" class="wire" stroke="#F85149"/>
-<circle cx="900" cy="230" r="4.2" fill="#F85149"/>
-<text x="887" y="234.5" class="pin t" text-anchor="end">3V3</text>
-<circle cx="1040" cy="230" r="4.2" fill="#F85149"/>
+<path d="M 900 230 H 1040" class="wire" stroke="#F0883E"/>
+<circle cx="900" cy="230" r="4.2" fill="#F0883E"/>
+<text x="887" y="234.5" class="pin t" text-anchor="end">VIN (5V)</text>
+<circle cx="1040" cy="230" r="4.2" fill="#F0883E"/>
 <text x="1053" y="234.5" class="pin t" text-anchor="start">VCC</text>
 <path d="M 900 264 H 1040" class="wire" stroke="#6E7681"/>
 <circle cx="900" cy="264" r="4.2" fill="#6E7681"/>
@@ -95,22 +95,26 @@
 <line x1="46" y1="526" x2="1374" y2="526" stroke="#30363D" stroke-width="1"/>
 <line x1="46" y1="556" x2="72" y2="556" class="wire" stroke="#F85149"/>
 <text x="80" y="560.5" class="lbl m">3V3</text>
-<line x1="138.8" y1="556" x2="164.8" y2="556" class="wire" stroke="#6E7681"/>
-<text x="172.8" y="560.5" class="lbl m">GND</text>
-<line x1="231.60000000000002" y1="556" x2="257.6" y2="556" class="wire" stroke="#F59E0B"/>
-<text x="265.6" y="560.5" class="lbl m">CS</text>
-<line x1="316.8" y1="556" x2="342.8" y2="556" class="wire" stroke="#A78BFA"/>
-<text x="350.8" y="560.5" class="lbl m">INT</text>
-<line x1="409.6" y1="556" x2="435.6" y2="556" class="wire" stroke="#58A6FF"/>
-<text x="443.6" y="560.5" class="lbl m">SCK</text>
-<line x1="502.40000000000003" y1="556" x2="528.4000000000001" y2="556" class="wire" stroke="#3FB950"/>
-<text x="536.4000000000001" y="560.5" class="lbl m">MISO</text>
-<line x1="602.8000000000001" y1="556" x2="628.8000000000001" y2="556" class="wire" stroke="#FF7B72"/>
-<text x="636.8000000000001" y="560.5" class="lbl m">MOSI</text>
-<line x1="703.2" y1="556" x2="729.2" y2="556" class="wire" stroke="#2DD4BF"/>
-<text x="737.2" y="560.5" class="lbl m">CAN</text>
+<line x1="138.8" y1="556" x2="164.8" y2="556" class="wire" stroke="#F0883E"/>
+<text x="172.8" y="560.5" class="lbl m">5V</text>
+<line x1="224.0" y1="556" x2="250.0" y2="556" class="wire" stroke="#6E7681"/>
+<text x="258.0" y="560.5" class="lbl m">GND</text>
+<line x1="316.8" y1="556" x2="342.8" y2="556" class="wire" stroke="#F59E0B"/>
+<text x="350.8" y="560.5" class="lbl m">CS</text>
+<line x1="402.0" y1="556" x2="428.0" y2="556" class="wire" stroke="#A78BFA"/>
+<text x="436.0" y="560.5" class="lbl m">INT</text>
+<line x1="494.8" y1="556" x2="520.8" y2="556" class="wire" stroke="#58A6FF"/>
+<text x="528.8" y="560.5" class="lbl m">SCK</text>
+<line x1="587.6" y1="556" x2="613.6" y2="556" class="wire" stroke="#3FB950"/>
+<text x="621.6" y="560.5" class="lbl m">MISO</text>
+<line x1="688.0" y1="556" x2="714.0" y2="556" class="wire" stroke="#FF7B72"/>
+<text x="722.0" y="560.5" class="lbl m">MOSI</text>
+<line x1="788.4" y1="556" x2="814.4" y2="556" class="wire" stroke="#2DD4BF"/>
+<text x="822.4" y="560.5" class="lbl m">CAN</text>
 <text x="46" y="598" class="lbl t" font-weight="600">Check the MCP2515 crystal.</text>
 <text x="243.79999999999998" y="598" class="lbl m">8 MHz or 16 MHz — set CAN_CRYSTAL_MHZ in src/config.h. The wrong value reports “NO CAN TRAFFIC” on a perfectly healthy bus.</text>
 <text x="46" y="620" class="lbl t" font-weight="600">Card format.</text>
 <text x="141.6" y="620" class="lbl m">Micro-SD must be FAT32. Cards over 32 GB usually ship as exFAT and have to be reformatted.</text>
+<text x="46" y="642" class="lbl t" font-weight="600">Power the SD module from VIN.</text>
+<text x="265.7" y="642" class="lbl m">Almost every breakout carries its own 3V3 regulator and wants 5 V. On 3V3 it browns out under write current and looks exactly like an empty slot.</text>
 </svg>

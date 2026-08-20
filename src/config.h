@@ -20,7 +20,7 @@
  *
  *   MCP2515 CAN module          ESP32            SD card module      ESP32
  *   ------------------          -----            --------------      -----
- *     VCC ....................  3V3                VCC ............. 3V3
+ *     VCC ....................  3V3                VCC ............. 5V (VIN)
  *     GND ....................  GND                GND ............. GND
  *     CS  ....................  D5                 CS  ............. D4
  *     INT ....................  D17                SCK ............. D14
@@ -125,6 +125,14 @@
 /* ---------------------------------------------------------------------------
  *  6. SD CARD / STORAGE
  * -------------------------------------------------------------------------*/
+/* Starting point only. Most micro-SD breakout boards carry a 3V3 regulator and
+ * level shifters and want 5V on VCC - the ESP32's VIN pin - even though the SPI
+ * lines themselves are 3V3. Wired to 3V3 they often brown out under a write and
+ * look exactly like a missing card.
+ *
+ * recorderBeginSD() falls back to 10, 4 and 1 MHz if the card will not mount at
+ * this speed, because breadboard jumpers and cheap adapters frequently will not
+ * carry 20 MHz and the failure is indistinguishable from "no card". */
 #define SD_SPI_HZ           20000000UL
 
 /* CSV rows accumulate in RAM and are handed to the card one full block at a

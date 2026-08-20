@@ -12,7 +12,7 @@ steht in [README.md](README.md), die ausführliche Windows-Anleitung in
 |---|---|
 | ESP32 DevKit v1 (30-polig) | jedes ESP32-Board geht, der Pinplan unten gilt für das 30-polige v1 |
 | MCP2515 + TJA1050 CAN-Modul | das übliche blaue Modul. **Quarz prüfen** — 8 MHz oder 16 MHz |
-| Micro-SD-Modul (SPI) | 3V3-Logik |
+| Micro-SD-Modul (SPI) | 3V3-Logik, aber **Versorgung über 5V (VIN)** |
 | Micro-SD-Karte, **FAT32** | Class 10 oder besser. Karten über 32 GB sind meist exFAT und müssen neu formatiert werden |
 | 120 Ω Widerstand | nur wenn der Logger am Busende sitzt |
 
@@ -30,13 +30,19 @@ lange blockieren.
 
 | MCP2515 | ESP32 | | SD-Karte | ESP32 |
 |---|---|---|---|---|
-| VCC | 3V3 | | VCC | 3V3 |
+| VCC | 3V3 | | VCC | **5V (VIN)** |
 | GND | GND | | GND | GND |
 | CS  | **D5**  | | CS   | **D4**  |
 | INT | **D17** | | SCK  | **D14** |
 | SCK | D18 | | MISO | **D27** |
 | MISO| D19 | | MOSI | **D13** |
 | MOSI| D23 | | | |
+
+> **SD-Modul an 5V (VIN) versorgen, nicht an 3V3.** Fast alle Micro-SD-Platinen
+> haben einen eigenen 3V3-Regler samt Pegelwandlern und erwarten 5 V an VCC. An
+> 3V3 bricht die Spannung beim Schreiben ein, und `SD.begin()` scheitert genau
+> so, als steckte gar keine Karte im Slot. Die SPI-Leitungen bleiben in beiden
+> Fällen 3V3. Nur bei den seltenen Platinen ohne Regler ist 3V3 richtig.
 
 Busseite: `CAN_H` und `CAN_L` an den Bus, `GND` an die Busmasse. Voreingestellt
 sind **250 kBit/s**.
@@ -130,7 +136,8 @@ steuern.
 
 | Meldung | Ursache |
 |---|---|
-| `SD CARD NOT FOUND` | Karte nicht FAT32, oder Verdrahtung: CS=D4, SCK=D14, MISO=D27, MOSI=D13 |
+| `NO SD CARD at any clock ...` | Zuerst die **Versorgung** prüfen: die meisten Module brauchen 5V an VIN, nicht 3V3. Dann: Karte FAT32? Verdrahtung CS=D4, SCK=D14, MISO=D27, MOSI=D13 |
+| `SD card needed a slower clock` | Kein Fehler — die Karte ist eingebunden, nur unterhalb von `SD_SPI_HZ`. Ursache sind lange Jumper oder ein billiger Adapter. |
 | `CAN CONTROLLER NOT RESPONDING` | Verdrahtung oder Spannung des MCP2515: CS=D5, 3V3 |
 | `NO CAN TRAFFIC`, Bus läuft aber | falscher `CAN_CRYSTAL_MHZ` (8 statt 16), falsche Baudrate, oder CAN_H/CAN_L vertauscht |
 | `no /frames.dbc on the card` | keine DBC auf der Karte — es wird alles als Rohdaten aufgezeichnet (kein Fehler) |

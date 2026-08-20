@@ -66,7 +66,7 @@ nothing and it logs raw frames. The same binary does both.
 |---|---|
 | **ESP32 DevKit v1** (30-pin) | Any ESP32 dev board works; the pin map below is for the 30-pin v1. |
 | **MCP2515 + TJA1050 CAN module** | The common blue module. **Check the crystal** — 8 MHz or 16 MHz, see below. |
-| **Micro-SD card module** (SPI) | 3V3 logic. Modules with a 5 V regulator and level shifters also work off 5 V. |
+| **Micro-SD card module** (SPI) | 3V3 signalling, but **power it from 5V (VIN)** — see §2. |
 | **Micro-SD card**, FAT32 | Class 10 or better. Cards over 32 GB usually ship as exFAT and must be reformatted. |
 | 120 Ω resistor | Only if the logger sits at the physical end of the bus. |
 | 6800 µF / 10 V electrolytic + a diode | Optional, for the power-fail input — see §8. |
@@ -88,13 +88,24 @@ sharing one bus would stall CAN reads for exactly that long.
 
 | MCP2515 | ESP32 | | SD card | ESP32 |
 |---|---|---|---|---|
-| VCC | 3V3 | | VCC | 3V3 |
+| VCC | 3V3 | | VCC | **5V (VIN)** |
 | GND | GND | | GND | GND |
 | CS  | **D5**  | | CS   | **D4**  |
 | INT | **D17** | | SCK  | **D14** |
 | SCK | D18 (VSPI) | | MISO | **D27** |
 | MISO| D19 | | MOSI | **D13** |
 | MOSI| D23 | | | (HSPI) |
+
+> **Power the SD module from 5V (VIN), not 3V3.** Almost all micro-SD breakout
+> boards carry their own 3V3 regulator and level shifters, and expect 5 V on
+> VCC. On 3V3 the regulator has no headroom, the card browns out the moment it
+> draws write current, and `SD.begin()` fails in a way that is indistinguishable
+> from an empty slot. The SPI lines stay 3V3 either way. If your module is one
+> of the bare ones with no regulator, 3V3 is correct for it — check the board.
+>
+> If the card still will not mount, it is usually the clock rather than the
+> card: the firmware retries at 10, 4 and 1 MHz and logs which speed it took,
+> because breadboard jumpers and cheap adapters often will not carry 20 MHz.
 
 Bus side: `CAN_H` and `CAN_L` to the bus, `GND` to the bus ground. Default bit
 rate is **250 kbit/s** (`CAN_BITRATE_KBPS`); 100, 125, 250, 500 and 1000 are
@@ -613,7 +624,8 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 | Last seconds missing after a power cut | Expected without the power-fail input — see §8. If `maxSync` is large the card is slow at committing metadata. |
 | File exists but has only the header | Power was cut in the first second. The header is committed at start, so this is the floor, not corruption. |
 | The other node goes error-passive | `CAN_LISTEN_ONLY = 1` with nothing else on the bus to ACK. |
-| `SD CARD NOT FOUND` | Card must be FAT32. Cards over 32 GB often ship as exFAT. Re-check CS=D4, SCK=D14, MISO=D27, MOSI=D13. |
+| `NO SD CARD at any clock ...` | First suspect **power**: most modules need 5V on VIN, not 3V3. Then: card must be FAT32 (cards over 32 GB often ship as exFAT), and CS=D4, SCK=D14, MISO=D27, MOSI=D13. |
+| `SD card needed a slower clock` | Not an error — it mounted, just below `SD_SPI_HZ`. Long jumpers, a cheap adapter or a ribbon to a panel-mounted slot. Shorten the wiring if `lost` climbs; otherwise ignore it. |
 | Dashboard unreachable | Check `mode` in `/config.txt`; on `sta` failure it falls back to the `CAN-Logger` hotspot. |
 | `Wrong boot mode detected (0x13)` | Flashing, not running — see [WINDOWS.md](WINDOWS.md). |
 

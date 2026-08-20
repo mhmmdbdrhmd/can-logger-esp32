@@ -63,7 +63,39 @@ uint32_t recorderElapsedMs() {
 bool recorderBeginSD() {
   s_sdSpi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
 
-  if (!SD.begin(PIN_SD_CS, s_sdSpi, SD_SPI_HZ)) {
+  /* Try progressively slower clocks before giving up.
+   *
+   * SD.begin() reports the same failure for "there is no card" and "this
+   * wiring will not carry 20 MHz", which sends you hunting for a dead card or
+   * a wrong CS pin when the real fault is 10 cm of breadboard jumper, a cheap
+   * adapter board with no level shifter, or a long ribbon to a panel-mounted
+   * slot. All of those work perfectly at 4 MHz. Losing a little write
+   * throughput beats not mounting at all - and the log says which one it took,
+   * so a card that needed 1 MHz is not a silent mystery later. */
+  static const uint32_t SPEEDS[] = { SD_SPI_HZ, 10000000UL, 4000000UL, 1000000UL };
+
+  bool mounted = false;
+  for (uint8_t i = 0; i < sizeof(SPEEDS) / sizeof(SPEEDS[0]); i++) {
+    if (SD.begin(PIN_SD_CS, s_sdSpi, SPEEDS[i])) {
+      if (i) {
+        LOG_LIVE(LVL_WARN, "SD card needed a slower clock: %lu kHz instead of "
+                           "%lu kHz - check the wiring if writes cannot keep up",
+                 (unsigned long)(SPEEDS[i] / 1000UL),
+                 (unsigned long)(SD_SPI_HZ  / 1000UL));
+      }
+      mounted = true;
+      break;
+    }
+    SD.end();
+    delay(50);          /* let the card settle before re-clocking it */
+  }
+
+  if (!mounted) {
+    LOG_LIVE(LVL_ERROR, "NO SD CARD at any clock down to %lu kHz - check that "
+                        "the module is powered (many need 5V/VIN, not 3V3), "
+                        "that the card is FAT32, and CS=D%d",
+             (unsigned long)(SPEEDS[sizeof(SPEEDS) / sizeof(SPEEDS[0]) - 1] / 1000UL),
+             PIN_SD_CS);
     g_rec.sdOk = false;
     return false;
   }
@@ -74,7 +106,9 @@ bool recorderBeginSD() {
     case CARD_SDHC: g_rec.sdType = "SDHC";  break;
     default:        g_rec.sdType = "NONE";  break;
   }
-  if (SD.cardType() == CARD_NONE) { g_rec.sdOk = false; return false; }
+  /* Mounted, but the card answers as no card - release the bus rather than
+   * leaving a half-initialised SD driver holding it. */
+  if (SD.cardType() == CARD_NONE) { SD.end(); g_rec.sdOk = false; return false; }
 
   g_rec.sdSizeMB = SD.cardSize() / (1024ULL * 1024ULL);
   g_rec.sdOk     = true;

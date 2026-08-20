@@ -18,6 +18,7 @@ FAINT   = "#6E7681"
 
 NET = {                       # net -> colour
     "3V3":  "#F85149",
+    "5V":   "#F0883E",
     "GND":  "#6E7681",
     "CS":   "#F59E0B",
     "INT":  "#A78BFA",
@@ -31,7 +32,7 @@ NET = {                       # net -> colour
 CAN_LINKS = [("VCC", "3V3", "3V3"), ("GND", "GND", "GND"), ("CS", "D5", "CS"),
              ("INT", "D17", "INT"), ("SCK", "D18", "SCK"), ("MISO", "D19", "MISO"),
              ("MOSI", "D23", "MOSI")]
-SD_LINKS  = [("VCC", "3V3", "3V3"), ("GND", "GND", "GND"), ("CS", "D4", "CS"),
+SD_LINKS  = [("VCC", "VIN (5V)", "5V"), ("GND", "GND", "GND"), ("CS", "D4", "CS"),
              ("SCK", "D14", "SCK"), ("MISO", "D27", "MISO"), ("MOSI", "D13", "MOSI")]
 
 PITCH   = 34
@@ -79,7 +80,7 @@ def board(x, y, w, h, title, sub):
 
 board(*MCP, "MCP2515 + TJA1050", "CAN controller")
 board(*ESP, "ESP32 DevKit v1", "30-pin")
-board(*SD,  "Micro-SD module", "SPI, 3V3 logic")
+board(*SD,  "Micro-SD module", "SPI, 3V3 logic, 5V power")
 
 def pin(x, y, text, inward, colour):
     """Dot sits on the board edge; the label sits INSIDE the board.
@@ -139,7 +140,7 @@ add(f'<text x="{SD[0] + SD[2]/2}" y="{SD[1] + SD[3] + 26}" class="lbl m" '
 # ── legend ───────────────────────────────────────────────────────────────────
 LY = 556
 add(f'<line x1="46" y1="{LY - 30}" x2="{W-46}" y2="{LY - 30}" stroke="{EDGE}" stroke-width="1"/>')
-order = ["3V3", "GND", "CS", "INT", "SCK", "MISO", "MOSI", "CAN"]
+order = ["3V3", "5V", "GND", "CS", "INT", "SCK", "MISO", "MOSI", "CAN"]
 x = 46
 for net in order:
     col = NET[net]
@@ -153,6 +154,9 @@ notes = [
      "The wrong value reports “NO CAN TRAFFIC” on a perfectly healthy bus."),
     ("Card format.", "Micro-SD must be FAT32. Cards over 32 GB usually ship as exFAT "
      "and have to be reformatted."),
+    ("Power the SD module from VIN.", "Almost every breakout carries its own 3V3 "
+     "regulator and wants 5 V. On 3V3 it browns out under write current and looks "
+     "exactly like an empty slot."),
 ]
 ny = LY + 42
 for head, body in notes:

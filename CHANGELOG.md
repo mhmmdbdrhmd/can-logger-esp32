@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Removed — "this logger stands in for"
+
+The setup sheet carried a node picker: a `.dbc` names the node that transmits
+each message, and naming which of them the logger was let the two Fill buttons
+split the frame map into readings to watch and values to write.
+
+It is gone, and so is the `node` line it wrote into `/dash.cfg`. It saved a
+little sorting on one press of one button, and cost an explanation every time
+anyone met it — including the reasonable assumption that "Host" was a role the
+logger has rather than a name that happened to be in the example files. A
+control that has to be explained before it can be ignored is not worth its
+place, and both Fill buttons now simply offer everything.
+
+- **A setup file exported before this still imports.** The parser walks past
+  the `node` line and does not write it back out; the test suite pins both.
+- **Nothing else changes.** The setting never reached the firmware's receive or
+  transmit path — every frame was always recorded whoever the file said sent
+  it, and the frame put on the wire never depended on it.
+- The DBC's transmitter is still parsed and still reported by
+  `tools/check_dbc.py` under *who sends what*. Nothing acts on it.
+- The Send tab's Fill button now says *"Add every signal in every message"* when
+  the list is set to every message, instead of always claiming "this message".
+
+Flash is 4,336 bytes smaller; static RAM is unchanged.
+
 ## v1.0.0
 
 First tagged release.

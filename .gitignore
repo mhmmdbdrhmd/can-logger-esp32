@@ -44,6 +44,13 @@ venv/
 # reproducible from the tag.
 dist/
 
+# ---- desk-setup output ----------------------------------------------------
+# customise.py and the capture tools write the setup they build next to the
+# .dbc they were pointed at. That file is the user's, and in examples/ it is a
+# leftover of running the tools rather than anything to keep.
+*.cfg
+!examples/dash.cfg
+
 # ---- local overrides ------------------------------------------------------
 config.txt
 !examples/config.txt

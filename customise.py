@@ -169,7 +169,6 @@ def main():
     print("""
   1. Dashboard -> Customise dashboard -> Fill from frame map
   2. Send -> Set up sendable values -> Fill from the frame map
-  3. Setup file -> say which node this logger stands in for
 
   Then copy onto the SD card:
       %s   ->  /frames.dbc

@@ -330,12 +330,6 @@ bool dashParseLine(DashConfig &c, char *line) {
     c.pollMs = (uint16_t)ms;
     return true;
   }
-  if (!strcmp(kw, "node")) {
-    char v[DASH_NODE_MAX + 8];
-    if (!nextToken(&p, v, sizeof(v))) return false;
-    copyBounded(c.node, sizeof(c.node), v);
-    return true;
-  }
   if (!strcmp(kw, "cell")) return parseCell(c, p);
   if (!strcmp(kw, "send")) return parseSend(c, p);
   if (!strcmp(kw, "version")) return true;      /* recorded, not acted on */
@@ -414,7 +408,6 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       "#\n"
       "#   grid <cols> <rows>          the layout\n"
       "#   poll <ms>                   how often the browser asks for values\n"
-      "#   node \"<Name>\"               which BU_ node this logger stands in for\n"
       "#   cell <slot> widget=.. sig=Message.Signal lo=.. hi=..\n"
       "#   send <n> label=\"..\" sig=Message.Signal lo=.. hi=..\n"
       "#              group=<n>        values sharing a group leave in ONE frame\n"
@@ -430,12 +423,6 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
   n = appendStr(out, cap, n, "\npoll ");
   n = appendInt(out, cap, n, c.pollMs);
   n = appendStr(out, cap, n, "\n");
-  if (c.node[0]) {
-    n = appendStr(out, cap, n, "node ");
-    n = appendValue(out, cap, n, c.node);
-    n = appendStr(out, cap, n, "\n");
-  }
-
   const uint8_t cells = dashCellCount(c);
   bool any = false;
   for (uint8_t i = 0; i < cells; i++) {

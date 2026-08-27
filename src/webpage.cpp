@@ -649,15 +649,6 @@ static const char PAGE_2[] PROGMEM = R"HTML(
       <div class="sub" id="cfgbytes">&nbsp;</div>
     </div>
 
-    <h4>This logger stands in for</h4>
-    <div class="sub">A <code>.dbc</code> names the node that <b>sends</b> each
-      message. Say which of them this logger is, and the two Fill buttons stop
-      offering each other&rsquo;s messages: what your node sends are values to
-      write, everything else are readings to watch. Nothing about recording
-      changes &mdash; every frame that arrives is still logged.</div>
-    <select id="cfgnode"></select>
-    <div class="sub" id="cfgnodenote">&nbsp;</div>
-
     <h4>Export</h4>
     <div class="sub">Downloads the file <b>to the phone or laptop you are
       holding</b>, into its downloads folder. Nothing on the logger changes and
@@ -727,7 +718,7 @@ function hms(s){
  *  first. The device re-serialises whatever it receives, so its writer stays
  *  the one that decides the canonical form.
  * -------------------------------------------------------------------------*/
-var CFG = { cols:4, rows:2, poll:200, node:'', cells:{}, tx:{} };
+var CFG = { cols:4, rows:2, poll:200, cells:{}, tx:{} };
 /* How many cells this firmware can store. Told to us by /api/dash rather than
    written down here, so the two cannot drift apart. */
 var MAXCELLS = 48, MAXSEND = 32;
@@ -781,7 +772,7 @@ function numOr(v, dflt){
 }
 
 function parseCfg(text){
-  var c = { cols:4, rows:2, poll:200, node:'', cells:{}, tx:{} };
+  var c = { cols:4, rows:2, poll:200, cells:{}, tx:{} };
   text.split(/\r?\n/).forEach(function(line){
     line = line.replace(/^\s+/, '');
     if(!line || line[0] === '#') return;
@@ -795,8 +786,6 @@ function parseCfg(text){
       c.rows = Math.max(1, Math.min(8, parseInt(g[1], 10) || 2));
     } else if(kw === 'poll'){
       c.poll = Math.max(100, Math.min(5000, parseInt(rest, 10) || 200));
-    } else if(kw === 'node'){
-      c.node = rest.trim().replace(/^"|"$/g, '');
     } else if(kw === 'cell' || kw === 'send'){
       var sp2 = rest.indexOf(' ');
       if(sp2 < 0) return;
@@ -844,7 +833,6 @@ function trimNum(v){
 
 function dumpCfg(){
   var out = ['version 1', 'grid ' + CFG.cols + ' ' + CFG.rows, 'poll ' + CFG.poll];
-  if(CFG.node) out.push('node ' + quote(CFG.node));
   Object.keys(CFG.cells).map(Number).sort(function(a,b){return a-b;}).forEach(function(i){
     var c = CFG.cells[i];
     if(!c || !c.sig) return;
@@ -1802,12 +1790,8 @@ function fillCells(source){
     var taken = {};
     Object.keys(CFG.cells).forEach(function(k){ taken[CFG.cells[k].sig] = 1; });
 
-    var pick = [], skipped = 0;
+    var pick = [];
     DBC.m.forEach(function(m){
-      /* A message this logger is the one transmitting is a command, not a
-         reading. Its "value" is whatever we last wrote, which is not
-         something to watch on a gauge. */
-      if(CFG.node && m.tx === CFG.node){ skipped++; return; }
       m.s.forEach(function(s){
         var ref = m.n + '.' + s.n;
         if(!taken[ref]) pick.push({ref:ref, s:s, live:live[ref] ? 1 : 0});
@@ -1846,8 +1830,6 @@ function fillCells(source){
             + 'change how it is drawn', 'ok');
     } else {
       toast('Filled from the frame map', added + ' cell(s) added'
-            + (skipped ? ', ' + skipped + ' command message(s) left for the '
-                       + 'Send tab' : '')
             + ' — drag them around, or tap one to change how it is drawn', 'ok');
     }
   });
@@ -2817,18 +2799,11 @@ function fillFromMessage(m){
 function txFillFromMap(){
   var pick = q('txfillmsg').value;
 
-  /* Which messages are on the table. With a node set, only the ones this
-     logger is the one transmitting - writing a frame the ECU sends means two
-     nodes talking over each other on the same identifier. */
   var list;
   if(pick === 'all'){
-    list = DBC.m.filter(function(m){
-      return (!CFG.node || m.tx === CFG.node) && m.s.length;
-    });
+    list = DBC.m.filter(function(m){ return m.s.length; });
     if(!list.length){
-      toast('Nothing to add', CFG.node
-        ? 'Nothing in the frame map is sent by ' + CFG.node
-        : 'The frame map has no messages', 'bad');
+      toast('Nothing to add', 'The frame map has no messages', 'bad');
       return;
     }
   } else {
@@ -2882,33 +2857,29 @@ function openTxEdit(){
       /* The whole lot in one press, which is what most people want: a bus
          usually has one or two command frames and no reason to add them one
          at a time. */
-      var mine = DBC.m.filter(function(m){
-        return (!CFG.node || m.tx === CFG.node) && m.s.length;
-      });
-      var all = el('option', null, CFG.node
-        ? 'every message ' + CFG.node + ' sends  (' + mine.length + ')'
-        : 'every message in the frame map  (' + mine.length + ')');
+      var usable = DBC.m.filter(function(m){ return m.s.length; });
+      var all = el('option', null,
+                   'every message in the frame map  (' + usable.length + ')');
       all.value = 'all';
       sel.appendChild(all);
 
-      /* Messages this logger transmits first, and the rest marked, because
-         writing a frame the ECU is the one sending is almost always a
-         mistake - two nodes talking over each other on the same id. */
-      var order = DBC.m.map(function(m, i){ return {m:m, i:i}; });
-      if(CFG.node){
-        order.sort(function(a, b){
-          return (b.m.tx === CFG.node ? 1 : 0) - (a.m.tx === CFG.node ? 1 : 0);
-        });
-      }
-      order.forEach(function(e2){
-        var m = e2.m;
-        var mine = !CFG.node || m.tx === CFG.node;
+      /* Frame-map order, which is the order they appear in the file and so the
+         order someone reading that file expects to find them in. */
+      DBC.m.forEach(function(m, i){
         var o = el('option', null, m.n + '  ' + m.id + '  ('
-                   + m.s.length + ' signal' + (m.s.length === 1 ? '' : 's') + ')'
-                   + (mine ? '' : '  — sent by ' + (m.tx || 'someone else')));
-        o.value = e2.i;
+                   + m.s.length + ' signal' + (m.s.length === 1 ? '' : 's') + ')');
+        o.value = i;
         sel.appendChild(o);
       });
+
+      /* The button said "in this message" whatever the list was set to, which
+         reads as a contradiction when the list says every message. */
+      sel.onchange = function(){
+        q('txfill').textContent = sel.value === 'all'
+          ? 'Add every signal in every message'
+          : 'Add every signal in this message';
+      };
+      sel.onchange();
     }
 
     renderTxEdit();
@@ -2962,64 +2933,6 @@ function importSetup(){ q('filepick').click(); }
 document.querySelectorAll('.cfgexport').forEach(function(b){ b.onclick = exportSetup; });
 document.querySelectorAll('.cfgimport').forEach(function(b){ b.onclick = importSetup; });
 
-/* Which node this logger stands in for. One control, in one place, because it
-   is a property of the whole setup rather than of either screen that reads it.
-   The suggestion is the node that transmits the FEWEST messages: on a bus with
-   an ECU and a tool, the tool is the one that barely talks. It is a guess and
-   is labelled as one. */
-function suggestNode(){
-  if(!DBC.nodes || DBC.nodes.length < 2) return '';
-  var count = {};
-  DBC.nodes.forEach(function(n){ count[n] = 0; });
-  DBC.m.forEach(function(m){ if(m.tx && count[m.tx] !== undefined) count[m.tx]++; });
-  var best = '', bestN = 1e9;
-  DBC.nodes.forEach(function(n){
-    if(count[n] > 0 && count[n] < bestN){ bestN = count[n]; best = n; }
-  });
-  return best;
-}
-function renderNodePick(){
-  var sel = q('cfgnode'), note = q('cfgnodenote');
-  sel.innerHTML = '';
-  var nodes = DBC.nodes || [];
-
-  var none = el('option', null, nodes.length
-    ? '— none: offer every message on both screens —'
-    : 'the frame map names no nodes');
-  none.value = '';
-  if(!CFG.node) none.selected = true;
-  sel.appendChild(none);
-
-  var counts = {};
-  DBC.m.forEach(function(m){ if(m.tx) counts[m.tx] = (counts[m.tx] || 0) + 1; });
-  nodes.forEach(function(n){
-    var k = counts[n] || 0;
-    var o = el('option', null, n + '  (sends ' + k + ' message'
-                                + (k === 1 ? '' : 's') + ')');
-    o.value = n;
-    if(CFG.node === n) o.selected = true;
-    sel.appendChild(o);
-  });
-  sel.disabled = !nodes.length;
-
-  if(CFG.node){
-    var mine = DBC.m.filter(function(m){ return m.tx === CFG.node; })
-                    .map(function(m){ return m.n; });
-    note.innerHTML = mine.length
-      ? 'Fill on the Send tab offers <b>' + mine.join('</b>, <b>')
-        + '</b>. Fill on the dashboard offers everything else.'
-      : 'Nothing in the frame map is sent by <b>' + CFG.node + '</b>, so there '
-        + 'is nothing for this logger to write.';
-  } else {
-    var g = suggestNode();
-    note.innerHTML = g
-      ? 'Not set, so both Fill buttons offer everything. <b>' + g + '</b> looks '
-        + 'like the tool rather than the machine — it sends the fewest messages '
-        + '— but that is a guess from the file, not something it states.'
-      : '&nbsp;';
-  }
-}
-
 q('setupbtn').onclick = function(){
   /* Counted from the logger's own copy, not this browser's, so the sheet
      reports what would actually be exported. */
@@ -3032,14 +2945,8 @@ q('setupbtn').onclick = function(){
     q('cfgsummary').textContent = c + ' dashboard cell' + (c === 1 ? '' : 's')
                                 + ' · ' + v + ' sendable value' + (v === 1 ? '' : 's');
     q('cfgbytes').textContent = t.length + ' bytes of /dash.cfg';
-    renderNodePick();
     q('cfgsheet').classList.add('on');
   });
-};
-q('cfgnode').onchange = function(){
-  CFG.node = q('cfgnode').value;
-  renderNodePick();
-  saveCfg();
 };
 q('cfg_close').onclick = function(){ q('cfgsheet').classList.remove('on'); };
 q('cfgsheet').onclick = function(e){

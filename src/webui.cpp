@@ -381,17 +381,7 @@ static void handleSignals() {
   j = "{\"loaded\":";
   j += g_dbc.loaded ? 1 : 0;
 
-  /* The BU_ node list, and further down each message's transmitter. This is
-   * the only thing a DBC says about direction, and it is what lets the
-   * customiser stop offering command frames as gauges. */
-  j += ",\"nodes\":[";
-  for (uint8_t i = 0; i < g_dbc.nodeCount; i++) {
-    if (i) j += ',';
-    j += '"'; jsonStr(j, g_dbc.node[i]); j += '"';
-  }
-  j += "],\"me\":\"";
-  jsonStr(j, g_dash.node);
-  j += "\",\"m\":[";
+  j += ",\"m\":[";
 
   char num[40];
   for (uint16_t mi = 0; mi < g_dbc.msgCount; mi++) {

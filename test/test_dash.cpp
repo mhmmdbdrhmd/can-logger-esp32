@@ -124,8 +124,15 @@ int main() {
       "send 2 label=\"Axle load\" sig=WheelInfo.Load lo=0 hi=9000 step=10 preset=0 group=2\n"
       "send 3 label=\"Wake node\" id=0x700 data=00 cyclic=500\n");
 
-    ck("the node this logger stands in for is kept",
-       strcmp(a.node, "Tester") == 0, a.node);
+    /* `node` was a setting until it was removed for being more confusing than
+       useful. A setup file exported before then still carries the line, so
+       the parser has to walk past it without complaining and without leaving
+       it in what it writes back out - otherwise every old export imports as
+       an error, or resurrects a keyword nothing reads. */
+    ck("a setup file from before the node setting still parses",
+       dashParse(a, "node Tester\n", 12) == 0, "0 errors");
+    ck("and the removed keyword is not written back out",
+       dump(a).find("node ") == std::string::npos, "absent");
     ck("values that leave together keep their group",
        a.tx[1].group == 2 && a.tx[2].group == 2 && a.tx[0].group == 0,
        std::to_string(a.tx[1].group) + "/" + std::to_string(a.tx[2].group));

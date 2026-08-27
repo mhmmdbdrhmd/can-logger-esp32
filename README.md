@@ -174,12 +174,13 @@ Copy [`examples/example.dbc`](examples/example.dbc) to the card as
 | `BA_ "Unwrap" SG_ <id> <Sig> 1;` | Yes — see [free-running counters](#free-running-counters) |
 | `CM_`, `NS_`, `BS_`, `BA_DEF_` | Parsed past and ignored |
 
-**The transmitter is the only direction a DBC states.** Nothing in the recording
-path acts on it — a frame that arrives is recorded whoever the file says sends
-it — but it is what lets the customiser tell a reading from a command, once you
-say [which node this logger stands in for](#the-setup-file). It also drives the
-automatic multiplexor write when
-[a frame only means anything whole](#frames-that-only-mean-anything-whole).
+**The transmitter is the only direction a DBC states**, and nothing here acts on
+it: a frame that arrives is recorded whoever the file says sends it. It is
+parsed, exposed on `/api/dbc`, and printed by
+[`check_dbc.py`](#checking-a-frame-map-on-its-own) under *who sends what*, which
+is useful when you are working out what a bus is doing. There was once a setting
+that used it to split the two Fill buttons between readings and commands; it was
+removed for costing more explaining than it saved.
 
 **Deliberately not supported**, so you are not surprised later:
 
@@ -580,19 +581,9 @@ Nothing on the logger changes and no card is written, so it is safe to press
 mid-recording. **Import replaces both halves at once**, on the card and in the
 logger's own memory.
 
-The same sheet holds **this logger stands in for**, because it is a property of
-the whole setup rather than of either screen that reads it. A DBC's `BO_` line
-names the node that *transmits* each message:
-
-```
-BO_ 256 NodeStatus:  8 NodeA     the ECU sends it   -> a reading
-BO_ 288 HostCommand: 8 Host      the tool sends it  -> a command
-```
-
-Say which of those nodes this logger replaces and the two Fill buttons stop
-offering each other's messages. Nothing about recording changes — every frame
-that arrives is logged whoever the file says sends it. Leave it unset and both
-Fill buttons offer everything, as before.
+That is the whole sheet: what is on the logger now, Export, Import. Both Fill
+buttons offer every message in the frame map, and which of them you want on a
+gauge and which you want to write is a judgement the file cannot make for you.
 
 Two copies, one rule — because this is set up **at a desk, before you go out**,
 and has to be there when you arrive.
@@ -685,23 +676,18 @@ That one command:
 
 Then, in the page:
 
-**1. Say who you are.** *Setup file* → **This logger stands in for**. A `.dbc`
-names the node that *sends* each message, so once the logger has an identity the
-two Fill buttons stop offering each other's messages — what your node sends are
-values to write, everything else are readings to watch.
-
-**2. Build the dashboard.** *Customise dashboard* → **Fill from frame map**. Every
+**1. Build the dashboard.** *Customise dashboard* → **Fill from frame map**. Every
 signal becomes a cell, drawn as its unit and name suggest. Delete what you do not
 want, drag the rest into order, tap any cell to change the shape, the range or the
 thresholds. Removing one closes the gap. The values moving on them are invented —
 the point is the layout.
 
-**3. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
+**2. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
 the frame map**, and pick the message your controller takes its settings from.
 Then fix the inputs: the one that should be a list of four tyre sizes becomes
 *Pick from a list I write*.
 
-**4. Take it with you.** Copy two files to the root of the SD card:
+**3. Take it with you.** Copy two files to the root of the SD card:
 
 ```
 mine.dbc   ->  /frames.dbc
@@ -789,9 +775,9 @@ a recording is running**, so the change and its effect land in the same file.
 
 ![Setting up what can be sent](docs/img/sending.gif)
 
-*Saying which node the logger stands in for, filling the sendable values from
-the frame map, arming, and sending. The frame it writes carries `Command = 32`
-because the `.dbc` says that is the opcode `WheelDia_mm` belongs to.*
+*Filling the sendable values from the frame map, arming, and sending. The frame
+it writes carries `Command = 32` because the `.dbc` says that is the opcode
+`WheelDia_mm` belongs to.*
 
 ![The Send tab](docs/img/send-values.png)
 
@@ -1229,7 +1215,7 @@ translation units under `-Wall -Wextra`:
 
 ```
 RAM:   [==        ]  24.9% (used 81464 bytes from 327680 bytes)
-Flash: [=====     ]  54.7% (used 1075849 bytes from 1966080 bytes)
+Flash: [=====     ]  54.5% (used 1071513 bytes from 1966080 bytes)
 ```
 
 Flash sits at 55 % of one 1.9 MB app slot, so the OTA partition scheme still has
@@ -1259,7 +1245,7 @@ browser alike, and JavaScript's bitwise operators are 32-bit whatever you do to
 them. Going past 32 needs a different representation, not a bigger number in
 `config.h`.
 
-**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 311
+**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 312
 assertions across the DBC parser, the signal encoder, the CSV schema, the CANopen
 layer, the MCP2515 driver, the saved dashboard and the logger, and all pass. That
 covers Intel and Motorola bit extraction, signed values, exact decimal scaling,

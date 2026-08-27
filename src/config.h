@@ -343,7 +343,6 @@
 /* Serialised size of the whole configuration - layout and setpoints. Also the
  * size of the buffer it is built in, so it is charged to the stack of whoever
  * saves, not held permanently. */
-#define DASH_NODE_MAX       24
 #define DASH_CFG_MAX        6144
 
 /* ---------------------------------------------------------------------------

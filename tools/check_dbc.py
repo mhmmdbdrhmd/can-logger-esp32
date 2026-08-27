@@ -135,8 +135,8 @@ def check(path, show_list=False, quiet=False):
         print("\n  who sends what")
         for who, what in sends.items():
             print("    %-16s %s" % (who, ", ".join(what)))
-        print("    Set 'This logger stands in for' in the web app's Setup file")
-        print("    sheet to the node this logger replaces.")
+        print("    Nothing acts on this - a frame is recorded whoever the file")
+        print("    says sends it - but it tells you which of these you would be.")
 
     muxed = [m for m in db["m"] if m["mux"]]
     if muxed:

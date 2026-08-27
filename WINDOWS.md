@@ -398,13 +398,10 @@ everything you build into a `.cfg` next to your `.dbc`.
 
 In the page:
 
-1. **Setup file → This logger stands in for.** A DBC names the node that *sends*
-   each message; saying which one this logger replaces stops the two Fill buttons
-   offering each other's messages.
-2. **Dashboard → Customise dashboard → Fill from frame map.** Every signal
+1. **Dashboard → Customise dashboard → Fill from frame map.** Every signal
    becomes a gauge, a bar, a thermometer or a state pill, picked from its unit
    and name. Drag them around, tap one to change it, delete what you do not want.
-3. **Send → Set up sendable values → Fill from the frame map.** Pick the message
+2. **Send → Set up sendable values → Fill from the frame map.** Pick the message
    your controller takes its settings from.
 
 Close the window when you are done, then copy **both** files to the card:

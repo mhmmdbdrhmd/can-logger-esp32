@@ -166,14 +166,6 @@ struct DashConfig {
   uint8_t   rows;
   uint16_t  pollMs;      /* how often the browser asks for values            */
 
-  /* Which node in the frame map this logger stands in for, or "" for none.
-   * Purely an authoring aid: with it set, the customiser knows that messages
-   * this node transmits are things to SEND and everything else is things to
-   * WATCH, and stops offering each list to the wrong screen. The firmware
-   * itself never filters on it - a frame that arrives is recorded whoever the
-   * file says sends it. */
-  char      node[DASH_NODE_MAX];
-
   DashCell  cell[DASH_MAX_CELLS];
   TxCommand tx[TX_MAX_COMMANDS];
 };

@@ -223,23 +223,11 @@ def scene_send(page, rec):
     rec.hold(0.8)
     rec.caption("Values you can write back to the bus", 1.6)
 
-    # Say who we are first: a .dbc names the node that SENDS each message, and
-    # that is what separates a reading from a command.
-    rec.caption("Setup file - say which node this logger stands in for", 1.6)
-    page.click("#setupbtn")
-    rec.hold(1.6)
-    page.js("q('cfgsheet').querySelector('.sheetbox').scrollTop=150")
-    rec.hold(0.8)
-    page.js("CFG.node='Host';q('cfgnode').value='Host';renderNodePick();")
-    rec.hold(2.0)
-    page.click("#cfg_close")
-    rec.hold(0.8)
-
     rec.caption("Set up sendable values", 1.2)
     page.click("#editsend")
     rec.hold(1.4)
 
-    rec.caption("Fill from the frame map - only what THIS node sends", 2.0)
+    rec.caption("Fill from the frame map", 2.0)
     page.js("q('txfillmsg').value='all';")
     rec.hold(0.8)
     page.click("#txfill")

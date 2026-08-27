@@ -303,11 +303,13 @@ normally four pieces at four offsets, and getting one of them wrong gives a
 board that boots into nothing and says nothing about why; the merged image
 leaves one number to get right, and it is zero.
 
-The same two commands work on **macOS, Linux and Windows**:
+**There is one image, not one per operating system.** It is ESP32 machine code
+and it runs on the board; your computer only copies it over USB. macOS, Linux
+and Windows all send the same bytes, so the same two commands do it everywhere:
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-1.0.0-esp32-4mb.bin
+python3 tools/flash.py --image can-logger-esp32-v1.0.0-4mb-merged.bin
 ```
 
 It finds the board itself, and says what to try if the chip never enters

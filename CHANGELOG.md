@@ -8,7 +8,7 @@ First tagged release.
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-1.0.0-esp32-4mb.bin
+python3 tools/flash.py --image can-logger-esp32-v1.0.0-4mb-merged.bin
 ```
 
 ### What it is

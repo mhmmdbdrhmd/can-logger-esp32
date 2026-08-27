@@ -23,6 +23,16 @@ jobs:
       - name: Run the test suite
         run: ./test/run_tests.sh
 
+      # The desk tools are how a dashboard gets built before anyone drives
+      # anywhere, so a syntax error in one of them is a broken release even
+      # though no firmware changed.
+      - name: Byte-compile the host tools
+        run: python3 -m compileall -q tools/ customise.py
+
+      - name: The frame-map checker agrees with the firmware on the examples
+        run: |
+          for f in examples/*.dbc; do python3 tools/check_dbc.py "$f"; done
+
   platformio:
     name: PlatformIO build (ESP32)
     runs-on: ubuntu-latest

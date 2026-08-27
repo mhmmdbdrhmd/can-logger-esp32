@@ -1,8 +1,17 @@
 <h1 align="center">can-logger-esp32</h1>
 <p align="center"><i>ESP32 CAN logger with optional DBC decoding</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-verified%20on%20hardware%20toolchain-58A6FF?style=flat-square"></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.0.0"><img alt="release" src="https://img.shields.io/badge/release-v1.0.0-8957E5?style=flat-square"></a></p>
 
 > Log a CAN bus to SD with **nothing bus-specific compiled in** — identifiers, scaling and units all come from a DBC file on the card.
+
+> [!IMPORTANT]
+> **Not yet verified on hardware.** Everything here is tested natively against
+> the real sources — 309 assertions, an exhaustive encode/decode sweep, the web
+> app driven in a real browser — but no frame from this firmware has been put on
+> a live wire, and no recording has been made with an actual SD card. Section 8
+> explains why the design should not lose frames; it is reasoning from the
+> datasheets and the code, not a measurement. Bench it against a node you can
+> afford to confuse. → [Verification status](#13-verification-status)
 
 <details open>
 <summary><b>Contents</b></summary>

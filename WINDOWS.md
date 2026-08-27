@@ -371,7 +371,7 @@ reformatted), then optionally put two files in the root:
 | File | What for |
 |---|---|
 | `frames.dbc` | Your frame map. Without it the logger records raw frames. Start from `examples\example.dbc`. |
-| `dash.cfg` | Your dashboard and your sendable values. Without it the web app is health cards and controls only. Made by `customise.bat` — see below. |
+| `dash.cfg` | Your dashboard and your sendable values. Without it the web app is health cards and controls only. Made by `customize.bat` — see below. |
 | `config.txt` | Wi-Fi settings. If absent, the logger writes a commented default on first boot — easiest to let it do that and then edit it. |
 
 All three are plain text; Notepad is fine. Nothing needs rebuilding when you
@@ -388,8 +388,8 @@ You need Python: install it from <https://www.python.org/downloads/> and tick
 
 Then either:
 
-- **drag your `.dbc` file onto `customise.bat`**, or
-- **double-click `customise.bat`** and either pick your file from the list it
+- **drag your `.dbc` file onto `customize.bat`**, or
+- **double-click `customize.bat`** and either pick your file from the list it
   shows, or press **b** to open a normal Windows file browser
 
 It checks the file against the limits the firmware was built with, opens the
@@ -398,10 +398,14 @@ everything you build into a `.cfg` next to your `.dbc`.
 
 In the page:
 
-1. **Dashboard → Customise dashboard → Fill from frame map.** Every signal
+1. **Role (top right).** A DBC says who *sends* each message but not which of
+   those nodes is your logger. Say which one it is and Fill puts what it sends
+   on the Send tab and everything else on the dashboard. **Skip it** if you are
+   only listening to a machine that already works — then both offer everything.
+2. **Dashboard → Customize dashboard → Fill from frame map.** Every signal
    becomes a gauge, a bar, a thermometer or a state pill, picked from its unit
    and name. Drag them around, tap one to change it, delete what you do not want.
-2. **Send → Set up sendable values → Fill from the frame map.** Pick the message
+3. **Send → Set up sendable values → Fill from the frame map.** Pick the message
    your controller takes its settings from.
 
 Close the window when you are done, then copy **both** files to the card:
@@ -411,7 +415,7 @@ mine.dbc   ->  frames.dbc
 mine.cfg   ->  dash.cfg
 ```
 
-If `customise.bat` closes instantly, Python is not on PATH — reinstall it with
+If `customize.bat` closes instantly, Python is not on PATH — reinstall it with
 the **Add python.exe to PATH** box ticked.
 
 ---

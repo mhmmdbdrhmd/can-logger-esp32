@@ -12,7 +12,7 @@ picks signals from, and the transmit path including its failure modes.
     python3 tools/preview_dashboard.py                    # no frame map at all
 
 Then open http://127.0.0.1:8080 and use it exactly as you would use the real
-thing: customise the dashboard, drag cells around, arm the Send tab.
+thing: customize the dashboard, drag cells around, arm the Send tab.
 
 THE DATA IS INVENTED. The point of this tool is the interface and the
 interaction; the numbers are made up here in Python and prove nothing about the
@@ -95,6 +95,28 @@ def factor_decimals(fac_text, off_text):
     return max(places(fac_text), places(off_text))
 
 
+def _multipart_file(raw, ctype):
+    """The one file out of a multipart/form-data body.
+
+    The firmware streams these to the SD card with the ESP32 WebServer's own
+    parser; here there is exactly one known sender - our own page - so finding
+    the boundary and taking what is between the headers and the closing marker
+    is enough, and pulling in `email` or `cgi` for it is not.
+    """
+    m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', ctype or "")
+    if not m:
+        return b""
+    sep = b"--" + (m.group(1) or m.group(2)).strip().encode()
+    for part in raw.split(sep):
+        head, _, data = part.partition(b"\r\n\r\n")
+        if b"filename=" not in head or not data:
+            continue
+        # Exactly the one CRLF that separates the data from the next boundary -
+        # rstrip would eat a final newline the file genuinely has.
+        return data[:-2] if data.endswith(b"\r\n") else data
+    return b""
+
+
 def load_dbc(path):
     if not path:
         return {"loaded": 0, "m": []}
@@ -112,7 +134,7 @@ def load_dbc(path):
         elif s.startswith("BO_ "):
             p = s.split()
             # p[3] is the dlc, p[4] the TRANSMITTER - the only direction a DBC
-            # states. Kept so the customiser can tell commands from readings.
+            # states. Kept so the customizer can tell commands from readings.
             tx = p[4] if len(p) > 4 else ""
             if tx == "Vector__XXX":
                 tx = ""
@@ -304,6 +326,13 @@ def main():
     ap.add_argument("--empty", action="store_true",
                     help="start with no setup at all - the page as it looks on a "
                          "logger with nothing on its card")
+    ap.add_argument("--role", default="",
+                    help="which BU_ node of the frame map this logger IS, so "
+                         "Fill can tell a reading from a command. Leave it out "
+                         "and nothing is separated - both Fill buttons offer "
+                         "every message, which is the right answer when you are "
+                         "only listening. Changeable in the page afterwards, "
+                         "from the Role button in the header.")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--run", default="",
                     help="JavaScript to run once the page has loaded. Only for "
@@ -333,9 +362,21 @@ def main():
     flat = [s for m in dbc["m"] for s in m["s"]]
     by_ref = {s["_msg"] + "." + s["n"]: s for s in flat}
 
+    start_cfg = (Path(args.cfg).read_text() if args.cfg and Path(args.cfg).exists()
+                 else DEFAULT_CFG)
+    if args.role:
+        known = [n for n in dbc.get("nodes", [])]
+        if known and args.role not in known:
+            sys.exit("--role %s is not a node in %s.  It names: %s"
+                     % (args.role, args.dbc, ", ".join(known) or "(none)"))
+        # Replace rather than append: an existing file may already carry one.
+        lines = [ln for ln in start_cfg.splitlines()
+                 if not ln.strip().startswith(("role ", "node "))]
+        lines.insert(1 if lines else 0, 'role "%s"' % args.role)
+        start_cfg = "\n".join(lines) + "\n"
+
     state = {
-        "cfg": (Path(args.cfg).read_text() if args.cfg and Path(args.cfg).exists()
-                else DEFAULT_CFG),
+        "cfg": start_cfg,
         "gen": 1,
         "armed": False,
         "arm_until": 0.0,
@@ -528,8 +569,39 @@ def main():
         def do_POST(self):
             p = urllib.parse.urlparse(self.path).path
             n = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+            raw = self.rfile.read(n) if n else b""
+            body = raw.decode("utf-8", "replace")
             form = dict(urllib.parse.parse_qsl(body))
+
+            if p == "/api/dbc":
+                nonlocal dbc, flat, by_ref
+                data = _multipart_file(raw, self.headers.get("Content-Type", ""))
+                if not data:
+                    self._json({"ok": 0, "err": "the upload did not finish"})
+                    return
+                tmp = Path(tempfile.gettempdir()) / "preview-frames.dbc"
+                tmp.write_bytes(data)
+                try:
+                    new = load_dbc(str(tmp))
+                except Exception as exc:              # noqa: BLE001
+                    self._json({"ok": 0, "err": "could not read it: %s" % exc})
+                    return
+                if not new["m"]:
+                    self._json({"ok": 0, "err": "no BO_ messages in that file"})
+                    return
+                dbc = new
+                flat = [sg for m in dbc["m"] for sg in m["s"]]
+                by_ref = {sg["_msg"] + "." + sg["n"]: sg for sg in flat}
+                args.dbc = str(tmp)
+                print("frame map replaced from the web app: "
+                      "%d messages, %d signals" % (len(dbc["m"]), len(flat)),
+                      flush=True)
+                self._json({"ok": 1, "bytes": len(data),
+                            "messages": len(dbc["m"]), "signals": len(flat),
+                            "nodes": len(dbc.get("nodes", [])),
+                            "errors": 0, "inexact": 0, "missing": 0,
+                            "clipped": 0})
+                return
 
             if p == "/api/dash/cfg":
                 state["cfg"] = body
@@ -612,7 +684,7 @@ def main():
         if args.cfg:
             print(f"changes are written back to {args.cfg}")
         if own_dbc and not cells:
-            print("nothing set up yet - press 'Customise dashboard', then "
+            print("nothing set up yet - press 'Customize dashboard', then "
                   "'Fill from frame map'")
         print("the data is simulated - Ctrl-C to stop", flush=True)
         srv.serve_forever()

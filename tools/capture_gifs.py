@@ -3,7 +3,7 @@
 Record the animated walkthroughs in the README.
 
     python3 tools/capture_gifs.py            # both
-    python3 tools/capture_gifs.py customise  # just one
+    python3 tools/capture_gifs.py customize  # just one
 
 Drives the real page in headless Chrome over the DevTools protocol, with real
 mouse events - the drag in the dashboard GIF is an actual pointer drag through
@@ -178,13 +178,13 @@ def drag(page, rec, from_sel, to_sel, steps=18):
 # ---------------------------------------------------------------------------
 #  The two walkthroughs
 # ---------------------------------------------------------------------------
-def scene_customise(page, rec):
+def scene_customize(page, rec):
     rec.caption("A logger with nothing set up yet", 1.6)
     page.js("showTab('dash')")
     rec.hold(0.6)
 
-    rec.caption("Customise dashboard", 1.0)
-    page.click("#customise")
+    rec.caption("Customize dashboard", 1.0)
+    page.click("#customize")
     rec.hold(0.8)
 
     rec.caption("Fill from frame map - every signal the .dbc describes", 1.4)
@@ -223,11 +223,24 @@ def scene_send(page, rec):
     rec.hold(0.8)
     rec.caption("Values you can write back to the bus", 1.6)
 
+    # First, not last: both Fill buttons are useless until the page knows which
+    # of the nodes in the .dbc this logger is.
+    # Opened directly rather than by clicking the header: the caption pill sits
+    # over that corner of the header, so a click at those coordinates lands on
+    # the caption instead of the button.
+    rec.caption("Role, first: which of these nodes is this logger?", 1.8)
+    page.js("openRole()")
+    rec.hold(2.0)
+    page.js("setRole('Host')")
+    rec.hold(2.0)
+    page.click("#role_close")
+    rec.hold(0.8)
+
     rec.caption("Set up sendable values", 1.2)
     page.click("#editsend")
     rec.hold(1.4)
 
-    rec.caption("Fill from the frame map", 2.0)
+    rec.caption("Fill — only what THIS node sends", 2.0)
     page.js("q('txfillmsg').value='all';")
     rec.hold(0.8)
     page.click("#txfill")
@@ -258,7 +271,7 @@ def scene_send(page, rec):
 
 SCENES = {
     # name, tab, frame map, layout, window, scene
-    "customise": ("dash", "machine", None,      (1180, 880), scene_customise),
+    "customize": ("dash", "machine", None,      (1180, 880), scene_customize),
     "sending":   ("send", "example", None,      (1180, 800), scene_send),
 }
 

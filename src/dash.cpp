@@ -330,6 +330,15 @@ bool dashParseLine(DashConfig &c, char *line) {
     c.pollMs = (uint16_t)ms;
     return true;
   }
+  /* "node" was this setting's name before it was briefly removed. Accepting it
+     costs one comparison and means a setup file exported by any version still
+     carries its role across. */
+  if (!strcmp(kw, "role") || !strcmp(kw, "node")) {
+    char v[DASH_ROLE_MAX + 8];
+    if (!nextToken(&p, v, sizeof(v))) return false;
+    copyBounded(c.role, sizeof(c.role), v);
+    return true;
+  }
   if (!strcmp(kw, "cell")) return parseCell(c, p);
   if (!strcmp(kw, "send")) return parseSend(c, p);
   if (!strcmp(kw, "version")) return true;      /* recorded, not acted on */
@@ -408,6 +417,7 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       "#\n"
       "#   grid <cols> <rows>          the layout\n"
       "#   poll <ms>                   how often the browser asks for values\n"
+      "#   role \"<Name>\"               which BU_ node this logger IS, if any\n"
       "#   cell <slot> widget=.. sig=Message.Signal lo=.. hi=..\n"
       "#   send <n> label=\"..\" sig=Message.Signal lo=.. hi=..\n"
       "#              group=<n>        values sharing a group leave in ONE frame\n"
@@ -423,6 +433,11 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
   n = appendStr(out, cap, n, "\npoll ");
   n = appendInt(out, cap, n, c.pollMs);
   n = appendStr(out, cap, n, "\n");
+  if (c.role[0]) {
+    n = appendStr(out, cap, n, "role ");
+    n = appendValue(out, cap, n, c.role);
+    n = appendStr(out, cap, n, "\n");
+  }
   const uint8_t cells = dashCellCount(c);
   bool any = false;
   for (uint8_t i = 0; i < cells; i++) {

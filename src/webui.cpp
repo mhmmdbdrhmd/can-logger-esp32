@@ -10,6 +10,7 @@
 #include "cantx.h"
 #include "webpage.h"
 
+#include <SD.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 
@@ -365,6 +366,103 @@ static void handleDashCfgPost() {
   s_srv->send(200, "application/json", j);
 }
 
+/* Uploading a frame map from the browser.
+ *
+ * Streamed to the card a chunk at a time rather than buffered: a real machine's
+ * .dbc runs to ninety kilobytes, which is a third of the free heap on this chip
+ * and more than the frame map built from it. The upload lands on a temporary
+ * name and is renamed over DBC_PATH only when the whole file has arrived, so a
+ * Wi-Fi dropout costs the upload rather than the map already in use.
+ *
+ * Refused outright while a recording is running. Every CSV opens with a header
+ * describing the exact map its rows were decoded through; swapping the map
+ * underneath a file in progress would make that header a lie for every row
+ * after the swap, and the decoder is being read by the writer task at the
+ * time. Stop, load, start. */
+static File s_dbcUp;
+static bool s_dbcUpOk   = false;
+static uint32_t s_dbcUpBytes = 0;
+
+static void handleDbcUpload() {
+  HTTPUpload &up = s_srv->upload();
+
+  if (up.status == UPLOAD_FILE_START) {
+    s_dbcUpOk    = false;
+    s_dbcUpBytes = 0;
+    if (g_rec.recording || !g_rec.sdOk) return;
+    SD.remove(DBC_TMP_PATH);
+    s_dbcUp = SD.open(DBC_TMP_PATH, FILE_WRITE);
+    s_dbcUpOk = (bool)s_dbcUp;
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_WRITE) {
+    if (!s_dbcUpOk) return;
+    if (s_dbcUp.write(up.buf, up.currentSize) != up.currentSize) {
+      s_dbcUpOk = false;                 /* card full, or gone */
+      s_dbcUp.close();
+      return;
+    }
+    s_dbcUpBytes += up.currentSize;
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_END) {
+    if (s_dbcUpOk) s_dbcUp.close();
+    return;
+  }
+
+  /* ABORTED */
+  if (s_dbcUp) s_dbcUp.close();
+  s_dbcUpOk = false;
+  SD.remove(DBC_TMP_PATH);
+}
+
+static void handleDbcDone() {
+  String j;
+  j.reserve(200);
+
+  const char *err = nullptr;
+  if (g_rec.recording)      err = "stop the recording first - the CSV header "
+                                  "describes the map its rows were decoded through";
+  else if (!g_rec.sdOk)     err = "no SD card";
+  else if (!s_dbcUpOk)      err = "the upload did not finish";
+  else if (!s_dbcUpBytes)   err = "the file was empty";
+
+  if (err) {
+    SD.remove(DBC_TMP_PATH);
+    j  = "{\"ok\":0,\"err\":\""; jsonStr(j, err); j += "\"}";
+    s_srv->send(409, "application/json", j);
+    return;
+  }
+
+  SD.remove(DBC_PATH);
+  if (!SD.rename(DBC_TMP_PATH, DBC_PATH)) {
+    SD.remove(DBC_TMP_PATH);
+    s_srv->send(500, "application/json",
+                "{\"ok\":0,\"err\":\"could not put the file in place\"}");
+    return;
+  }
+
+  LOG_LIVE(LVL_INFO, "frame map uploaded: %lu bytes to %s",
+           (unsigned long)s_dbcUpBytes, DBC_PATH);
+
+  recorderLoadDbc();
+  const uint16_t missing = dashResolve(g_dash, g_dbc);
+
+  j  = "{\"ok\":";        j += g_dbc.loaded ? 1 : 0;
+  j += ",\"bytes\":";     j += (uint32_t)s_dbcUpBytes;
+  j += ",\"messages\":";  j += (uint32_t)g_dbc.msgCount;
+  j += ",\"signals\":";   j += (uint32_t)g_dbc.sigCount;
+  j += ",\"nodes\":";     j += (uint32_t)g_dbc.nodeCount;
+  j += ",\"errors\":";    j += (uint32_t)g_dbc.lineErrors;
+  j += ",\"inexact\":";   j += g_dbc.inexact ? 1 : 0;
+  j += ",\"missing\":";   j += (uint32_t)missing;
+  j += ",\"clipped\":";   j += (uint32_t)g_dbc.nameClipped;
+  j += '}';
+  s_srv->send(200, "application/json", j);
+}
+
 /* Everything the editor needs to offer a signal: its name, unit, the range the
  * DBC annotates it with, what its bits can actually hold, and any value labels.
  * Streamed a message at a time - a full frame map is several times larger than
@@ -381,7 +479,15 @@ static void handleSignals() {
   j = "{\"loaded\":";
   j += g_dbc.loaded ? 1 : 0;
 
-  j += ",\"m\":[";
+  /* The BU_ node list, and each message's transmitter further down. A .dbc
+   * states who sends what but never which of those nodes is this logger, so
+   * the page offers the list and the answer is stored as the role. */
+  j += ",\"nodes\":[";
+  for (uint8_t i = 0; i < g_dbc.nodeCount; i++) {
+    if (i) j += ',';
+    j += '"'; jsonStr(j, g_dbc.node[i]); j += '"';
+  }
+  j += "],\"m\":[";
 
   char num[40];
   for (uint16_t mi = 0; mi < g_dbc.msgCount; mi++) {
@@ -568,6 +674,7 @@ void webBegin() {
   s_srv->on("/api/dash/cfg",  HTTP_GET,  handleDashCfgGet);
   s_srv->on("/api/dash/cfg",  HTTP_POST, handleDashCfgPost);
   s_srv->on("/api/signals",   HTTP_GET,  handleSignals);
+  s_srv->on("/api/dbc",       HTTP_POST, handleDbcDone, handleDbcUpload);
 
   s_srv->on("/api/tx/arm",    HTTP_POST, handleTxArm);
   s_srv->on("/api/tx/send",   HTTP_POST, handleTxSend);

@@ -22,7 +22,7 @@ static const char PAGE_1[] PROGMEM = R"HTML(<!doctype html>
 *{box-sizing:border-box}
 /* The UA rule for [hidden] is display:none at zero specificity, so any class
    that sets display beats it - which is exactly what .bar{display:flex} did to
-   the customise toolbar. Say it once, loudly, rather than remembering to add
+   the customize toolbar. Say it once, loudly, rather than remembering to add
    a [hidden] variant to every component. */
 [hidden]{display:none !important}
 body{margin:0;background:var(--bg);color:var(--txt);
@@ -31,11 +31,16 @@ body{margin:0;background:var(--bg);color:var(--txt);
 h1{font-size:19px;margin:0;letter-spacing:.2px;white-space:nowrap}
 header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 #conn{margin-left:auto;font-size:13px;color:var(--dim)}
-/* One control, in the header, on every tab: the setup file is not a dashboard
-   thing or a sending thing, it is the whole of what this operator customised. */
+/* Header controls, on every tab: the frame map, who this logger is, and the
+   setup file are none of them a dashboard thing or a sending thing. */
 .hbtn{width:auto;margin:0;padding:9px 14px;background:transparent;font-size:13px;
   font-weight:500;border:1px solid var(--line);color:var(--dim)}
 .hbtn:hover{border-color:var(--acc);color:var(--txt)}
+/* An answered role is worth seeing without reading it, because the wrong one
+   quietly fills the wrong half of the frame map into the wrong screen. */
+.hbtn.set{border-color:var(--acc);color:var(--txt)}
+#rolelist button{width:100%;margin:0 0 8px;text-align:left}
+#rolelist button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
 .card h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;
   color:var(--dim);margin:0 0 10px;font-weight:600}
@@ -109,7 +114,7 @@ button.reboot:hover{border-color:var(--bad);color:var(--bad)}
 .pill.p-bad{background:rgba(239,68,68,.16);color:var(--bad)}
 .pill.p-acc{background:rgba(59,130,246,.16);color:var(--acc)}
 
-/* ---- customise mode ---- */
+/* ---- customize mode ---- */
 .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
 .bar button{width:auto;margin:0;padding:10px 15px;font-size:13.5px;
   background:var(--sunk);border:1px solid var(--line);color:var(--txt)}
@@ -389,6 +394,8 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <button data-tab="send">Send</button>
     <button data-tab="log">Log</button>
   </div>
+  <button id="dbcbtn"   class="hbtn">Frame map</button>
+  <button id="rolebtn"  class="hbtn">Role: none</button>
   <button id="setupbtn" class="hbtn">Setup file</button>
   <span id="conn">connecting...</span>
 </header>
@@ -423,7 +430,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
 
   <!-- then whatever this operator decided matters -->
   <div class="bar" id="viewbar" style="margin-top:16px">
-    <button id="customise">Customise dashboard</button>
+    <button id="customize">Customize dashboard</button>
     <div class="spacer"></div>
     <span class="sub" id="dashnote">&nbsp;</span>
   </div>
@@ -448,7 +455,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
 
   <div class="hint" id="emptyhint" hidden>
     No dashboard has been set up on this logger yet.<br>
-    Press <b>Customise dashboard</b>, then tap a cell to choose a signal and how
+    Press <b>Customize dashboard</b>, then tap a cell to choose a signal and how
     to draw it &mdash; or press <b>Fill from frame map</b> to lay out everything
     the loaded <code>.dbc</code> describes, which is how this is normally done at
     a desk before going out.<br>
@@ -528,7 +535,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <div class="armbar"><span id="armfill"></span></div>
   </div>
 
-  <!-- Where "Customise dashboard" sits on the other tab: above the thing it
+  <!-- Where "Customize dashboard" sits on the other tab: above the thing it
        changes, not buried under it. -->
   <div class="bar" style="margin-top:14px">
     <button id="editsend">Set up sendable values</button>
@@ -639,7 +646,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
 <div class="sheet" id="cfgsheet">
   <div class="sheetbox">
     <h3>Setup file</h3>
-    <div class="sub" style="margin-bottom:14px">Everything you customise on this
+    <div class="sub" style="margin-bottom:14px">Everything you customize on this
       logger lives in one file, <b>/dash.cfg</b> on the SD card &mdash; the
       dashboard cells <i>and</i> the values that can be sent. There is nothing
       else to back up, and nothing else to copy onto the next machine.</div>
@@ -668,7 +675,30 @@ static const char PAGE_2[] PROGMEM = R"HTML(
   </div>
 </div>
 
+<!-- which node of the frame map this logger is, asked FIRST because it is
+     what both Fill buttons need in order to be useful -->
+<div class="sheet" id="rolesheet">
+  <div class="sheetbox">
+    <h3>Which of these is this logger?</h3>
+    <div class="sub" style="margin-bottom:14px">A <code>.dbc</code> says who
+      <b>sends</b> each message, but not which of those nodes is the box you are
+      holding &mdash; and that is the whole difference between a reading and a
+      command. Answer it and <b>Fill</b> puts what your node sends on the
+      <b>Send</b> tab and everything else on the <b>dashboard</b>.
+      <br><br>Recording never changes: every frame that arrives is logged
+      whoever the file says sends it.</div>
+
+    <div id="rolelist"></div>
+    <div class="sub" id="rolenote">&nbsp;</div>
+
+    <div class="acts">
+      <button id="role_close" class="pri">Done</button>
+    </div>
+  </div>
+</div>
+
 <input type="file" id="filepick" accept=".cfg,.txt,text/plain" hidden>
+<input type="file" id="dbcpick" accept=".dbc,text/plain" hidden>
 )HTML";
 
 /* ==========================================================================
@@ -718,7 +748,7 @@ function hms(s){
  *  first. The device re-serialises whatever it receives, so its writer stays
  *  the one that decides the canonical form.
  * -------------------------------------------------------------------------*/
-var CFG = { cols:4, rows:2, poll:200, cells:{}, tx:{} };
+var CFG = { cols:4, rows:2, poll:200, role:'', cells:{}, tx:{} };
 /* How many cells this firmware can store. Told to us by /api/dash rather than
    written down here, so the two cannot drift apart. */
 var MAXCELLS = 48, MAXSEND = 32;
@@ -772,7 +802,7 @@ function numOr(v, dflt){
 }
 
 function parseCfg(text){
-  var c = { cols:4, rows:2, poll:200, cells:{}, tx:{} };
+  var c = { cols:4, rows:2, poll:200, role:'', cells:{}, tx:{} };
   text.split(/\r?\n/).forEach(function(line){
     line = line.replace(/^\s+/, '');
     if(!line || line[0] === '#') return;
@@ -786,6 +816,10 @@ function parseCfg(text){
       c.rows = Math.max(1, Math.min(8, parseInt(g[1], 10) || 2));
     } else if(kw === 'poll'){
       c.poll = Math.max(100, Math.min(5000, parseInt(rest, 10) || 200));
+    } else if(kw === 'role' || kw === 'node'){
+      /* 'node' is what this was called in an earlier version. Reading both
+         means a setup file from any of them keeps its answer. */
+      c.role = rest.trim().replace(/^"|"$/g, '');
     } else if(kw === 'cell' || kw === 'send'){
       var sp2 = rest.indexOf(' ');
       if(sp2 < 0) return;
@@ -833,6 +867,7 @@ function trimNum(v){
 
 function dumpCfg(){
   var out = ['version 1', 'grid ' + CFG.cols + ' ' + CFG.rows, 'poll ' + CFG.poll];
+  if(CFG.role) out.push('role ' + quote(CFG.role));
   Object.keys(CFG.cells).map(Number).sort(function(a,b){return a-b;}).forEach(function(i){
     var c = CFG.cells[i];
     if(!c || !c.sig) return;
@@ -1258,7 +1293,7 @@ function cellTitle(c){ return c.label || sigName(c.sig); }
 )HTML";
 
 /* ==========================================================================
- *  PART 4 - the application: tabs, the grid, customisation, diagnostics.
+ *  PART 4 - the application: tabs, the grid, customization, diagnostics.
  * ======================================================================== */
 static const char PAGE_4[] PROGMEM = R"HTML(<script>
 "use strict";
@@ -1316,7 +1351,7 @@ function startPolls(){
   if(document.hidden) return;
 
   if(TAB === 'dash'){
-    /* While the grid is being customised nothing on it is showing a live value
+    /* While the grid is being customized nothing on it is showing a live value
        - the cells are placeholders being dragged around - so the fast poll is
        pointless work for the logger. Drop to a heartbeat that only keeps the
        health cards and the connection indicator honest. */
@@ -1384,7 +1419,7 @@ function renderGrid(){
   for(i = 0; i < total; i++) if(CFG.cells[i]) used.push(i);
 
   /* In view mode a trailing row of empty slots is dead space, so the grid
-     stops after the row holding the last cell. In customise mode every slot is
+     stops after the row holding the last cell. In customize mode every slot is
      there, because an empty one is where the next cell goes. */
   var show = total;
   if(!EDIT) show = used.length
@@ -1406,7 +1441,7 @@ function renderGrid(){
     : '';
 
   /* Rebuilding the grid leaves every cell showing "--" until the next poll,
-     and in customise mode the next poll is up to two seconds away. Ask once,
+     and in customize mode the next poll is up to two seconds away. Ask once,
      now: a structural change happens when somebody drops a cell or fills the
      grid, not on every frame, so this is one extra request per action. */
   if(EDIT && used.length) pollDash();
@@ -1656,18 +1691,19 @@ function loadCfg(){
   return fetch('/api/dash/cfg').then(function(r){ return r.text(); })
     .then(function(t){
       CFG = parseCfg(t);
+      renderRoleBtn();
       renderGrid();
       renderSend();
       startPolls();
     });
 }
-function loadDbc(){
-  if(DBC.m.length) return Promise.resolve();
+function loadDbc(force){
+  if(DBC.m.length && !force) return Promise.resolve();
   return fetch('/api/signals').then(function(r){ return r.json(); })
     .then(function(d){ DBC = d; });
 }
 
-/* ---- customise mode ---------------------------------------------------- */
+/* ---- customize mode ---------------------------------------------------- */
 function setEdit(on){
   EDIT = on;
   document.body.classList.toggle('edit', on);
@@ -1790,8 +1826,11 @@ function fillCells(source){
     var taken = {};
     Object.keys(CFG.cells).forEach(function(k){ taken[CFG.cells[k].sig] = 1; });
 
-    var pick = [];
+    var pick = [], skipped = 0;
     DBC.m.forEach(function(m){
+      /* A message this logger is the one transmitting is a command, not a
+         reading: its "value" is whatever we last wrote. */
+      if(CFG.role && m.tx === CFG.role){ skipped++; return; }
       m.s.forEach(function(s){
         var ref = m.n + '.' + s.n;
         if(!taken[ref]) pick.push({ref:ref, s:s, live:live[ref] ? 1 : 0});
@@ -1830,6 +1869,8 @@ function fillCells(source){
             + 'change how it is drawn', 'ok');
     } else {
       toast('Filled from the frame map', added + ' cell(s) added'
+            + (skipped ? ', ' + skipped + ' message(s) ' + CFG.role
+                       + ' sends left for the Send tab' : '')
             + ' — drag them around, or tap one to change how it is drawn', 'ok');
     }
   });
@@ -2799,11 +2840,17 @@ function fillFromMessage(m){
 function txFillFromMap(){
   var pick = q('txfillmsg').value;
 
+  /* With a role set, only what this logger transmits: writing a frame the ECU
+     is the one sending means two nodes talking over each other on one id. */
   var list;
   if(pick === 'all'){
-    list = DBC.m.filter(function(m){ return m.s.length; });
+    list = DBC.m.filter(function(m){
+      return (!CFG.role || m.tx === CFG.role) && m.s.length;
+    });
     if(!list.length){
-      toast('Nothing to add', 'The frame map has no messages', 'bad');
+      toast('Nothing to add', CFG.role
+        ? 'Nothing in the frame map is sent by ' + CFG.role
+        : 'The frame map has no messages', 'bad');
       return;
     }
   } else {
@@ -2857,27 +2904,41 @@ function openTxEdit(){
       /* The whole lot in one press, which is what most people want: a bus
          usually has one or two command frames and no reason to add them one
          at a time. */
-      var usable = DBC.m.filter(function(m){ return m.s.length; });
-      var all = el('option', null,
-                   'every message in the frame map  (' + usable.length + ')');
+      var usable = DBC.m.filter(function(m){
+        return (!CFG.role || m.tx === CFG.role) && m.s.length;
+      });
+      var all = el('option', null, CFG.role
+        ? 'every message ' + CFG.role + ' sends  (' + usable.length + ')'
+        : 'every message in the frame map  (' + usable.length + ')');
       all.value = 'all';
       sel.appendChild(all);
 
-      /* Frame-map order, which is the order they appear in the file and so the
-         order someone reading that file expects to find them in. */
-      DBC.m.forEach(function(m, i){
+      /* This logger's own messages first, the rest marked with who sends them,
+         because writing a frame somebody else already sends is nearly always a
+         mistake - and blocking it outright would be wrong on a bus where the
+         node is simply not powered. */
+      var order = DBC.m.map(function(m, i){ return {m:m, i:i}; });
+      if(CFG.role){
+        order.sort(function(a, b){
+          return (b.m.tx === CFG.role ? 1 : 0) - (a.m.tx === CFG.role ? 1 : 0);
+        });
+      }
+      order.forEach(function(e2){
+        var m = e2.m, mine = !CFG.role || m.tx === CFG.role;
         var o = el('option', null, m.n + '  ' + m.id + '  ('
-                   + m.s.length + ' signal' + (m.s.length === 1 ? '' : 's') + ')');
-        o.value = i;
+                   + m.s.length + ' signal' + (m.s.length === 1 ? '' : 's') + ')'
+                   + (mine ? '' : '  — sent by ' + (m.tx || 'someone else')));
+        o.value = e2.i;
         sel.appendChild(o);
       });
 
       /* The button said "in this message" whatever the list was set to, which
          reads as a contradiction when the list says every message. */
       sel.onchange = function(){
-        q('txfill').textContent = sel.value === 'all'
-          ? 'Add every signal in every message'
-          : 'Add every signal in this message';
+        q('txfill').textContent =
+          sel.value !== 'all'  ? 'Add every signal in this message' :
+          CFG.role             ? 'Add every signal ' + CFG.role + ' sends'
+                               : 'Add every signal in every message';
       };
       sel.onchange();
     }
@@ -2895,7 +2956,7 @@ q('tabs').addEventListener('click', function(e){
   if(b) showTab(b.dataset.tab);
 });
 
-q('customise').onclick = function(){ setEdit(true); };
+q('customize').onclick = function(){ setEdit(true); };
 q('donedit').onclick   = function(){ setEdit(false); };
 q('colplus').onclick   = function(){ step('cols', 1); };
 q('colminus').onclick  = function(){ step('cols', -1); };
@@ -2932,6 +2993,127 @@ function importSetup(){ q('filepick').click(); }
 
 document.querySelectorAll('.cfgexport').forEach(function(b){ b.onclick = exportSetup; });
 document.querySelectorAll('.cfgimport').forEach(function(b){ b.onclick = importSetup; });
+
+/* ---- which node this logger is, and where the frame map comes from -------
+   Asked FIRST, because both Fill buttons are useless without it and useless in
+   a way that is not obvious: they quietly offer the wrong half. It sat in the
+   setup-file sheet once, which is the last thing anyone opens, so by the time
+   you met it the work it would have saved was already done by hand. */
+function roleName(){ return CFG.role || ''; }
+
+function renderRoleBtn(){
+  q('rolebtn').textContent = 'Role: ' + (CFG.role || 'none');
+  q('rolebtn').classList.toggle('set', !!CFG.role);
+}
+
+function setRole(v){
+  CFG.role = v || '';
+  renderRoleBtn();
+  renderRoleSheet();
+  renderSend();          /* the Send tab's Fill list depends on it */
+  saveCfg();
+}
+
+function renderRoleSheet(){
+  var list = q('rolelist'), note = q('rolenote');
+  list.innerHTML = '';
+
+  var counts = {};
+  DBC.m.forEach(function(m){ if(m.tx) counts[m.tx] = (counts[m.tx] || 0) + 1; });
+  var nodes = DBC.nodes || [];
+
+  /* Skip first and always available. On a machine that already works, none of
+     the nodes in the file IS this logger, and that is the common case. */
+  var skip = el('button', CFG.role ? null : 'pri',
+                'Skip — I am only listening');
+  skip.onclick = function(){ setRole(''); };
+  list.appendChild(skip);
+
+  nodes.forEach(function(n){
+    var k = counts[n] || 0;
+    var b = el('button', CFG.role === n ? 'pri' : null,
+               n + '  (sends ' + k + ' message' + (k === 1 ? '' : 's') + ')');
+    b.onclick = function(){ setRole(n); };
+    list.appendChild(b);
+  });
+
+  if(!nodes.length){
+    note.innerHTML = 'This frame map names no nodes in a <code>BU_</code> line, '
+      + 'so there is nothing to choose from — both Fill buttons will offer '
+      + 'everything.';
+    return;
+  }
+  if(CFG.role){
+    var mine = DBC.m.filter(function(m){ return m.tx === CFG.role; })
+                    .map(function(m){ return m.n; });
+    note.innerHTML = mine.length
+      ? 'Fill on the Send tab offers <b>' + mine.join('</b>, <b>')
+        + '</b>. Fill on the dashboard offers everything else.'
+      : 'Nothing in this frame map is sent by <b>' + CFG.role + '</b>, so there '
+        + 'is nothing for this logger to write.';
+  } else {
+    note.innerHTML = 'Skipped — both Fill buttons offer every message, and you '
+      + 'sort out which is which. That is the right answer when you are '
+      + 'recording a machine that already works.';
+  }
+}
+
+function openRole(){
+  /* Returns the promise: the sheet is only correct once the frame map has
+     arrived, and callers - including the screenshot tool - have to be able to
+     wait for that rather than catching it half-built. */
+  return loadDbc().then(function(){
+    renderRoleSheet();
+    q('rolesheet').classList.add('on');
+  });
+}
+
+q('rolebtn').onclick   = openRole;
+q('role_close').onclick = function(){ q('rolesheet').classList.remove('on'); };
+q('rolesheet').onclick  = function(e){
+  if(e.target === q('rolesheet')) q('rolesheet').classList.remove('on');
+};
+
+q('dbcbtn').onclick = function(){ q('dbcpick').click(); };
+
+q('dbcpick').onchange = function(){
+  var f = q('dbcpick').files[0];
+  if(!f) return;
+  q('dbcpick').value = '';
+
+  /* Multipart, so the logger can stream it to the card a chunk at a time - a
+     real machine's .dbc is ninety kilobytes and would not fit comfortably in
+     its heap all at once. */
+  var fd = new FormData();
+  fd.append('file', f, f.name);
+
+  toast('Sending the frame map', f.name + ' — ' + Math.round(f.size / 1024)
+        + ' KB', 'ok');
+
+  fetch('/api/dbc', {method:'POST', body:fd})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d.ok){
+        toast('Frame map not loaded', d.err || 'the logger refused it', 'bad');
+        return;
+      }
+      return loadDbc(1).then(function(){
+        toast('Frame map loaded', d.messages + ' message(s), ' + d.signals
+              + ' signal(s)'
+              + (d.errors  ? ', ' + d.errors + ' line(s) unreadable' : '')
+              + (d.missing ? ', ' + d.missing + ' saved cell(s) no longer match'
+                           : ''), 'ok');
+        renderGrid();
+        renderSend();
+        /* Straight into the question that has to be answered before either
+           Fill button is worth pressing. */
+        openRole();
+      });
+    })
+    .catch(function(){
+      toast('Frame map not loaded', 'the logger did not answer', 'bad');
+    });
+};
 
 q('setupbtn').onclick = function(){
   /* Counted from the logger's own copy, not this browser's, so the sheet

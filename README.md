@@ -1,6 +1,6 @@
 <h1 align="center">can-logger-esp32</h1>
 <p align="center"><i>ESP32 CAN logger with optional DBC decoding</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.0.0"><img alt="release" src="https://img.shields.io/badge/release-v1.0.0-8957E5?style=flat-square"></a></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.1.0"><img alt="release" src="https://img.shields.io/badge/release-v1.1.0-8957E5?style=flat-square"></a></p>
 
 > Log a CAN bus to SD with **nothing bus-specific compiled in** — identifiers, scaling and units all come from a DBC file on the card.
 
@@ -174,13 +174,12 @@ Copy [`examples/example.dbc`](examples/example.dbc) to the card as
 | `BA_ "Unwrap" SG_ <id> <Sig> 1;` | Yes — see [free-running counters](#free-running-counters) |
 | `CM_`, `NS_`, `BS_`, `BA_DEF_` | Parsed past and ignored |
 
-**The transmitter is the only direction a DBC states**, and nothing here acts on
-it: a frame that arrives is recorded whoever the file says sends it. It is
-parsed, exposed on `/api/dbc`, and printed by
-[`check_dbc.py`](#checking-a-frame-map-on-its-own) under *who sends what*, which
-is useful when you are working out what a bus is doing. There was once a setting
-that used it to split the two Fill buttons between readings and commands; it was
-removed for costing more explaining than it saved.
+**The transmitter is the only direction a DBC states**, and it is half of what
+you need. The file says `ABS_Cmd` is sent by `Tester`; it does not say whether
+*you* are the tester. Answer that once — [which node this logger
+is](#which-node-this-logger-is) — and the two Fill buttons can tell a command
+from a reading. Nothing in the recording path acts on it either way: a frame
+that arrives is recorded whoever the file says sends it.
 
 **Deliberately not supported**, so you are not surprised later:
 
@@ -313,7 +312,7 @@ and Windows all send the same bytes, so the same two commands do it everywhere:
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-v1.0.0-4mb-merged.bin
+python3 tools/flash.py --image can-logger-esp32-v1.1.0-4mb-merged.bin
 ```
 
 It finds the board itself, and says what to try if the chip never enters
@@ -490,7 +489,7 @@ second costs the logger *less* than the old single view did at two.
 and pill is SVG built by JavaScript in the browser — hand-drawn rather than a
 library, because the page has to load from the logger's own hotspot with no
 route to the internet. What the logger sends is one small JSON document of
-pre-formatted values and health counters; it never touches a pixel. Customising
+pre-formatted values and health counters; it never touches a pixel. Customizing
 costs it even less: laying out a dashboard is browser work on a copy of the
 config, and the logger sees a request only when the frame map is first read and
 when the finished layout is saved.
@@ -518,7 +517,7 @@ keeps writing rows, just ninety percent fewer of them. This card is what makes
 that visible instead of invisible.
 
 **In the middle, whatever you decided matters** — a grid of gauges you lay out
-yourself. See [Customising it](#customising-the-dashboard) below.
+yourself. See [Customizing it](#customizing-the-dashboard) below.
 
 **Two control cards at the bottom** — Recording, with START/STOP and the current
 file, rows and size; and Logger, with uptime, free memory and RESTART. They sit
@@ -528,17 +527,17 @@ things you press occasionally at the bottom.
 On a fresh logger the middle is empty and the tab is just health and controls,
 which is a complete and useful dashboard on its own.
 
-### Customising the dashboard
+### Customizing the dashboard
 
-![Building a dashboard](docs/img/customise.gif)
+![Building a dashboard](docs/img/customize.gif)
 
 *A logger with nothing on its card, to a laid-out dashboard. Recorded from the
 real page — the drag is a real pointer drag through the same handlers a finger
 goes through.*
 
-Press **Customise dashboard**. The grid becomes editable and a toolbar appears.
+Press **Customize dashboard**. The grid becomes editable and a toolbar appears.
 
-![Customising the dashboard](docs/img/customising.png)
+![Customizing the dashboard](docs/img/customizing.png)
 
 While the grid is in this state the fast poll drops to a two-second heartbeat —
 the cells are placeholders being dragged around, so there is nothing live to
@@ -568,9 +567,56 @@ needle sits where it is going to sit.
 | **Fill from bus** | the same list, but the signals *actually arriving* are placed first and the rest are capped. This is the one to press standing at the machine, because a grid full of cells that will never update is worse than a small one where everything moves |
 | **Setup file** | export and import — see [The setup file](#the-setup-file) |
 
+### Loading a frame map
+
+**Frame map**, in the header, takes a `.dbc` off the phone or laptop you are
+holding and puts it on the card as `/frames.dbc`. The map is rebuilt on the spot
+— no reboot, no card reader, no laptop cable — and the dashboard re-binds to it
+immediately, saying how many saved cells no longer match if any do not.
+
+It is streamed to the card a chunk at a time rather than held in memory: a real
+machine's `.dbc` runs to ninety kilobytes, which is more than the frame map
+built from it and a third of this chip's free heap. It lands on a temporary name
+and is renamed into place only once the whole file has arrived, so a Wi-Fi
+dropout mid-upload costs you the upload and not the map you were already using.
+
+**Refused while a recording is running**, deliberately. Every CSV opens with a
+header naming the exact map its rows were decoded through; swapping the map
+underneath a file in progress would make that header a lie for every row after
+the swap. Stop, load, start.
+
+### Which node this logger is
+
+<img src="docs/img/role.png" alt="Choosing which node the logger is" width="720">
+
+A `.dbc` says who **sends** each message. It does not say which of those nodes
+is the box in your hand — and that one missing fact is the whole difference
+between a reading and a command:
+
+```
+BO_ 768 ABS_LeftEncoder: 8 ABS_ECU     the ECU sends it   -> a reading
+BO_ 800 ABS_Cmd:         8 Tester      the tester sends it -> a command
+```
+
+Answer it and **Fill from frame map** puts what your node sends on the **Send**
+tab and everything else on the dashboard. The answer lives on the **Role**
+button in the header — visible from every tab, because a wrong answer does not
+announce itself, it just fills the wrong half of the map into the wrong screen.
+It opens by itself the first time after you load a frame map, which is the
+moment it is worth answering and the only moment it costs nothing.
+
+**Skip is a real answer, and usually the right one.** On a machine that already
+works, none of the nodes in the file is you — you are a bystander with a clip
+lead. Skipping means both Fill buttons offer everything and you sort out which
+is which, exactly as they behave with no frame map at all.
+
+Nothing about recording changes either way: every frame that arrives is logged
+whoever the file says sends it, and a frame you send is built from the frame map
+alone. The role is an authoring aid, and the firmware never filters on it.
+
 ### The setup file
 
-Everything customised on a logger — the dashboard cells **and** the values that
+Everything customized on a logger — the dashboard cells **and** the values that
 can be sent — is one file. So there is **one** Export and **one** Import, in the
 header, on every tab, behind **Setup file**.
 
@@ -581,9 +627,7 @@ Nothing on the logger changes and no card is written, so it is safe to press
 mid-recording. **Import replaces both halves at once**, on the card and in the
 logger's own memory.
 
-That is the whole sheet: what is on the logger now, Export, Import. Both Fill
-buttons offer every message in the frame map, and which of them you want on a
-gauge and which you want to write is a judgement the file cannot make for you.
+That is the whole sheet: what is on the logger now, Export, Import.
 
 Two copies, one rule — because this is set up **at a desk, before you go out**,
 and has to be there when you arrive.
@@ -659,12 +703,13 @@ empty page is never a mystery.
 No logger, no wiring, no traffic. All you need is your `.dbc` and Python.
 
 ```bash
-python3 customise.py path/to/mine.dbc
+python3 customize.py path/to/mine.dbc
+python3 customize.py path/to/mine.dbc --role Tester    # if one of them is you
 ```
 
-or **double-click `customise.py`** and pick your file — from the list it finds,
+or **double-click `customize.py`** and pick your file — from the list it finds,
 or press **b** to open your computer's own file browser. On Windows,
-`customise.bat` does the same and you can drag a `.dbc` straight onto it.
+`customize.bat` does the same and you can drag a `.dbc` straight onto it.
 `--browse` goes straight to the file dialog.
 
 That one command:
@@ -676,18 +721,23 @@ That one command:
 
 Then, in the page:
 
-**1. Build the dashboard.** *Customise dashboard* → **Fill from frame map**. Every
+**1. Say which node you are** — or skip. *Role*, in the header. See [which node
+this logger is](#which-node-this-logger-is); `--role` above answers it before
+the page opens, and the button changes it afterwards. Skip if you are only
+listening, and both Fill buttons will offer everything.
+
+**2. Build the dashboard.** *Customize dashboard* → **Fill from frame map**. Every
 signal becomes a cell, drawn as its unit and name suggest. Delete what you do not
 want, drag the rest into order, tap any cell to change the shape, the range or the
 thresholds. Removing one closes the gap. The values moving on them are invented —
 the point is the layout.
 
-**2. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
+**3. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
 the frame map**, and pick the message your controller takes its settings from.
 Then fix the inputs: the one that should be a list of four tyre sizes becomes
 *Pick from a list I write*.
 
-**3. Take it with you.** Copy two files to the root of the SD card:
+**4. Take it with you.** Copy two files to the root of the SD card:
 
 ```
 mine.dbc   ->  /frames.dbc
@@ -775,9 +825,10 @@ a recording is running**, so the change and its effect land in the same file.
 
 ![Setting up what can be sent](docs/img/sending.gif)
 
-*Filling the sendable values from the frame map, arming, and sending. The frame
-it writes carries `Command = 32` because the `.dbc` says that is the opcode
-`WheelDia_mm` belongs to.*
+*Saying which node the logger is, filling the sendable values from the frame map
+— only what that node sends — arming, and sending. The frame it writes carries
+`Command = 32` because the `.dbc` says that is the opcode `WheelDia_mm` belongs
+to.*
 
 ![The Send tab](docs/img/send-values.png)
 
@@ -1089,8 +1140,8 @@ Windows.)
 
 ```bash
 # lay the dashboard and the sendable values out for your own bus, at a desk.
-# Double-clickable; on Windows use customise.bat, or drag a .dbc onto it
-python3 customise.py path/to/mine.dbc
+# Double-clickable; on Windows use customize.bat, or drag a .dbc onto it
+python3 customize.py path/to/mine.dbc
 
 # will this frame map load on the logger?
 python3 tools/check_dbc.py path/to/mine.dbc --list
@@ -1214,8 +1265,8 @@ xtensa-gcc 8.4.0 links a complete image, with **no warnings** from any of the te
 translation units under `-Wall -Wextra`:
 
 ```
-RAM:   [==        ]  24.9% (used 81464 bytes from 327680 bytes)
-Flash: [=====     ]  54.5% (used 1071513 bytes from 1966080 bytes)
+RAM:   [==        ]  24.9% (used 81496 bytes from 327680 bytes)
+Flash: [=====     ]  55.0% (used 1080957 bytes from 1966080 bytes)
 ```
 
 Flash sits at 55 % of one 1.9 MB app slot, so the OTA partition scheme still has
@@ -1233,7 +1284,7 @@ Moving the big tables to the heap is what paid for the rest of this:
 
 | | before | after |
 |---|---|---|
-| Static RAM | 37.8 % (123,872 B) | **24.9 %** (81,464 B) |
+| Static RAM | 37.8 % (123,872 B) | **24.9 %** (81,496 B) |
 | Dashboard cells | 36 | 48 — the whole 6 × 8 grid |
 | Sendable values | 10 | 32 |
 | Frame map | fixed 64 msgs / 256 signals, 32 KB always | sized to the file, up to 1024 signals |
@@ -1245,7 +1296,7 @@ browser alike, and JavaScript's bitwise operators are 32-bit whatever you do to
 them. Going past 32 needs a different representation, not a bigger number in
 `config.h`.
 
-**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 312
+**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 313
 assertions across the DBC parser, the signal encoder, the CSV schema, the CANopen
 layer, the MCP2515 driver, the saved dashboard and the logger, and all pass. That
 covers Intel and Motorola bit extraction, signed values, exact decimal scaling,
@@ -1287,7 +1338,7 @@ handful of examples:
   rewritten, and a clamp rather than a wrap past the bit limit.
 
 **Verified — the web app, in a real browser.** The page is driven headlessly
-against the simulator: customising a dashboard, dragging cells, saving, reloading
+against the simulator: customizing a dashboard, dragging cells, saving, reloading
 from the stored file, arming, and sending. Every screenshot in this README is
 generated by `tools/capture_screenshots.py` from that same page.
 

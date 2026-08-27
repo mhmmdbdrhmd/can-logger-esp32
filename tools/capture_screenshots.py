@@ -39,10 +39,16 @@ SHOTS = [
      "postForm('/api/tx/arm',{on:1}).then(pollDash)"),
     ("editor",         "dash", "machine", "machine",  (1360, 1290),
      "setEdit(true);openEditor(4)"),
-    ("customising",    "dash", "machine", "machine",  (1400,  760), "setEdit(true)"),
+    ("customizing",    "dash", "machine", "machine",  (1400,  760), "setEdit(true)"),
     ("send-setup",     "send", "machine", "machine",  (1160, 1180), "openTxEdit()"),
     ("setup-file",     "dash", "machine", "machine",  (1160,  860),
      "q('setupbtn').click()"),
+    # The first question the page asks once it has a frame map: which of the
+    # nodes in it is this logger. Shown against example.dbc, where Host sends
+    # one message and NodeA sends four - the shape that makes the answer
+    # obvious. Skip is first because on a working machine it is the answer.
+    ("role",           "dash", None,      "example",  (1160,  900),
+     "openRole()"),
     # A multiplexed command frame and a frame whose signals only mean anything
     # together - both against examples/example.dbc, which carries one of each.
     ("send-groups",    "send", None,      "example",  (1240,  980),

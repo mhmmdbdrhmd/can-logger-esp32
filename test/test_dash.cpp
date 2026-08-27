@@ -115,7 +115,7 @@ int main() {
     feed(a,
       "grid 4 3\n"
       "poll 200\n"
-      "node Tester\n"
+      "role Tester\n"
       "cell 0 widget=gauge sig=Drive.Speed lo=0 hi=50 dec=1 label=\"Ground speed\" unit=km/h warn=35 crit=45\n"
       "cell 3 widget=level sig=WheelInfo.Pressure lo=0 hi=10 lowbad=1\n"
       "cell 7 widget=spark sig=Steering.Angle lo=-45 hi=45 dec=2\n"
@@ -124,15 +124,29 @@ int main() {
       "send 2 label=\"Axle load\" sig=WheelInfo.Load lo=0 hi=9000 step=10 preset=0 group=2\n"
       "send 3 label=\"Wake node\" id=0x700 data=00 cyclic=500\n");
 
-    /* `node` was a setting until it was removed for being more confusing than
-       useful. A setup file exported before then still carries the line, so
-       the parser has to walk past it without complaining and without leaving
-       it in what it writes back out - otherwise every old export imports as
-       an error, or resurrects a keyword nothing reads. */
-    ck("a setup file from before the node setting still parses",
-       dashParse(a, "node Tester\n", 12) == 0, "0 errors");
-    ck("and the removed keyword is not written back out",
-       dump(a).find("node ") == std::string::npos, "absent");
+    ck("the node this logger is survives a round trip",
+       strcmp(a.role, "Tester") == 0, a.role);
+
+    /* This setting was called `node` in an earlier version, and was briefly
+       removed altogether. A setup file written by any of those has to keep its
+       answer rather than silently coming back as "no role", which reads as a
+       working import that then fills the wrong half of the map into the wrong
+       screen. Both spellings in, one spelling out. */
+    {
+      DashConfig legacy;
+      dashReset(legacy);
+      const char *old = "grid 4 2\nnode Tester\n";
+      ck("a setup file written when it was called `node` still sets the role",
+         dashParse(legacy, old, strlen(old)) == 0 &&
+         strcmp(legacy.role, "Tester") == 0, legacy.role);
+      /* Anchored to a line start: the header comment this file writes explains
+         what the role is and contains the word "node" in that sentence, so an
+         unanchored search finds the documentation and calls it a config line. */
+      const std::string out = dump(legacy);
+      ck("and it is written back out under the current name",
+         out.find("\nrole Tester") != std::string::npos &&
+         out.find("\nnode ") == std::string::npos, "role, not node");
+    }
     ck("values that leave together keep their group",
        a.tx[1].group == 2 && a.tx[2].group == 2 && a.tx[0].group == 0,
        std::to_string(a.tx[1].group) + "/" + std::to_string(a.tx[2].group));

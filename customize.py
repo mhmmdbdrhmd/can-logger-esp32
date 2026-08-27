@@ -2,10 +2,15 @@
 """
 Set the logger's dashboard and sendable values up at a desk, before going out.
 
-    python3 customise.py                  pick a .dbc it finds, ask, or browse
-    python3 customise.py path/to/mine.dbc use this frame map
-    python3 customise.py --browse         go straight to the file dialog
-    python customise.py                   (Windows)
+    python3 customize.py                  pick a .dbc it finds, ask, or browse
+    python3 customize.py path/to/mine.dbc use this frame map
+    python3 customize.py --browse         go straight to the file dialog
+    python3 customize.py mine.dbc --role Tester
+                                          say which node the logger IS, so Fill
+                                          can tell a command from a reading.
+                                          Leave it out and nothing is split -
+                                          change it any time from the page.
+    python customize.py                   (Windows)
 
 Or just double-click this file. On Windows you can also drag a .dbc onto it.
 
@@ -130,10 +135,25 @@ def main():
     print(__doc__.strip().splitlines()[0])
     print()
 
-    args = [a for a in sys.argv[1:] if a not in ("--browse", "-b")]
+    # Which node of the frame map the logger IS. Given here it applies from the
+    # first press of Fill; left out, nothing is separated and both Fill buttons
+    # offer every message - which is what you want when the logger is only
+    # listening. Either way the page's Role button shows the answer and changes
+    # it, so nothing is decided permanently on the command line.
+    role = ""
+    argv = list(sys.argv[1:])
+    if "--role" in argv:
+        i = argv.index("--role")
+        if i + 1 >= len(argv):
+            print("--role needs the name of a node from the .dbc")
+            return 2
+        role = argv[i + 1].strip('"')
+        del argv[i:i + 2]
+
+    args = [a for a in argv if a not in ("--browse", "-b")]
     if args and Path(args[0].strip('"')).suffix.lower() == ".dbc":
         dbc = Path(args[0].strip('"'))            # or dragged onto the icon
-    elif len(sys.argv) > 1 and not args:
+    elif argv and not args:
         dbc = browse()                            # --browse, straight to it
     else:
         dbc = choose_dbc()
@@ -165,10 +185,14 @@ def main():
     print("  frame map   %s" % dbc)
     print("  your setup  %s   (written as you go)" % cfg)
     print("  open        %s" % url)
+    print("  role        %s"
+          % (role if role else "not set - both Fill buttons offer everything "
+                               "(change it in the page, top right)"))
     print("=" * 68)
     print("""
-  1. Dashboard -> Customise dashboard -> Fill from frame map
-  2. Send -> Set up sendable values -> Fill from the frame map
+  1. Role (top right)  -> which of these is this logger, or skip
+  2. Dashboard -> Customize dashboard -> Fill from frame map
+  3. Send -> Set up sendable values -> Fill from the frame map
 
   Then copy onto the SD card:
       %s   ->  /frames.dbc
@@ -183,6 +207,8 @@ def main():
     import preview_dashboard
     sys.argv = ["preview_dashboard.py", "--dbc", str(dbc),
                 "--cfg", str(cfg), "--port", str(port)]
+    if role:
+        sys.argv += ["--role", role]
     try:
         return preview_dashboard.main()
     except KeyboardInterrupt:

@@ -1,31 +1,57 @@
 # Changelog
 
-## Unreleased
+## v1.1.0
 
-### Removed — "this logger stands in for"
+### Load a frame map from the web app
 
-The setup sheet carried a node picker: a `.dbc` names the node that transmits
-each message, and naming which of them the logger was let the two Fill buttons
-split the frame map into readings to watch and values to write.
+**Frame map**, in the header, takes a `.dbc` off the phone or laptop you are
+holding and writes it to the card as `/frames.dbc`. The map is rebuilt on the
+spot and the dashboard re-binds to it, reporting how many saved cells no longer
+match. No card reader, no laptop, no reboot.
 
-It is gone, and so is the `node` line it wrote into `/dash.cfg`. It saved a
-little sorting on one press of one button, and cost an explanation every time
-anyone met it — including the reasonable assumption that "Host" was a role the
-logger has rather than a name that happened to be in the example files. A
-control that has to be explained before it can be ignored is not worth its
-place, and both Fill buttons now simply offer everything.
+It is streamed to the card a chunk at a time rather than buffered: a real
+machine's `.dbc` is ninety kilobytes, larger than the map built from it and a
+third of the chip's free heap. It lands on a temporary name and is renamed into
+place only once the whole file has arrived, so a dropped connection costs the
+upload rather than the map already in use.
 
-- **A setup file exported before this still imports.** The parser walks past
-  the `node` line and does not write it back out; the test suite pins both.
-- **Nothing else changes.** The setting never reached the firmware's receive or
-  transmit path — every frame was always recorded whoever the file said sent
-  it, and the frame put on the wire never depended on it.
-- The DBC's transmitter is still parsed and still reported by
-  `tools/check_dbc.py` under *who sends what*. Nothing acts on it.
-- The Send tab's Fill button now says *"Add every signal in every message"* when
-  the list is set to every message, instead of always claiming "this message".
+Refused while a recording is running, and it says why: every CSV opens with a
+header naming the exact map its rows were decoded through, so swapping the map
+mid-file would make that header wrong for every row after the swap.
 
-Flash is 4,336 bytes smaller; static RAM is unchanged.
+### "Which node is this logger?", asked first this time
+
+A `.dbc` names who transmits each message but never which of those nodes is the
+box running this firmware — and that is the whole difference between a reading
+and a command. The question is back, with three things fixed:
+
+- **It is asked first.** The sheet opens by itself the moment a frame map is
+  loaded, which is when it costs nothing to answer. Previously it lived inside
+  the setup-file sheet, which is the last thing anyone opens, so by then the
+  work it would have saved had been done by hand.
+- **Skip is a first-class answer**, and the default. Both Fill buttons then
+  offer every message and nothing is separated. On a machine that already works
+  none of the nodes in the file is you, which makes skipping the common case,
+  not a refusal to answer.
+- **The answer is visible.** A **Role** button in the header shows it on every
+  tab and changes it any time. A wrong role does not announce itself; it just
+  fills the wrong half of the map into the wrong screen.
+
+`customize.py --role <Node>` answers it before the page opens, and leaving the
+argument out is the skip. Stored as `role "<Name>"` in `/dash.cfg`; a file
+written when the setting was called `node` still keeps its answer.
+
+### Renamed: customise → customize
+
+`customize.py`, `customize.bat`, and every occurrence in the docs and the page.
+One spelling, and it is the one the rest of the project already used.
+
+### Also
+
+- The Send tab's Fill button now describes what it will actually do — *"Add
+  every signal Host sends"* with a role set, *"in every message"* without one,
+  *"in this message"* when one is chosen — instead of always claiming "this
+  message".
 
 ## v1.0.0
 
@@ -35,7 +61,7 @@ First tagged release.
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-v1.0.0-4mb-merged.bin
+python3 tools/flash.py --image can-logger-esp32-v1.1.0-4mb-merged.bin
 ```
 
 ### What it is
@@ -55,7 +81,7 @@ own Wi-Fi hotspot. Nothing about any particular bus is compiled in.
 - **Writing back to the bus.** Values set up at a desk and sent in the field,
   behind an arm gate that expires. Multiplexed commands carry their own
   selector; signals that are only meaningful together leave in one frame.
-- **Set up before you go out.** `customise.py` opens the real page against your
+- **Set up before you go out.** `customize.py` opens the real page against your
   own `.dbc` with simulated data, on any of the three platforms, and writes
   what you build next to it.
 - **Diagnostics that are about the receive path**, not just the SD card: the

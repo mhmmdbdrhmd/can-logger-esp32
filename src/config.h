@@ -91,6 +91,12 @@
  * -------------------------------------------------------------------------*/
 #define DBC_PATH            "/frames.dbc"
 
+/* A frame map uploaded from the web app lands here first and is renamed over
+ * DBC_PATH only once the whole file has arrived. A dropped Wi-Fi connection
+ * halfway through an upload then costs you the upload, not the map you were
+ * already using. */
+#define DBC_TMP_PATH        "/frames.tmp"
+
 /* CEILINGS on the frame map, not its size.
  *
  * The tables are counted from the file and allocated to fit it (see dbc.h), so
@@ -340,6 +346,10 @@
 #define DASH_STALE_MS       3000    /* a cell fades if its message stops     */
 #define DASH_POLL_MIN_MS    100
 
+/* Longest BU_ node name the role can hold. A role longer than this simply
+ * cannot be selected, which is why it is generous rather than tight. */
+#define DASH_ROLE_MAX       32
+
 /* Serialised size of the whole configuration - layout and setpoints. Also the
  * size of the buffer it is built in, so it is charged to the stack of whoever
  * saves, not held permanently. */
@@ -408,4 +418,4 @@
 #define TX_ATTEMPTS         3
 
 #define FIRMWARE_NAME    "CAN Logger ESP32"
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.1.0"

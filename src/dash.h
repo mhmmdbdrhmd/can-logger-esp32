@@ -139,7 +139,7 @@ struct TxCommand {
    * button. That is what a message whose signals are only meaningful together
    * needs - and a multiplexed payload always needs it, though there the
    * selector is written automatically and does not appear here. All members of
-   * a group must target the same message; the customiser only ever forms them
+   * a group must target the same message; the customizer only ever forms them
    * that way. */
   uint8_t  group;
 
@@ -165,6 +165,20 @@ struct DashConfig {
   uint8_t   cols;
   uint8_t   rows;
   uint16_t  pollMs;      /* how often the browser asks for values            */
+
+  /* Which BU_ node of the frame map this logger IS, or "" for no role.
+   *
+   * A .dbc states who transmits each message but never which of those nodes
+   * is the box running this firmware, and that one missing fact is the whole
+   * difference between a reading and a command. With a role set, Fill puts
+   * what this node sends on the Send tab and everything else on the
+   * dashboard. With no role - the honest answer whenever the logger is just
+   * listening to a working machine - both offer everything.
+   *
+   * Authoring only. The firmware never filters on it: a frame that arrives is
+   * recorded whoever the file says sends it, and a frame that is sent is
+   * built from the frame map alone. */
+  char      role[DASH_ROLE_MAX];
 
   DashCell  cell[DASH_MAX_CELLS];
   TxCommand tx[TX_MAX_COMMANDS];

@@ -27,7 +27,7 @@ jobs:
       # anywhere, so a syntax error in one of them is a broken release even
       # though no firmware changed.
       - name: Byte-compile the host tools
-        run: python3 -m compileall -q tools/ customise.py
+        run: python3 -m compileall -q tools/ customize.py
 
       - name: The frame-map checker agrees with the firmware on the examples
         run: |

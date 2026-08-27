@@ -29,6 +29,13 @@
 #include "mcp2515.h"
 
 static int failures = 0;
+
+/* Register values read better as hex when an assertion prints one back. */
+static const char *hex(uint8_t v) {
+  static char buf[8];
+  snprintf(buf, sizeof(buf), "0x%02X", v);
+  return buf;
+}
 static void ck(const char *what, bool ok, const char *note = "") {
   printf(ok ? "  ok   %s %s\n" : "  FAIL %s %s\n", what, note);
   if (!ok) failures++;
@@ -42,6 +49,8 @@ static void ck(const char *what, bool ok, const char *note = "") {
 #define R_CANCTRL  0x0F
 #define R_CNF1     0x2A
 #define R_CANINTE  0x2B
+#define R_RXB0CTRL 0x60
+#define R_RXB1CTRL 0x70
 #define R_CANINTF  0x2C
 #define R_EFLG     0x2D
 
@@ -206,6 +215,28 @@ int main() {
   ck("begin() succeeds against a responding chip", up);
   ck("ERRIF and MERRF are enabled in CANINTE",
      (fake.reg[R_CANINTE] & (F_ERR | F_MERR)) != 0);
+
+  /* The receive configuration, pinned.
+   *
+   * This exact setup - filters off on both buffers, rollover on - is the one
+   * that recorded hours of a 540 frame/s bus without losing a frame. Two bits
+   * carry that:
+   *
+   *   RXM = 11  accept everything. A logger that filters is a logger that
+   *             lies about what was on the bus.
+   *   BUKT      let a full RXB0 roll into RXB1. Without it, every frame
+   *             targets RXB0 (because RXM = 11 means every frame passes its
+   *             filter), RXB1 is never used at all, and the controller holds
+   *             ONE frame instead of two - halving the time available to
+   *             service an interrupt before something is dropped.
+   *
+   * Neither bit changes anything visible until the bus gets busy, which is why
+   * they are asserted here rather than left to be noticed in the field. */
+  ck("RXB0: filters off and rollover into RXB1 enabled",
+     (fake.reg[R_RXB0CTRL] & 0x64) == 0x64,
+     hex(fake.reg[R_RXB0CTRL]));
+  ck("RXB1: filters off", (fake.reg[R_RXB1CTRL] & 0x60) == 0x60,
+     hex(fake.reg[R_RXB1CTRL]));
 
   /* The bus must still be shut: begin() may not receive anything before the
    * reader task and the ISR exist, or every boot loses the frames that arrive

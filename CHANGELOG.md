@@ -37,11 +37,12 @@ own Wi-Fi hotspot. Nothing about any particular bus is compiled in.
 
 ### Known limits
 
-- **Nothing here has run on hardware.** The encoder is proven against its own
-  decoder by exhaustive sweep, the driver against a simulated controller, and
-  the page in a real browser against a simulator — but no frame from this
-  firmware has been put on a real wire, and no recording has been made with an
-  actual SD card. Bench it against a node you can afford to confuse.
+- **The receive path is field-proven; the rest of this build is not.** The
+  reader task, the driver and the controller configuration are unchanged from a
+  firmware that recorded hours of a ~540 frame/s bus with zero frames lost on
+  real hardware. Transmitting, the dashboard and the heap-sized frame map have
+  not been on a live wire. Bench those against a node you can afford to
+  confuse.
 - 32 sendable values is a hard ceiling: whether a value repeats is a bit in a
   32-bit mask, in the firmware and in the browser alike.
 - The frame map is sized to your file but bounded by `DBC_HEAP_RESERVE`, which
@@ -83,6 +84,6 @@ under *Verified* is.
 
 ### Verified
 
-`./test/run_tests.sh` — 309 assertions, natively, against the real sources.
+`./test/run_tests.sh` — 311 assertions, natively, against the real sources.
 `pio run` — RAM 24.9 %, Flash 54.7 %. The web app is driven headlessly against
 a simulator, and every figure in the README is reproducible by a command in it.

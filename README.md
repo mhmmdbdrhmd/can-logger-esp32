@@ -29,6 +29,8 @@
 - [11. Tuning](#11-tuning)
 - [12. Troubleshooting](#12-troubleshooting)
 - [13. Verification status](#13-verification-status)
+- [14. Known issues](#14-known-issues)
+- [15. Future development](#15-future-development)
 - [License](#license)
 - [Author](#author)
 
@@ -62,7 +64,8 @@ nothing and it logs raw frames. The same binary does both.
 [Design](#8-why-it-does-not-lose-frames) · [Power cuts](#9-surviving-a-power-cut) ·
 [Tools](#10-host-side-tools) · [Tuning](#11-tuning) ·
 [Troubleshooting](#12-troubleshooting) ·
-[Verification](#13-verification-status) · [Changelog](CHANGELOG.md)
+[Verification](#13-verification-status) · [Known issues](#14-known-issues) ·
+[Future](#15-future-development) · [Changelog](CHANGELOG.md)
 
 ---
 
@@ -445,8 +448,8 @@ Cost: roughly 30–40 bytes per row.
 ### `N.log` — the detailed log
 
 Same base name. Everything the serial port shows **plus** per-identifier counters
-and rates, queue depth and high-water mark, SD write and sync timings, MCP2515
-error registers, heap and network state — once per second.
+and rates, queue depth and high-water mark, SD write and sync timings, sticky
+interrupt flags, heap and network state — once per second.
 
 The serial stream is deliberately one line per second so it stays informative
 without becoming an I/O cost of its own:
@@ -1339,6 +1342,135 @@ macros. Its remaining blind spot is API *signatures*: `SD`, `WiFi`, `WebServer`
 and the FreeRTOS calls are stubs with plausible prototypes, not the real ones.
 Only a real `pio run` covers those — which is why CI runs both, and why the
 result above matters.
+
+---
+
+</details>
+
+## 14. Known issues
+
+<details>
+<summary><i>expand</i></summary>
+<br>
+
+
+Four things are known to be wrong or unfinished. Everything here is either
+visible in the source or came out of the field recordings; nothing is
+speculative, and nothing known is being left out.
+
+**Extended multiplexing decodes silently wrong.** `SG_MUL_VAL_` is not parsed,
+and a signal that depends on it is treated as an ordinary signal — so it is
+decoded on *every* page of its frame instead of only the pages where it exists,
+producing values that are plausible and wrong. This is the one parser gap that
+does not announce itself: an unparsable line is counted and reported at boot, a
+map that does not fit says so in the CSV header, but this one just quietly puts
+numbers in the file. Until it is supported, delete those signals from the copy
+of the DBC on the card — a missing signal is obvious, a wrong one is not.
+
+**The controller's error counters are read by nothing.** `txErrorCount()`,
+`rxErrorCount()` and `errorFlags()` exist in `mcp2515.cpp` and are called from
+nowhere in `src/`. The consequence is specific: a board that boots clean, mounts
+its card and then records **zero frames** cannot tell you why. A genuinely quiet
+bus and a wrong `CAN_BITRATE_KBPS` or `CAN_CRYSTAL_MHZ` look identical from the
+status line, and REC climbing is exactly what distinguishes them — the receiver
+counting errors means frames are arriving and being mangled, not absent. One
+field recording sat in that state for its whole length. The registers are there;
+they are simply not surfaced yet.
+
+**What stalls the receive task has never been identified.** In one recording the
+path ran clean for 6187 s at 541 frames/s with zero loss, then took an overflow
+and never fully recovered. Slow SD writes were ruled out — the nearest one is
+36 s away, and the load *fell* fourfold after the fault — and so were acceptance
+filters, since loss was uniform across identifiers. Something held the service
+task past roughly 1.2 ms, which is two receive buffers at that frame spacing.
+Clearing the sticky flags every pass makes that survivable instead of terminal,
+which is why it is a known issue and not an open wound, but the trigger is still
+unknown.
+
+**An overflow is not recovered for free.** Between the overflow and the next
+service pass, anything arriving past the two hardware buffers is gone: at
+540 frames/s and a 20 ms worst case that is on the order of ten frames per
+event. And the number reported is a **floor**, never a total — `EFLG`'s two
+overflow bits are sticky and say *at least once since you last cleared me*, so
+the page prints `≥`. Expect occasional non-zero `canOvf` on a fault rather than
+a guarantee of zero, and read the figure as the least that was lost.
+
+---
+
+</details>
+
+## 15. Future development
+
+<details>
+<summary><i>expand</i></summary>
+<br>
+
+
+None of this is committed to. It is written down because the design decisions
+that make each one cheap or expensive are already made, and knowing which is
+which is worth more than a wish list.
+
+### Dual CAN
+
+The most-asked-for one, and the most tractable: many machines put the drive bus
+and the implement bus on separate wires, and correlating them after the fact
+from two recorders with two clocks is miserable.
+
+The driver is already an object, not a singleton — `MCP2515 s_can(s_canSpi,
+PIN_CAN_CS, CAN_SPI_HZ)` — so a second controller is a second instance with its
+own chip select and its own interrupt pin, sharing the same SPI bus. `PIN_CAN_SCK
+/MISO/MOSI` stay as they are; GPIO 25 and 26 are free and neither is a strapping
+pin. Two recorders' worth of clock drift disappears, because both timestamps
+come from the same `esp_timer`.
+
+What it actually costs:
+
+| | effect |
+|---|---|
+| A second frame queue | +24 KB static RAM (81 KB used of 328 KB today, so it fits) — or one shared queue with a bus field, which is cheaper and serialises the two |
+| The CSV | needs a `bus` column, which breaks the seven-field contract every downstream tool relies on — better as an eighth column appended, or an id prefix, and decided once |
+| The frame map | two buses usually mean two DBCs, so `/frames.dbc` and `/frames2.dbc`, and the heap budget in `DBC_HEAP_RESERVE` now covers both |
+| SPI | two controllers draining concurrently at 10 MHz on one bus; a burst on both at once is the case to measure, not assume |
+| The dashboard | a cell must say which bus its signal came from, or two identical identifiers on different buses become one |
+
+The honest summary is that the *driver* work is small and the *schema* work is
+not. The CSV contract is the part to get right first, because it is the part
+that cannot be changed later without invalidating every recording already made.
+
+### The rest, roughly in order of value per unit of work
+
+- **Surface `TEC`/`REC`/`EFLG`** on the status line and in `N.log`. The
+  accessors already exist and are called by nothing (see §14); this is an hour's
+  work and it turns "no frames, no idea why" into a diagnosis.
+- **`SG_MUL_VAL_`.** Closes the one gap in the parser that produces wrong
+  numbers rather than an error.
+- **A pre-trigger ring buffer.** Hold the last N seconds in RAM and commit to
+  the card only when a condition fires — a signal crossing a threshold, a
+  specific identifier appearing. The dashboard already carries per-cell
+  thresholds, so the condition language mostly exists; what is missing is
+  recording into a ring instead of straight through. This is how you catch an
+  intermittent fault without a 1.5 GB file.
+- **Wall-clock time.** `t_us` starts at zero every file, on purpose, because
+  there is no RTC. An RTC module or a GPS PPS input would let the header carry a
+  real start timestamp — which is what you need to line a recording up against
+  anything else that was logging at the time.
+- **Opt-in acceptance filters.** Filters are off deliberately, and that should
+  stay the default. But on a bus where you know you want four identifiers out of
+  a hundred, letting the controller drop the rest removes the SD card from the
+  argument entirely. It must be loud about being on: a filtered recording that
+  looks like a complete one is a trap.
+- **CAN FD.** Not this chip — the MCP2515 is classical CAN and no amount of
+  firmware changes that. The MCP2517FD/MCP2518FD are the same SPI pattern, so
+  the driver is replaceable in isolation, but 64-byte payloads touch the frame
+  struct, the queue sizing, the CSV `raw` column and the DBC parser's assumption
+  that a message fits in eight bytes. A real port, not a swap.
+- **A host-side viewer.** `tools/` reads a frame map and previews a dashboard;
+  it does not plot a recording. Something that opens an `N.csv`, groups on
+  `(t_us, id)` and draws signals against time would close the loop between
+  recording and looking, without a spreadsheet that dies at a million rows.
+- **File rotation by size.** One recording is one file however long it runs.
+  A 1.5 GB `.csv` is awkward to move and awkward to open; rolling at a
+  configurable size, with the header repeated, would not change the format.
 
 ---
 

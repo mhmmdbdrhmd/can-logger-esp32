@@ -38,6 +38,12 @@ __pycache__/
 .venv/
 venv/
 
+# ---- release artefacts ----------------------------------------------------
+# Built by tools/flash.py --merge and attached to the GitHub release. Binaries
+# do not belong in git history: they are large, they never diff, and they are
+# reproducible from the tag.
+dist/
+
 # ---- local overrides ------------------------------------------------------
 config.txt
 !examples/config.txt

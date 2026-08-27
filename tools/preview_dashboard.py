@@ -66,6 +66,17 @@ SG_RE = re.compile(
 )
 
 
+def firmware_version():
+    """Read from config.h, so the preview cannot claim a version the firmware
+    does not have - it did, for a while, and nothing caught it."""
+    try:
+        m = re.search(r'#define\s+FIRMWARE_VERSION\s+"([^"]+)"',
+                      (ROOT / "src" / "config.h").read_text())
+        return m.group(1) if m else "?"
+    except OSError:
+        return "?"
+
+
 def factor_decimals(fac_text, off_text):
     """Decimal places the scaling needs - the same rule as src/dbc.cpp.
 
@@ -447,11 +458,12 @@ def main():
             "ids": ids, "idMore": 0, "sig": sig, "sigMore": 0,
             "ap": 1, "ip": "192.168.4.1",
             "up": int(t * 1000), "heap": 198744,
-            "fw": "CAN Logger ESP32 v1.1.0  (PREVIEW - every number here is invented)",
+            "fw": "CAN Logger ESP32 v%s  (PREVIEW - every number here is "
+                  "invented)" % firmware_version(),
         }
 
     base_log = [
-        "[     0.412] I ==== CAN Logger ESP32 v1.1.0 ====",
+        "[     0.412] I ==== CAN Logger ESP32 v%s ====" % firmware_version(),
         "[     0.690] I SD card OK: SDHC, 15193 MB",
         (f"[     0.735] I frame map: {len(dbc['m'])} messages, {len(flat)} "
          f"signals from /frames.dbc") if flat else

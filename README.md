@@ -54,7 +54,7 @@ nothing and it logs raw frames. The same binary does both.
 [Design](#8-why-it-does-not-lose-frames) · [Power cuts](#9-surviving-a-power-cut) ·
 [Tools](#10-host-side-tools) · [Tuning](#11-tuning) ·
 [Troubleshooting](#12-troubleshooting) ·
-[Verification](#13-verification-status)
+[Verification](#13-verification-status) · [Changelog](CHANGELOG.md)
 
 ---
 
@@ -288,11 +288,41 @@ misleading.
 
 The sources live once, in **`src/`**. Both front ends compile the same files.
 
+### From a release, without building anything
+
+Every release ships **one file**, flashed at offset `0x0`. An ESP32 build is
+normally four pieces at four offsets, and getting one of them wrong gives a
+board that boots into nothing and says nothing about why; the merged image
+leaves one number to get right, and it is zero.
+
+The same two commands work on **macOS, Linux and Windows**:
+
+```bash
+pip install esptool
+python3 tools/flash.py --image can-logger-esp32-1.0.0-esp32-4mb.bin
+```
+
+It finds the board itself, and says what to try if the chip never enters
+download mode. `--port COM5` (or `/dev/ttyUSB0`, or `/dev/cu.usbserial-0001`)
+overrides the guess; `--erase` wipes the flash first, which also clears the
+dashboard saved in NVS.
+
+On Windows, if the board never appears as a COM port at all, that is the
+USB-to-serial driver — [WINDOWS.md](WINDOWS.md#step-0--usb-driver) has the two
+chips and their drivers.
+
 ### PlatformIO (recommended)
 
 ```bash
 cd platformio
 pio run -t upload -t monitor
+```
+
+or, from anywhere and on any of the three platforms:
+
+```bash
+python3 tools/flash.py                # build, find the board, flash
+python3 tools/flash.py --merge out.bin   # build the single-file image
 ```
 
 `platformio.ini` points `src_dir` at `../src`, so there is nothing to copy, and
@@ -975,7 +1005,12 @@ That distinction was worth drawing. The counter used to be incremented once per
 service pass, which in a fault that pinned the receiver made `lost` converge on
 a flat ~51/s — a poll rate wearing a loss figure's clothes. Checked against the
 4-bit rolling counters the bus itself carries, the true loss in three affected
-recordings was roughly **1.7× what was reported**:
+recordings was roughly **1.7× what was reported**.
+
+*(Those figures come from field recordings measured with tooling outside this
+repository. They are the reason for the change, not something a clone can
+re-check — unlike every number under [Verification
+status](#13-verification-status), which is.)*
 
 | recording | reported | actual, from rolling counters |
 |---|---|---|

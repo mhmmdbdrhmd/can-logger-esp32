@@ -23,5 +23,10 @@ public:
     if (pos < src.size()) pos++;
     return String(out);
   }
+  /* The real Arduino File has this; the DBC loader reads the file twice - once
+   * to count, once to parse - so the shim needs it too. */
+  bool   seek(size_t p) { if (p > src.size()) return false; pos = p; return true; }
+  size_t position() const { return pos; }
+  size_t size() const { return src.size(); }
   void close() { sink = nullptr; pos = src.size(); }
 };

@@ -24,6 +24,22 @@ from collections import Counter, OrderedDict
 
 COLUMNS = ["t_us", "id", "name", "signal", "value", "unit", "raw"]
 
+# Rows for frames the LOGGER sent, rather than received, carry the prefix on the
+# message name. The schema is unchanged - seven columns, same order - so nothing
+# that predates the transmit feature breaks; a reader that does not know about
+# the prefix simply sees a message called "TX:WheelInfo".
+TX_PREFIX = "TX:"
+
+
+def is_tx(row):
+    return row["name"].startswith(TX_PREFIX)
+
+
+def base_name(row):
+    """The message name with any direction marker stripped."""
+    n = row["name"]
+    return n[len(TX_PREFIX):] if n.startswith(TX_PREFIX) else n
+
 
 def read_rows(path):
     """Yields (header_lines, row_dicts). Malformed rows are reported, not fatal:
@@ -77,6 +93,8 @@ def summarise(path, header, rows):
     per_id = Counter()
     per_sig = Counter()
     raw_only = 0
+    sent = 0
+    sent_sig = Counter()
 
     for r in rows:
         key = (r["t_us"], r["id"])
@@ -85,8 +103,14 @@ def summarise(path, header, rows):
             per_id[r["id"]] += 1
             if not r["signal"]:
                 raw_only += 1
+            if is_tx(r):
+                sent += 1
         if r["signal"]:
-            per_sig[f'{r["name"]}.{r["signal"]}'] += 1
+            # Grouped under the message's real name, so a signal the logger
+            # both watched and wrote is one row rather than two.
+            per_sig[f'{base_name(r)}.{r["signal"]}'] += 1
+            if is_tx(r):
+                sent_sig[f'{base_name(r)}.{r["signal"]}'] += 1
 
     print(f"file        {path}")
     for line in header:
@@ -99,6 +123,10 @@ def summarise(path, header, rows):
     print(f"identifiers {len(per_id)}")
     print(f"undecoded   {raw_only} frame(s) stored as raw bytes")
     print(f"signals     {len(per_sig)}")
+    if sent:
+        print(f"transmitted {sent} frame(s) were SENT by the logger, not received")
+        for name, n in sent_sig.most_common():
+            print(f"            {name}  x{n}")
 
     print("\nper identifier:")
     for ident, n in per_id.most_common():
@@ -121,22 +149,25 @@ def list_signals(rows):
     for r in rows:
         if not r["signal"]:
             continue
-        key = f'{r["name"]}.{r["signal"]}'
+        key = f'{base_name(r)}.{r["signal"]}'
         if key not in seen:
-            seen[key] = (r["id"], r["unit"], r["value"])
+            seen[key] = (r["id"], r["unit"], r["value"], is_tx(r))
+        elif is_tx(r) and not seen[key][3]:
+            seen[key] = seen[key][:3] + (True,)
     if not seen:
         print("no decoded signals - this recording has no frame map behind it")
         return
-    print(f'{"signal":<40} {"id":>12}  {"unit":<10} example')
-    for key, (ident, unit, example) in seen.items():
-        print(f"{key:<40} {ident:>12}  {unit:<10} {example}")
+    print(f'{"signal":<40} {"id":>12}  {"unit":<10} {"":<4} example')
+    for key, (ident, unit, example, tx) in seen.items():
+        print(f"{key:<40} {ident:>12}  {unit:<10} "
+              f"{'TX' if tx else '':<4} {example}")
 
 
 def to_wide(rows, out_path):
     columns = OrderedDict()
     for r in rows:
         if r["signal"]:
-            columns.setdefault(f'{r["name"]}.{r["signal"]}', None)
+            columns.setdefault(f'{base_name(r)}.{r["signal"]}', None)
     if not columns:
         sys.exit("nothing to pivot: this recording carries no decoded signals")
 
@@ -156,7 +187,7 @@ def to_wide(rows, out_path):
                 written += 1
             pending_t = t
             if r["signal"]:
-                current[f'{r["name"]}.{r["signal"]}'] = r["value"]
+                current[f'{base_name(r)}.{r["signal"]}'] = r["value"]
         if pending_t is not None:
             w.writerow([pending_t] + [current[n] for n in names])
             written += 1

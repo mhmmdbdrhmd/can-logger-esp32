@@ -65,6 +65,14 @@ struct BusStats {
   uint32_t lastMs[BUS_TRACK_IDS];
   uint8_t  known[BUS_TRACK_IDS];      /* 1 = the DBC describes this id       */
   char     last[BUS_TRACK_IDS][BUS_PAYLOAD_CHARS];   /* most recent payload  */
+
+  /* The same payload as bytes. Kept because writing one signal into a message
+   * means leaving the message's OTHER signals alone, and the only honest value
+   * for the bits this logger is not setting is the last thing the bus said
+   * they were. Zeroing them instead would command every other signal in the
+   * message to zero as a side effect of setting one. */
+  uint8_t  lastData[BUS_TRACK_IDS][8];
+  uint8_t  lastLen[BUS_TRACK_IDS];
   uint8_t  used;
   uint32_t untracked;                 /* frames whose id did not fit the table */
   uint32_t undecoded;                 /* frames stored as raw bytes            */
@@ -74,6 +82,25 @@ struct BusStats {
 extern BusStats g_bus;
 
 void busReset(BusStats &b);
+
+/* The most recent payload seen for an identifier. False when it has not been
+ * seen since the table was reset. */
+/* Formats the per-identifier counters into one log line's worth of text.
+ *
+ * A busy bus carries a hundred identifiers and a log line holds about nine, so
+ * this writes a WINDOW: it starts at *cursor, fits whole entries only, and
+ * leaves *cursor pointing at the next one so the following call continues from
+ * there and wraps round. Over a minute of once-a-second lines every identifier
+ * has been reported, without turning a 25 MB log into a 300 MB one.
+ *
+ * Always nul-terminates, never writes a partial entry, and returns how many
+ * identifiers it fitted. Lives here rather than in the recorder because this
+ * is where the counters live, and because it is the part worth testing.
+ */
+uint8_t busFormatIds(const BusStats &b, uint8_t *cursor, char *out, size_t cap);
+
+bool busLastPayload(const BusStats &b, uint32_t id, bool ext,
+                    uint8_t *out, uint8_t *lenOut);
 void busNote(BusStats &b, uint32_t id, bool ext, bool known, uint32_t nowMs);
 void busTick(BusStats &b, uint32_t elapsedMs);   /* recomputes the rates */
 
@@ -97,15 +124,26 @@ void busObserve(BusStats &b, const CanFrame &f, const DbcDb *db);
 #define LIVE_TEXT_MAX 16
 
 struct LiveSignals {
-  char     text[DBC_MAX_SIGNALS][LIVE_TEXT_MAX];
-  uint32_t lastMs[DBC_MAX_SIGNALS];
-  uint8_t  seen[DBC_MAX_SIGNALS];
-  uint16_t seenCount;
+  /* One slot per signal the frame map actually holds, allocated alongside it.
+   * Fixed at DBC_MAX_SIGNALS it was five kilobytes of static memory whether
+   * the bus had twenty signals or none. */
+  char     (*text)[LIVE_TEXT_MAX] = nullptr;
+  uint32_t  *lastMs   = nullptr;
+  uint8_t   *seen     = nullptr;
+  uint16_t   cap       = 0;
+  uint16_t   seenCount = 0;
 };
 
 extern LiveSignals g_live;
 
+/* Clears the values without releasing the slots. */
 void liveReset(LiveSignals &l);
+
+/* Sizes it for `signals` slots, releasing whatever was there. False when the
+ * heap could not provide them, in which case cap is 0 and the live view is
+ * empty - the recording is unaffected either way. */
+bool liveAllocate(LiveSignals &l, uint16_t signals);
+void liveFree(LiveSignals &l);
 
 /* ---------------------------------------------------------------------------
  *  The decoder itself. One instance per recording; timestamps are rebased so

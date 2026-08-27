@@ -23,8 +23,10 @@ install.
 2. Then **[Path A — PlatformIO](#path-a--platformio-in-vs-code)**
    *or* **[Path B — Arduino IDE](#path-b--arduino-ide)**
 3. **[Prepare the SD card](#prepare-the-sd-card)**
-4. **[After it boots](#after-it-boots)**
-5. **[Common errors](#common-errors)**
+4. **[Laying out the dashboard](#laying-out-the-dashboard-before-you-go-out)**
+   ← needs no board at all
+5. **[After it boots](#after-it-boots)**
+6. **[Common errors](#common-errors)**
 
 ---
 
@@ -369,10 +371,51 @@ reformatted), then optionally put two files in the root:
 | File | What for |
 |---|---|
 | `frames.dbc` | Your frame map. Without it the logger records raw frames. Start from `examples\example.dbc`. |
+| `dash.cfg` | Your dashboard and your sendable values. Without it the web app is health cards and controls only. Made by `customise.bat` — see below. |
 | `config.txt` | Wi-Fi settings. If absent, the logger writes a commented default on first boot — easiest to let it do that and then edit it. |
 
-Both are plain text; Notepad is fine. Nothing needs rebuilding when you change
-either of them — edit, put the card back, power cycle.
+All three are plain text; Notepad is fine. Nothing needs rebuilding when you
+change any of them — edit, put the card back, power cycle.
+
+---
+
+# Laying out the dashboard, before you go out
+
+**This needs no board, no wiring and no CAN traffic — only your `.dbc`.**
+
+You need Python: install it from <https://www.python.org/downloads/> and tick
+**Add python.exe to PATH** during setup. Nothing else, no packages.
+
+Then either:
+
+- **drag your `.dbc` file onto `customise.bat`**, or
+- **double-click `customise.bat`** and either pick your file from the list it
+  shows, or press **b** to open a normal Windows file browser
+
+It checks the file against the limits the firmware was built with, opens the
+logger's real web page in your browser fed with simulated data, and writes
+everything you build into a `.cfg` next to your `.dbc`.
+
+In the page:
+
+1. **Setup file → This logger stands in for.** A DBC names the node that *sends*
+   each message; saying which one this logger replaces stops the two Fill buttons
+   offering each other's messages.
+2. **Dashboard → Customise dashboard → Fill from frame map.** Every signal
+   becomes a gauge, a bar, a thermometer or a state pill, picked from its unit
+   and name. Drag them around, tap one to change it, delete what you do not want.
+3. **Send → Set up sendable values → Fill from the frame map.** Pick the message
+   your controller takes its settings from.
+
+Close the window when you are done, then copy **both** files to the card:
+
+```
+mine.dbc   ->  frames.dbc
+mine.cfg   ->  dash.cfg
+```
+
+If `customise.bat` closes instantly, Python is not on PATH — reinstall it with
+the **Add python.exe to PATH** box ticked.
 
 ---
 

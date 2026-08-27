@@ -65,6 +65,8 @@ static inline uint32_t micros() { return g_fakeMs * 1000u; }
 static inline void digitalWrite(int, int) {}
 static inline void pinMode(int, int) {}
 static inline void delay(uint32_t) {}
+static inline void delayMicroseconds(uint32_t) {}
+static inline int64_t esp_timer_get_time() { return (int64_t)g_fakeMs * 1000; }
 
 /* ---- String -------------------------------------------------------- */
 class String : public std::string {

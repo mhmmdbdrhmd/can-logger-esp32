@@ -11,6 +11,8 @@ struct FakeSD {
   int cardType() { return CARD_SDHC; }
   uint64_t cardSize() { return 16ULL*1024*1024*1024; }
   bool exists(const char *) { return false; }
+  bool remove(const char *) { return true; }
+  bool rename(const char *, const char *) { return true; }
   File open(const char *, const char *) { return File(); }
 };
 extern FakeSD SD;

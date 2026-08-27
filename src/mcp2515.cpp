@@ -8,6 +8,8 @@
 #define CMD_READ_STATUS  0xA0
 #define CMD_READ_RX0     0x90   /* starts at RXB0SIDH, auto-clears RX0IF     */
 #define CMD_READ_RX1     0x94   /* starts at RXB1SIDH, auto-clears RX1IF     */
+#define CMD_LOAD_TX0     0x40   /* starts at TXB0SIDH                        */
+#define CMD_RTS_TX0      0x81   /* request-to-send, buffer 0                 */
 
 /* ---- registers ---------------------------------------------------------- */
 #define REG_CANSTAT      0x0E
@@ -20,6 +22,7 @@
 #define REG_CANINTE      0x2B
 #define REG_CANINTF      0x2C
 #define REG_EFLG         0x2D
+#define REG_TXB0CTRL     0x30
 #define REG_RXB0CTRL     0x60
 #define REG_RXB1CTRL     0x70
 
@@ -32,6 +35,15 @@
 /* EFLG bits */
 #define EFLG_RX0OVR      0x40
 #define EFLG_RX1OVR      0x80
+
+/* TXB0CTRL bits */
+#define TXB_ABTF         0x40   /* the transmission was aborted             */
+#define TXB_MLOA         0x20   /* arbitration was lost                     */
+#define TXB_TXERR        0x10   /* a bus error occurred during transmission */
+#define TXB_TXREQ        0x08   /* set to send, cleared by hardware or us   */
+
+/* CANCTRL: one-shot mode - attempt a frame once, never retry forever */
+#define CANCTRL_OSM      0x08
 
 /* CANCTRL modes (top three bits) */
 #define MODE_NORMAL      0x00
@@ -199,6 +211,11 @@ bool MCP2515::startReceiving(bool listenOnly) {
   writeReg(REG_CANINTF, 0x00);
   modifyReg(REG_EFLG, EFLG_RX0OVR | EFLG_RX1OVR, 0x00);
 
+  /* Arm one-shot before the bus opens, so the first Send behaves like every
+   * later one. It changes nothing about reception; see the note in the header
+   * for why retrying forever is the dangerous default. */
+  modifyReg(REG_CANCTRL, CANCTRL_OSM, CANCTRL_OSM);
+
   return setMode(listenOnly ? MODE_LISTENONLY : MODE_NORMAL);
 }
 
@@ -269,3 +286,123 @@ uint8_t MCP2515::txErrorCount() { return readReg(REG_TEC); }
 uint8_t MCP2515::rxErrorCount() { return readReg(REG_REC); }
 uint8_t MCP2515::errorFlags()   { return readReg(REG_EFLG); }
 uint8_t MCP2515::mode()         { return readReg(REG_CANSTAT) >> 5; }
+
+/* ==========================================================================
+ *  Transmit
+ * ======================================================================== */
+void MCP2515::abortTx() {
+  /* Clearing TXREQ is the documented abort for a single buffer. CANCTRL's
+   * ABAT would work too but it aborts every buffer, and on a controller that
+   * only ever uses buffer 0 the narrower operation is the honest one. */
+  modifyReg(REG_TXB0CTRL, TXB_TXREQ, 0x00);
+}
+
+bool MCP2515::canTransmit() {
+  const uint8_t m = mode();
+  return m == 0 /* normal */ || m == 2 /* loopback */;
+}
+
+MCP2515::TxResult MCP2515::sendFrame(const CanFrame &f, uint8_t attempts,
+                                     int16_t *tecDelta) {
+  if (tecDelta) *tecDelta = 0;
+
+  if (f.len > 8) return TX_BAD_FRAME;
+  if (f.ext) { if (f.id > 0x1FFFFFFFul) return TX_BAD_FRAME; }
+  else       { if (f.id > 0x7FFul)      return TX_BAD_FRAME; }
+
+  /* Listen-only is a deliberate configuration, not a fault: the logger is
+   * often the only silent node on a live machine. Refusing here, loudly, is
+   * better than a Send button that appears to work and does nothing. */
+  if (!canTransmit()) return TX_NOT_LISTENING;
+
+  if (readReg(REG_TXB0CTRL) & TXB_TXREQ) return TX_BUSY;
+
+  /* SIDH, SIDL, EID8, EID0, DLC, D0..D7 - the same layout readFrame() parses,
+   * built the other way round. */
+  uint8_t b[13];
+  if (f.ext) {
+    b[0] = (uint8_t)(f.id >> 21);
+    b[1] = (uint8_t)(((f.id >> 13) & 0xE0) | 0x08 | ((f.id >> 16) & 0x03));
+    b[2] = (uint8_t)(f.id >> 8);
+    b[3] = (uint8_t)(f.id);
+  } else {
+    b[0] = (uint8_t)(f.id >> 3);
+    b[1] = (uint8_t)((f.id & 0x07) << 5);
+    b[2] = 0;
+    b[3] = 0;
+  }
+  b[4] = (uint8_t)((f.rtr ? 0x40 : 0x00) | (f.len & 0x0F));
+  for (uint8_t i = 0; i < 8; i++) b[5 + i] = (i < f.len) ? f.data[i] : 0x00;
+
+  if (attempts == 0) attempts = 1;
+  const uint8_t tecBefore = readReg(REG_TEC);
+  TxResult last = TX_TIMEOUT;
+
+  for (uint8_t attempt = 0; attempt < attempts; attempt++) {
+    /* The status bits are sticky across attempts, so they have to go before
+     * each one or the second attempt reads the first one's verdict. */
+    modifyReg(REG_TXB0CTRL, TXB_ABTF | TXB_MLOA | TXB_TXERR, 0x00);
+
+    _spi.beginTransaction(_cfg);
+    select();
+    _spi.transfer(CMD_LOAD_TX0);
+    for (uint8_t i = 0; i < 13; i++) _spi.transfer(b[i]);
+    deselect();
+    _spi.endTransaction();
+
+    _spi.beginTransaction(_cfg);
+    select();
+    _spi.transfer(CMD_RTS_TX0);
+    deselect();
+    _spi.endTransaction();
+
+    /* Bounded by iterations rather than by a clock: the longest classical CAN
+     * frame at the slowest bit rate this driver supports is about 1.5 ms, so
+     * 200 x 100 us is a wide margin, and a fixed count keeps the loop
+     * deterministic on the host where micros() does not advance on its own. */
+    uint8_t ctrl = 0;
+    bool    done = false;
+    for (uint16_t i = 0; i < 200; i++) {
+      ctrl = readReg(REG_TXB0CTRL);
+      if (!(ctrl & TXB_TXREQ)) { done = true; break; }
+      delayMicroseconds(100);
+    }
+
+    if (!done) {
+      /* One-shot should make this unreachable. If it happens the controller is
+       * wedged, and leaving TXREQ set would block every future send. */
+      abortTx();
+      last = TX_TIMEOUT;
+      break;
+    }
+
+    if (ctrl & TXB_MLOA) {
+      /* Normal on a busy bus, and the one case worth retrying: a higher
+       * priority identifier simply got there first. */
+      last = TX_ARB_LOST;
+      continue;
+    }
+    if (ctrl & TXB_TXERR) {
+      /* An error during transmission. On a bus with no other node powered
+       * this is the acknowledgement slot going unfilled, which is by far the
+       * most common reason a Send does not work, so it gets its own answer
+       * rather than a generic "bus error". */
+      last = TX_NO_ACK;
+      break;
+    }
+    if (ctrl & TXB_ABTF) { last = TX_ABORTED; break; }
+
+    last = TX_OK;
+    break;
+  }
+
+  const uint8_t tecAfter = readReg(REG_TEC);
+  if (tecDelta) *tecDelta = (int16_t)tecAfter - (int16_t)tecBefore;
+
+  /* The error counter is the independent witness. A frame that was genuinely
+   * acknowledged decrements TEC; one that was not adds 8. If the status bits
+   * said success and TEC climbed anyway, believe TEC. */
+  if (last == TX_OK && tecAfter > tecBefore) last = TX_NO_ACK;
+
+  return last;
+}

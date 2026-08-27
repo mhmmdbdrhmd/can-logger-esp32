@@ -51,6 +51,9 @@
 #include "recorder.h"
 #include "netcfg.h"
 #include "webui.h"
+#include "dash.h"
+#include "dashstore.h"
+#include "cantx.h"
 
 #if ENABLE_OTA
 #include <ArduinoOTA.h>
@@ -140,8 +143,23 @@ static void canTaskFn(void *arg) {
     /* The controller itself overflowed: a frame was lost before we saw it. */
     const uint8_t ovf = s_can.takeRxOverflow();
     if (ovf) {
-      g_rec.canOverflow++;
-      LOG_FILE(LVL_WARN, "MCP2515 receive overflow (EFLG=0x%02X) - a frame was lost", ovf);
+      g_rec.canOvfEvents++;
+
+      /* One sticky bit per receive buffer, so both set means at least two
+       * frames went missing. How many MORE is not knowable here - the
+       * controller only remembers THAT it happened, not how often - so this is
+       * a floor and is named like one. Against the rolling counters this bus
+       * carries, the true figure was about 1.7x it.
+       *
+       * Counted by set bits rather than by naming the two constants, because
+       * takeRxOverflow() is documented to return those bits and nothing else,
+       * and a popcount stays right if that ever widens. */
+      uint8_t buffers = 0;
+      for (uint8_t bit = ovf; bit; bit &= (uint8_t)(bit - 1)) buffers++;
+      g_rec.canOvfFramesMin += buffers ? buffers : 1;
+
+      LOG_FILE(LVL_WARN, "MCP2515 receive overflow (EFLG=0x%02X) - at least %u "
+                         "frame(s) lost", ovf, (unsigned)buffers);
     }
 
     /* MUST happen every pass. ERRIF and MERRF are sticky and the INT pin is
@@ -155,6 +173,11 @@ static void canTaskFn(void *arg) {
     }
 
     g_rec.intLevel = (uint8_t)digitalRead(PIN_CAN_INT);
+
+    /* Last, and in this task rather than in the web handler: the receive path
+     * has already been drained, so a transmit cannot delay a frame that was
+     * waiting, and nothing else ever holds this chip select. */
+    txService(s_can);
   }
 }
 
@@ -180,6 +203,7 @@ static void setupOta() {
     if (!recorderStopAndWait(4000)) {
       LOG_LIVE(LVL_ERROR, "recording did not close in time - continuing anyway");
     }
+    dashStoreService();    /* safe now, and the flash is about to be rewritten */
     logService();          /* flush the log queue while the card is still ours */
   });
 
@@ -280,6 +304,7 @@ void appSetup() {
   }
   busReset(g_bus);
   liveReset(g_live);
+  txBegin();
 
   /* ---- SD card ---- */
   if (recorderBeginSD()) {
@@ -292,6 +317,13 @@ void appSetup() {
 
   /* ---- the frame map, then the network: both live on that card ---- */
   recorderLoadDbc();
+
+  /* The dashboard layout: flash first, then the card reconciles against it.
+   * After the frame map, because the layout's signal references are resolved
+   * against it. */
+  dashStoreBegin();
+  recorderLoadDash();
+
   netLoadConfig();
 
   /* ---- CAN controller ---- */
@@ -328,6 +360,10 @@ void appSetup() {
    * cost frames on every single boot. */
   if (s_can.startReceiving(CAN_LISTEN_ONLY)) {
     LOG_LIVE(LVL_INFO, "CAN bus open - listening");
+#if CAN_LISTEN_ONLY
+    LOG_LIVE(LVL_INFO, "listen-only: the logger cannot write to the bus. Set "
+                       "CAN_LISTEN_ONLY to 0 in config.h to use Send.");
+#endif
   } else {
     LOG_LIVE(LVL_ERROR, "CAN controller would not leave configuration mode");
   }
@@ -370,6 +406,11 @@ void appLoop() {
   webService();
   netService();
 
+  /* Any dashboard change waiting to reach flash goes out here, once nothing is
+   * being recorded - writing NVS stops the flash cache, and the CAN interrupt
+   * is reached through a dispatcher that may not be resident in IRAM. */
+  dashStoreService();
+
   if (webRebootRequested()) {
     /* Close the CSV before restarting, or the rows written since the last sync
      * are lost - the same discipline as the power-fail path. */
@@ -377,6 +418,9 @@ void appLoop() {
     if (!recorderStopAndWait(4000)) {
       LOG_LIVE(LVL_ERROR, "recording did not close in time - restarting anyway");
     }
+    /* The recording is closed now, so this is the moment the deferred flash
+     * write is both safe and last useful. */
+    dashStoreService();
     logService();
     delay(250);          /* let the HTTP reply and the log actually go out */
     ESP.restart();

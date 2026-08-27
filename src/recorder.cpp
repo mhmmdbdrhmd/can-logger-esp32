@@ -4,6 +4,9 @@
 #include "decode.h"
 #include "dbc.h"
 #include "netcfg.h"
+#include "dash.h"
+#include "dashstore.h"
+#include "cantx.h"
 
 #include <SPI.h>
 #include <SD.h>
@@ -26,10 +29,16 @@ static char     s_buf[SD_BLOCK_BYTES + DECODE_FRAME_MAX];
 static size_t   s_used = 0;
 
 static volatile bool s_wantStart = false;
+static volatile bool s_wantDashSave = false;
 static volatile bool s_wantStop  = false;
 static volatile bool s_powerFail = false;
 
 static uint32_t s_lastSyncMs   = 0;
+
+/* Where the rolling id list in the per-second debug line starts. A hundred ids
+ * do not fit on one line and never will; showing a different nine each second
+ * beats showing the same nine for ever. */
+static uint8_t  s_idCursor     = 0;
 static uint32_t s_lastStatusMs = 0;
 static uint32_t s_framesAtLastStatus = 0;
 static uint32_t s_irqAtLastStatus    = 0;
@@ -38,6 +47,7 @@ static bool     s_warnedIntStuck     = false;
 static uint64_t s_bitsAtLastStatus   = 0;
 
 void recorderRequestStart() { s_wantStart = true; s_wantStop = false; }
+void recorderRequestSaveDash() { s_wantDashSave = true; }
 void recorderRequestStop()  { s_wantStop  = true; s_wantStart = false; }
 bool recorderStartPending() { return s_wantStart; }
 void recorderSignalPowerFail() { s_powerFail = true; }
@@ -156,14 +166,71 @@ void recorderLoadDbc() {
   }
 
   static char line[DBC_LINE_MAX];
-  uint32_t lines = 0;
+
+  /* FIRST PASS: count. The tables are then sized to this file rather than to a
+   * number picked at compile time, which is what stops a 707-signal bus being
+   * decoded 256 signals deep and logged raw for the rest. Reading the file
+   * twice costs a fraction of a second off an SD card and happens once at
+   * boot. */
+  DbcCounts want = {0, 0, 0};
+  uint32_t   lines = 0;
+  while (readLine(f, line, sizeof(line))) {
+    dbcCountLine(line, want);
+    if (++lines > 20000) break;            /* a runaway file is not a DBC */
+  }
+
+  /* A little slack, so a file that gains a signal after being counted - it
+   * cannot here, but the arithmetic should not be load-bearing - still fits. */
+  if (want.messages < 0xFF00) want.messages = (uint16_t)(want.messages + 4);
+  if (want.signals  < 0xFF00) want.signals  = (uint16_t)(want.signals  + 8);
+  if (want.values   < 0xFF00) want.values   = (uint16_t)(want.values   + 8);
+
+  /* Fit the request to the heap BEFORE asking for it. This runs before the
+   * radio starts, so a map that takes everything would leave the Wi-Fi stack
+   * with nothing - a logger that decodes every signal and cannot be reached is
+   * not the better half of that trade. Scale down proportionally rather than
+   * dropping one table, so a large map degrades evenly. */
+  {
+    const size_t perMsg = sizeof(DbcMessage);
+    const size_t perSig = sizeof(DbcSignal) + LIVE_TEXT_MAX
+                        + sizeof(uint32_t) + 1;      /* the live slots too */
+    const size_t perVal = sizeof(DbcValDesc);
+
+    const size_t need = (size_t)want.messages * perMsg
+                      + (size_t)want.signals  * perSig
+                      + (size_t)want.values   * perVal;
+    const size_t heap = (size_t)ESP.getFreeHeap();
+    const size_t room = (heap > DBC_HEAP_RESERVE) ? heap - DBC_HEAP_RESERVE : 0;
+
+    if (need > room) {
+      LOG_LIVE(LVL_WARN, "frame map wants %lu KB, %lu KB free - keeping %lu KB "
+                         "and leaving %lu KB for Wi-Fi. If the logger runs with "
+                         "plenty spare, lower DBC_HEAP_RESERVE in config.h.",
+               (unsigned long)((need + 1023) / 1024),
+               (unsigned long)(heap / 1024),
+               (unsigned long)((room + 1023) / 1024),
+               (unsigned long)(DBC_HEAP_RESERVE / 1024));
+      const double k = need ? (double)room / (double)need : 0.0;
+      want.messages = (uint16_t)((double)want.messages * k);
+      want.signals  = (uint16_t)((double)want.signals  * k);
+      want.values   = (uint16_t)((double)want.values   * k);
+      g_dbc.overflow = 1;
+    }
+  }
+
+  const bool sized = dbcAllocate(g_dbc, want);
+  liveAllocate(g_live, g_dbc.sigCap);
+
+  /* SECOND PASS: parse. */
+  f.seek(0);
+  lines = 0;
   while (readLine(f, line, sizeof(line))) {
     dbcParseLine(g_dbc, line);
-    lines++;
-    if (lines > 20000) break;              /* a runaway file is not a DBC */
+    if (++lines > 20000) break;
   }
   f.close();
 
+  (void)sized;
   g_rec.dbcLoaded   = g_dbc.loaded != 0;
   g_rec.dbcMessages = g_dbc.msgCount;
   g_rec.dbcSignals  = g_dbc.sigCount;
@@ -174,20 +241,41 @@ void recorderLoadDbc() {
     return;
   }
 
-  LOG_LIVE(LVL_INFO, "frame map: %u messages, %u signals from %s",
-           (unsigned)g_dbc.msgCount, (unsigned)g_dbc.sigCount, DBC_PATH);
-  LOG_FILE(LVL_INFO, "dbc: version='%s' values=%u lineErrors=%u inexact=%u",
+  LOG_LIVE(LVL_INFO, "frame map: %u messages, %u signals from %s (%lu KB, "
+                     "%lu KB free)",
+           (unsigned)g_dbc.msgCount, (unsigned)g_dbc.sigCount, DBC_PATH,
+           (unsigned long)((dbcBytes(g_dbc) + 1023) / 1024),
+           (unsigned long)(ESP.getFreeHeap() / 1024));
+  LOG_FILE(LVL_INFO, "dbc: version='%s' values=%u lineErrors=%u inexact=%u "
+                     "caps=%u/%u/%u bytes=%lu",
            g_dbc.version, (unsigned)g_dbc.valCount,
-           (unsigned)g_dbc.lineErrors, (unsigned)g_dbc.inexact);
+           (unsigned)g_dbc.lineErrors, (unsigned)g_dbc.inexact,
+           (unsigned)g_dbc.msgCap, (unsigned)g_dbc.sigCap,
+           (unsigned)g_dbc.valCap, (unsigned long)dbcBytes(g_dbc));
 
   if (g_dbc.overflow) {
-    LOG_LIVE(LVL_WARN, "the frame map did not fit - raise DBC_MAX_MESSAGES / "
-                       "DBC_MAX_SIGNALS in config.h. Frames beyond it are still "
-                       "recorded, as raw bytes.");
+    /* Now genuinely rare: it means the file exceeded the DBC_MAX_* ceilings in
+     * config.h, or the heap could not hold what the file asked for. Either way
+     * say what was kept, because "did not fit" without a number is not
+     * something anybody can act on. */
+    LOG_LIVE(LVL_WARN, "the frame map did NOT fit: kept %u of the messages and "
+                       "%u signals it asked for (ceilings %u/%u in config.h, "
+                       "%lu KB heap free). Frames beyond it are still recorded, "
+                       "as raw bytes.",
+             (unsigned)g_dbc.msgCap, (unsigned)g_dbc.sigCap,
+             (unsigned)DBC_MAX_MESSAGES, (unsigned)DBC_MAX_SIGNALS,
+             (unsigned long)(ESP.getFreeHeap() / 1024));
   }
   if (g_dbc.lineErrors) {
     LOG_LIVE(LVL_WARN, "%u line(s) of %s could not be parsed - see the .log",
              (unsigned)g_dbc.lineErrors, DBC_PATH);
+  }
+  if (g_dbc.nameClipped) {
+    /* Said out loud, because the cost is invisible until somebody matches CSV
+     * rows against the source DBC by name and quietly gets none. */
+    LOG_LIVE(LVL_WARN, "%u name(s) are longer than %u characters and are cut "
+                       "short in the CSV - raise DBC_NAME_MAX in dbc.h",
+             (unsigned)g_dbc.nameClipped, (unsigned)(DBC_NAME_MAX - 1));
   }
 }
 
@@ -321,9 +409,10 @@ static void startRecording() {
    * as lossy forever, which trains you to ignore the one number that matters.
    * Lifetime totals are preserved separately for the detailed log. */
   g_rec.lifeDropped  += g_rec.queueDropped;
-  g_rec.lifeOverflow += g_rec.canOverflow;
-  g_rec.queueDropped  = 0;
-  g_rec.canOverflow   = 0;
+  g_rec.lifeOverflow += g_rec.canOvfFramesMin;
+  g_rec.queueDropped     = 0;
+  g_rec.canOvfEvents     = 0;
+  g_rec.canOvfFramesMin  = 0;
   g_rec.queuePeak     = 0;
   g_rec.canIntfSticky = 0;
   g_rec.recording  = true;
@@ -350,9 +439,10 @@ static void stopRecording() {
   LOG_LIVE(LVL_INFO, "RECORDING STOPPED: %s, %lu rows, %lu KB, %lu s",
            g_rec.csvName, (unsigned long)g_rec.rows,
            (unsigned long)(g_rec.bytes / 1024ULL), (unsigned long)secs);
-  LOG_FILE(LVL_INFO, "summary: dropped=%lu canOverflow=%lu queuePeak=%lu "
-                     "writes=%lu maxWrite=%lu us undecoded=%lu",
-           (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.canOverflow,
+  LOG_FILE(LVL_INFO, "summary: dropped=%lu ovfEvents=%lu ovfFrames>=%lu "
+                     "queuePeak=%lu writes=%lu maxWrite=%lu us undecoded=%lu",
+           (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.canOvfEvents,
+           (unsigned long)g_rec.canOvfFramesMin,
            (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.writeCount,
            (unsigned long)g_rec.writeMaxUs, (unsigned long)g_bus.undecoded);
 
@@ -463,27 +553,32 @@ static void statusTick() {
       (unsigned)g_bus.used, g_rec.dbcLoaded ? "" : " (raw)",
       (unsigned long)qNow, (unsigned)FRAME_QUEUE_LEN,
       (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.canIntfSticky,
-      (unsigned long)(g_rec.queueDropped + g_rec.canOverflow));
+      (unsigned long)(g_rec.queueDropped + g_rec.canOvfFramesMin));
   } else {
     LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC - check the wiring, the bit rate "
                        "(%d kbit/s) and CAN_CRYSTAL_MHZ", state, CAN_BITRATE_KBPS);
   }
 
   /* ---- the detail that only the .log file gets -------------------------- */
-  char per[240];
-  int  k = 0;
-  for (uint8_t i = 0; i < g_bus.used && k < (int)sizeof(per) - 24; i++) {
-    k += snprintf(per + k, sizeof(per) - (size_t)k, "0x%lX=%lu(%lu/s)%s ",
-                  (unsigned long)g_bus.id[i], (unsigned long)g_bus.count[i],
-                  (unsigned long)g_bus.rate[i], g_bus.known[i] ? "" : "?");
-  }
-  LOG_FILE(LVL_DEBUG, "ids: %s untracked=%lu undecoded=%lu", per,
-           (unsigned long)g_bus.untracked, (unsigned long)g_bus.undecoded);
+  /* Sized to the line the logger actually writes. The old 240-byte buffer only
+   * ever bought truncation somewhere less visible: LOG_LINE_CHARS is the real
+   * limit and everything past it is dropped by vsnprintf in logger.cpp. */
+  char per[LOG_LINE_CHARS];
+  const uint8_t shown = busFormatIds(g_bus, &s_idCursor, per, sizeof(per));
+
+  /* Totals FIRST. Appended after the list they were the first thing the
+   * 160-character line dropped, and they were dropped on every bus with more
+   * than about nine ids - which is every real one. */
+  LOG_FILE(LVL_DEBUG, "ids: %u of %u | untracked=%lu undecoded=%lu | %s",
+           (unsigned)shown, (unsigned)g_bus.used,
+           (unsigned long)g_bus.untracked, (unsigned long)g_bus.undecoded, per);
   LOG_FILE(LVL_DEBUG,
-    "health: queue=%lu peak=%lu drop=%lu canOvf=%lu writes=%lu maxWr=%lu us "
+    "health: queue=%lu peak=%lu drop=%lu ovfEvents=%lu ovfFrames>=%lu "
+    "writes=%lu maxWr=%lu us "
     "syncs=%lu maxSync=%lu us atRisk<=%lu ms logDrop=%lu heap=%lu minHeap=%lu",
     (unsigned long)qNow, (unsigned long)g_rec.queuePeak,
-    (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.canOverflow,
+    (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.canOvfEvents,
+    (unsigned long)g_rec.canOvfFramesMin,
     (unsigned long)g_rec.writeCount, (unsigned long)g_rec.writeMaxUs,
     (unsigned long)g_rec.syncCount, (unsigned long)g_rec.syncMaxUs,
     (unsigned long)(millis() - s_lastSyncMs),
@@ -493,6 +588,156 @@ static void statusTick() {
 }
 
 /* ------------------------------------------------------------------------ */
+/* ==========================================================================
+ *  The dashboard layout on the card
+ *
+ *  Read at boot, written back whenever the browser saves. See dashstore.h for
+ *  which copy wins and why.
+ * ======================================================================== */
+
+/* Serialises g_dash and writes it to DASH_PATH. Runs in the writer task, the
+ * only task that touches the card. */
+static void writeDashFile() {
+  if (!g_rec.sdOk) return;
+
+  char *buf = (char *)malloc(DASH_CFG_MAX);
+  if (!buf) {
+    LOG_FILE(LVL_WARN, "not enough memory to write %s", DASH_PATH);
+    return;
+  }
+  const size_t n = dashSerialize(g_dash, buf, DASH_CFG_MAX);
+  if (n == 0 || n >= DASH_CFG_MAX) {
+    free(buf);
+    LOG_FILE(LVL_WARN, "the dashboard layout did not fit %s", DASH_PATH);
+    return;
+  }
+
+  /* Write to a temporary name and rename over the top. A power cut halfway
+   * through a direct write leaves a half-parsed layout on the card that would
+   * then be treated as an edit and imported over the good copy in flash. */
+  SD.remove(DASH_TMP_PATH);
+  File f = SD.open(DASH_TMP_PATH, FILE_WRITE);
+  if (!f) {
+    free(buf);
+    LOG_FILE(LVL_WARN, "could not open %s for writing", DASH_TMP_PATH);
+    return;
+  }
+  const size_t wrote = f.write((const uint8_t *)buf, n);
+  f.flush();
+  f.close();
+
+  if (wrote != n) {
+    free(buf);
+    SD.remove(DASH_TMP_PATH);
+    LOG_FILE(LVL_WARN, "short write to %s - the card may be full", DASH_TMP_PATH);
+    return;
+  }
+
+  SD.remove(DASH_PATH);
+  if (!SD.rename(DASH_TMP_PATH, DASH_PATH)) {
+    free(buf);
+    LOG_FILE(LVL_WARN, "could not put %s in place", DASH_PATH);
+    return;
+  }
+
+  /* Agree with what was just written, so the next boot does not read it back
+   * as somebody else's edit. */
+  dashStoreNoteCardHash(dashHash(buf, n));
+  free(buf);
+
+  LOG_FILE(LVL_INFO, "dashboard layout mirrored to %s (%u bytes)",
+           DASH_PATH, (unsigned)n);
+}
+
+void recorderLoadDash() {
+  /* No card: flash is all there is, which is a perfectly good configuration. */
+  if (!g_rec.sdOk) {
+    dashResolve(g_dash, g_dbc);
+    return;
+  }
+
+  if (!SD.exists(DASH_PATH)) {
+    /* A card with no layout on it. If flash has one, put it there - that is
+     * how the file comes into existence, and how a layout gets copied from one
+     * logger to another. */
+    if (dashStoreHadConfig()) {
+      LOG_FILE(LVL_INFO, "no %s on the card - writing the stored layout to it",
+               DASH_PATH);
+      writeDashFile();
+    } else {
+      LOG_FILE(LVL_INFO, "no %s and no stored layout - the dashboard starts "
+                         "empty; build one in the browser", DASH_PATH);
+    }
+    dashResolve(g_dash, g_dbc);
+    return;
+  }
+
+  File f = SD.open(DASH_PATH, FILE_READ);
+  if (!f) {
+    LOG_LIVE(LVL_WARN, "could not open %s - using the layout stored in flash",
+             DASH_PATH);
+    dashResolve(g_dash, g_dbc);
+    return;
+  }
+
+  char  *buf = (char *)malloc(DASH_CFG_MAX);
+  size_t n   = 0;
+  if (!buf) {
+    f.close();
+    LOG_LIVE(LVL_WARN, "not enough memory to read %s", DASH_PATH);
+    dashResolve(g_dash, g_dbc);
+    return;
+  }
+  while (f.available() && n < DASH_CFG_MAX - 1) {
+    const int c = f.read();
+    if (c < 0) break;
+    buf[n++] = (char)c;
+  }
+  const bool truncated = f.available();
+  f.close();
+  buf[n] = '\0';
+
+  if (truncated) {
+    LOG_LIVE(LVL_WARN, "%s is larger than %u bytes - only the first part was "
+                       "read", DASH_PATH, (unsigned)DASH_CFG_MAX);
+  }
+
+  const uint32_t cardHash = dashHash(buf, n);
+  if (dashStoreHadConfig() && cardHash == dashStoreCardHash()) {
+    /* The file is exactly what this logger last agreed with, so nothing has
+     * been edited on the card and flash is the newer copy. This is the branch
+     * that stops a boot from throwing away everything saved in the browser. */
+    free(buf);
+    LOG_FILE(LVL_INFO, "%s is unchanged - keeping the layout stored in flash",
+             DASH_PATH);
+    dashResolve(g_dash, g_dbc);
+    return;
+  }
+
+  /* Either the file was edited, or this logger has never seen one. Either way
+   * the card is the newer copy. */
+  dashReset(g_dash);
+  const uint16_t errors = dashParse(g_dash, buf, n);
+  free(buf);
+
+  dashStoreNoteCardHash(cardHash);
+  dashStoreSave();
+
+  LOG_LIVE(LVL_INFO, "dashboard layout loaded from %s: %ux%u grid", DASH_PATH,
+           (unsigned)g_dash.cols, (unsigned)g_dash.rows);
+  if (errors) {
+    LOG_LIVE(LVL_WARN, "%u line(s) of %s could not be parsed - see the .log",
+             (unsigned)errors, DASH_PATH);
+  }
+
+  const uint16_t missing = dashResolve(g_dash, g_dbc);
+  if (missing) {
+    LOG_LIVE(LVL_WARN, "%u dashboard cell(s) name a signal this frame map does "
+                       "not have - they show as unknown until the DBC or the "
+                       "layout is corrected", (unsigned)missing);
+  }
+}
+
 void recorderTask(void *arg) {
   (void)arg;
   CanFrame f;
@@ -507,12 +752,21 @@ void recorderTask(void *arg) {
     if (s_wantStart) { s_wantStart = false; startRecording(); }
     if (s_wantStop)  { s_wantStop  = false; stopRecording();  }
 
+    /* Mirroring the layout to the card is the lowest-priority thing this task
+     * does. It happens here, in the only task that owns the card, rather than
+     * in the HTTP handler that asked for it. */
+    if (s_wantDashSave) { s_wantDashSave = false; writeDashFile(); }
+
     /* Block until work arrives, then take everything that is already queued in
      * one go - one wake-up per burst instead of one per frame. */
     if (xQueueReceive(g_frameQueue, &f, pdMS_TO_TICKS(20)) == pdTRUE) {
       do {
-        /* Always counted, so the dashboard shows the bus even while idle. */
-        busObserve(g_bus, f, &g_dbc);
+        /* Always counted, so the dashboard shows the bus even while idle -
+         * except for frames this logger sent, which were never on the wire as
+         * far as this controller is concerned. Counting them would inflate the
+         * frame rate and the bus load with our own traffic, and would let a
+         * cyclic setpoint make an idle bus look alive. */
+        if (!f.tx) busObserve(g_bus, f, &g_dbc);
         if (!g_rec.recording) continue;
 
         /* Decode straight into the staging buffer. The buffer is oversized by

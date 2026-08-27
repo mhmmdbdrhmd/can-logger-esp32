@@ -46,12 +46,13 @@ static DbcSignal *sig(DbcDb &db, const char *msg, const char *name) {
   return nullptr;
 }
 
+/* Joins the lines and loads them the way the firmware does: count, size the
+ * tables to the file, then parse. Going straight to dbcParseLine() with no
+ * tables allocated would parse nothing at all, which is the point. */
 static void feed(DbcDb &db, const char *const *lines) {
-  char buf[DBC_LINE_MAX];
-  for (const char *const *l = lines; *l; l++) {
-    snprintf(buf, sizeof(buf), "%s", *l);
-    dbcParseLine(db, buf);
-  }
+  std::string text;
+  for (const char *const *l = lines; *l; l++) { text += *l; text += '\n'; }
+  dbcLoadText(db, text.c_str(), text.size());
 }
 
 /* A deliberately awkward little map: Intel and Motorola, signed and unsigned,
@@ -216,7 +217,6 @@ int main() {
   {
     DbcDb j;
     dbcReset(j);
-    char buf[DBC_LINE_MAX];
     const char *bad[] = {
       "SG_ Orphan : 0|8@1+ (1,0) [0|0] \"\" X",     /* SG_ with no BO_ */
       "BO_ notanumber Broken: 8 X",
@@ -225,10 +225,9 @@ int main() {
       "random text that is not DBC at all",
       nullptr
     };
-    for (const char **l = bad; *l; l++) {
-      snprintf(buf, sizeof(buf), "%s", *l);
-      dbcParseLine(j, buf);
-    }
+    std::string bt;
+    for (const char **l = bad; *l; l++) { bt += *l; bt += '\n'; }
+    dbcLoadText(j, bt.c_str(), bt.size());
     ck("nothing was loaded", j.loaded == 0 && j.msgCount == 0);
     ck("bad lines are counted", j.lineErrors == 4,
        "got " + std::to_string(j.lineErrors));
@@ -236,16 +235,74 @@ int main() {
 
   printf("\n== the table cannot be overrun ==\n");
   {
-    DbcDb o;
-    dbcReset(o);
-    char buf[DBC_LINE_MAX];
+    /* The tables are sized to the file now, so a file with more messages than
+     * the CEILING allows is the case that still has to clamp - and has to say
+     * so rather than dropping the tail in silence. */
+    DbcDb o = {};
+    std::string big;
+    char        buf2[DBC_LINE_MAX];
     for (int i = 0; i < DBC_MAX_MESSAGES + 20; i++) {
-      snprintf(buf, sizeof(buf), "BO_ %d Msg%d: 8 N", 1000 + i, i);
-      dbcParseLine(o, buf);
+      snprintf(buf2, sizeof(buf2), "BO_ %d Msg%d: 8 N\n", 1000 + i, i);
+      big += buf2;
     }
-    ck("message table clamps", o.msgCount == DBC_MAX_MESSAGES,
+    dbcLoadText(o, big.c_str(), big.size());
+    ck("message table clamps at the ceiling", o.msgCount == DBC_MAX_MESSAGES,
        "got " + std::to_string(o.msgCount));
     ck("overflow is reported", o.overflow == 1);
+
+    /* And a file that fits gets exactly what it asked for, not a fixed slab. */
+    DbcDb small = {};
+    std::string few;
+    for (int i = 0; i < 3; i++) {
+      snprintf(buf2, sizeof(buf2), "BO_ %d Msg%d: 8 N\n SG_ S%d : 0|8@1+ "
+               "(1,0) [0|255] \"\" X\n", 2000 + i, i, i);
+      few += buf2;
+    }
+    dbcLoadText(small, few.c_str(), few.size());
+    ck("a small file gets a small table", small.msgCount == 3 &&
+       small.msgCap < DBC_MAX_MESSAGES && !small.overflow,
+       "cap " + std::to_string(small.msgCap));
+    ck("and it costs a fraction of the ceiling",
+       dbcBytes(small) < dbcBytes(o) / 4,
+       std::to_string(dbcBytes(small)) + " vs " + std::to_string(dbcBytes(o)));
+    dbcFree(small);
+    dbcFree(o);
+
+    /* The case this was changed for: a real machine bus, 104 messages and 707
+     * signals. The fixed tables held 64 and 256, so a field recording decoded
+     * the first 256 signals and wrote the other 451 as raw payload bytes. */
+    DbcDb    real = {};
+    std::string big2;
+    int      sig = 0;
+    for (int m = 0; m < 104; m++) {
+      snprintf(buf2, sizeof(buf2), "BO_ %d Msg%03d: 8 ECU\n", 0x100 + m, m);
+      big2 += buf2;
+      const int here = (m < 83) ? 7 : 6;         /* 83*7 + 21*6 = 707 */
+      for (int k = 0; k < here && sig < 707; k++, sig++) {
+        snprintf(buf2, sizeof(buf2),
+                 " SG_ GuidanceCurvatureCommand%03d : %d|8@1+ (1,0) [0|255] "
+                 "\"deg\" Vector__XXX\n", sig, (k * 8) % 64);
+        big2 += buf2;
+      }
+    }
+    dbcLoadText(real, big2.c_str(), big2.size());
+    ck("a 104-message bus loads whole", real.msgCount == 104,
+       std::to_string(real.msgCount));
+    ck("all 707 signals load, none dropped", real.sigCount == 707,
+       std::to_string(real.sigCount));
+    ck("and nothing is reported as truncated", real.overflow == 0);
+    printf("  ..   a 104/707 bus costs %lu KB of heap\n",
+           (unsigned long)((dbcBytes(real) + 1023) / 1024));
+
+    /* A name that used to be cut: 24 characters plus a three-digit suffix. */
+    ck("a long signal name survives whole",
+       real.sigCount > 0 &&
+       strncmp(real.sig[0].name, "GuidanceCurvatureCommand", 24) == 0 &&
+       strlen(real.sig[0].name) == 27,
+       real.sigCount ? real.sig[0].name : "");
+    ck("and nothing was clipped", real.nameClipped == 0,
+       std::to_string(real.nameClipped));
+    dbcFree(real);
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);

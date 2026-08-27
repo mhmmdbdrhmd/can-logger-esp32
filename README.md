@@ -14,12 +14,13 @@
 - [4. Building and flashing](#4-building-and-flashing)
 - [5. What gets recorded](#5-what-gets-recorded)
 - [6. The live web app](#6-the-live-web-app)
-- [7. Why it does not lose frames](#7-why-it-does-not-lose-frames)
-- [8. Surviving a power cut](#8-surviving-a-power-cut)
-- [9. Host-side tools](#9-host-side-tools)
-- [10. Tuning](#10-tuning)
-- [11. Troubleshooting](#11-troubleshooting)
-- [12. Verification status](#12-verification-status)
+- [7. Sending values back to the bus](#7-sending-values-back-to-the-bus)
+- [8. Why it does not lose frames](#8-why-it-does-not-lose-frames)
+- [9. Surviving a power cut](#9-surviving-a-power-cut)
+- [10. Host-side tools](#10-host-side-tools)
+- [11. Tuning](#11-tuning)
+- [12. Troubleshooting](#12-troubleshooting)
+- [13. Verification status](#13-verification-status)
 - [License](#license)
 - [Author](#author)
 
@@ -49,11 +50,11 @@ nothing and it logs raw frames. The same binary does both.
 
 **Contents** · [Hardware](#1-hardware) · [Wiring](#2-wiring) ·
 [Frame map](#3-the-frame-map-framesdbc) · [Build](#4-building-and-flashing) ·
-[Output](#5-what-gets-recorded) · [Web app](#6-the-live-web-app) ·
-[Design](#7-why-it-does-not-lose-frames) · [Power cuts](#8-surviving-a-power-cut) ·
-[Tools](#9-host-side-tools) · [Tuning](#10-tuning) ·
-[Troubleshooting](#11-troubleshooting) ·
-[Verification](#12-verification-status)
+[Output](#5-what-gets-recorded) · [Web app](#6-the-live-web-app) · [Sending](#7-sending-values-back-to-the-bus) ·
+[Design](#8-why-it-does-not-lose-frames) · [Power cuts](#9-surviving-a-power-cut) ·
+[Tools](#10-host-side-tools) · [Tuning](#11-tuning) ·
+[Troubleshooting](#12-troubleshooting) ·
+[Verification](#13-verification-status)
 
 ---
 
@@ -149,7 +150,8 @@ Copy [`examples/example.dbc`](examples/example.dbc) to the card as
 | Construct | Support |
 |---|---|
 | `VERSION "…"` | Kept, and written into every CSV header |
-| `BO_ <id> <Name>: <dlc> <Node>` | Yes. 29-bit ids carry bit 31 set, as usual |
+| `BO_ <id> <Name>: <dlc> <Node>` | Yes. 29-bit ids carry bit 31 set, as usual. `<Node>` is the **transmitter** and is kept — see below |
+| `BU_: <Node> …` | Yes — the node list, up to `DBC_MAX_NODES` |
 | `SG_ … : <start>\|<len>@<order><sign> (<fac>,<off>) [min\|max] "<unit>"` | Yes |
 | Byte order `@1` (Intel) and `@0` (Motorola) | Both |
 | Signed and unsigned, 1–64 bits | Yes |
@@ -159,7 +161,14 @@ Copy [`examples/example.dbc`](examples/example.dbc) to the card as
 | Multiplexing (`M`, `m0`, `m1`, …) | Yes — a multiplexed signal is emitted only when the multiplexor selects it |
 | `SIG_VALTYPE_ … : 1;` / `: 2;` | Yes — IEEE float32 and float64 payloads |
 | `BA_ "Unwrap" SG_ <id> <Sig> 1;` | Yes — see [free-running counters](#free-running-counters) |
-| `CM_`, `BU_`, `NS_`, `BS_`, `BA_DEF_` | Parsed past and ignored |
+| `CM_`, `NS_`, `BS_`, `BA_DEF_` | Parsed past and ignored |
+
+**The transmitter is the only direction a DBC states.** Nothing in the recording
+path acts on it — a frame that arrives is recorded whoever the file says sends
+it — but it is what lets the customiser tell a reading from a command, once you
+say [which node this logger stands in for](#the-setup-file). It also drives the
+automatic multiplexor write when
+[a frame only means anything whole](#frames-that-only-mean-anything-whole).
 
 **Deliberately not supported**, so you are not surprised later:
 
@@ -176,9 +185,59 @@ Copy [`examples/example.dbc`](examples/example.dbc) to the card as
   purpose. Everything on the bus is captured.
 
 Anything the parser cannot make sense of is counted and reported at boot
-(`N line(s) of /frames.dbc could not be parsed`), never skipped in silence. If
-the map is larger than `DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS`, the logger says
-so and the frames beyond it are recorded as raw bytes rather than lost.
+(`N line(s) of /frames.dbc could not be parsed`), never skipped in silence.
+
+### How big a frame map can be
+
+**The tables are sized to your file, not to a number chosen at compile time.**
+The file is read twice at boot — once to count `BO_`, `SG_` and `VAL_`, once to
+parse — and the tables are then allocated to fit it. A twenty-signal bus costs
+about two kilobytes; a 104-message, 707-signal J1939 steering bus costs about
+84 KB and loads whole.
+
+That is a fix, not a feature. The tables used to be fixed at 64 messages and 256
+signals, and a real ten-hour field recording on that steering bus decoded the
+first 256 signals and wrote the other **451 as raw payload bytes**, with one
+line in the CSV header to say so.
+
+Three things still bound it, and all three are reported at boot:
+
+| Bound | Default | What happens |
+|---|---|---|
+| `DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS` / `DBC_MAX_VALDESC` | 256 / 1024 / 2048 | Ceilings, so a corrupt file cannot ask for a gigabyte. Exceeding one truncates the map and says so |
+| `DBC_HEAP_RESERVE` | 90 KB | Memory the map will **not** take. It loads before the radio starts, so an unbounded map could leave Wi-Fi with nothing. Over budget, the request is scaled down proportionally |
+| `DBC_MAX_NODES` | 32 | Names in `BU_`. The only fixed table left, at a kilobyte |
+
+The boot line reports what it cost and what is left:
+
+```
+I frame map: 104 messages, 707 signals from /frames.dbc (84 KB, 118 KB free)
+```
+
+If it had to cut the map back, it names the knob:
+
+```
+W frame map wants 138 KB, 205 KB free - keeping 115 KB and leaving 90 KB for
+  Wi-Fi. If the logger runs with plenty spare, lower DBC_HEAP_RESERVE in config.h.
+```
+
+`python3 tools/check_dbc.py yours.dbc` prints the same estimate before you go
+anywhere near the machine.
+
+### How long a name can be
+
+`DBC_NAME_MAX` is 32, so **31 characters** of message and signal name reach the
+CSV. It was 24, which wrote `GuidanceCurvatureCommand` as
+`GuidanceCurvatureComman` — long enough to look right and short enough that
+matching rows back to the source DBC by exact name silently returned nothing.
+
+Anything still too long is counted and reported (`N name(s) are longer than 31
+characters and are cut short in the CSV`), and every CSV header states the cap
+whether or not it bit:
+
+```
+#   names are cut to 31 characters
+```
 
 ### Values are exact
 
@@ -315,6 +374,11 @@ t_us;id;name;signal;value;unit;raw
 2000;0x200;;;;;1122
 ```
 
+A frame the logger **sent** rather than received carries a `TX:` prefix on the
+message name, and nothing else changes — see
+[section 7](#7-sending-values-back-to-the-bus). The seven columns and their
+order are the same whether or not the transmit feature is ever used.
+
 | Column | Meaning |
 |---|---|
 | `t_us` | Recorder clock, µs, **starting at 0 for every file**. Captured inside the CAN interrupt, so it is the arrival time on the wire — not the time the row happened to be formatted. |
@@ -365,11 +429,33 @@ so the logger can be moved between sites by editing a text file, no reflash. In
 `ap` mode it makes its own hotspot; in `sta` mode it joins your network and falls
 back to the hotspot if it cannot.
 
-![The dashboard with a frame map loaded](docs/img/dashboard-dbc.png)
+Four tabs, arranged around *when* each one is needed:
 
-### Layout
+| Tab | For | Polls |
+|---|---|---|
+| **Dashboard** | standing at the machine: health, your own gauges, start/stop | one small request, 5 Hz |
+| **Bus** | working out a frame map, or something is wrong: every identifier and every decoded signal as text | the full status document, 1.7 Hz |
+| **Send** | writing a value back — see [section 7](#7-sending-values-back-to-the-bus) | 1.4 Hz |
+| **Log** | what the logger has been saying | the log tail |
 
-**Five status cards across the top**, all driven by measurements rather than
+**Only the visible tab is polled, and a backgrounded browser tab polls nothing
+at all.** That is not a detail: it is why a dashboard updating five times a
+second costs the logger *less* than the old single view did at two.
+
+**Nothing is rendered on the ESP32.** Every dial, needle, compass, thermometer
+and pill is SVG built by JavaScript in the browser — hand-drawn rather than a
+library, because the page has to load from the logger's own hotspot with no
+route to the internet. What the logger sends is one small JSON document of
+pre-formatted values and health counters; it never touches a pixel. Customising
+costs it even less: laying out a dashboard is browser work on a copy of the
+config, and the logger sees a request only when the frame map is first read and
+when the finished layout is saved.
+
+![The dashboard](docs/img/dashboard-dbc.png)
+
+### The Dashboard
+
+**Five health cards across the top**, all driven by measurements rather than
 assumptions:
 
 | Card | Shows | Turns red when |
@@ -387,45 +473,241 @@ wake-ups a second times two buffers — and *nothing else looks wrong*. The logg
 keeps writing rows, just ninety percent fewer of them. This card is what makes
 that visible instead of invisible.
 
-**Live Signals** — every signal the frame map describes, with its current value
-and unit, updated twice a second. Values are right-aligned and tabular so the
-digits line up while they change.
-
-**Identifiers on the wire** — every id seen since the recording started, its most
-recent payload, frame count, rate, and whether the frame map describes it.
-
-**Live Log** — the serial log, mirrored.
+**In the middle, whatever you decided matters** — a grid of gauges you lay out
+yourself. See [Customising it](#customising-the-dashboard) below.
 
 **Two control cards at the bottom** — Recording, with START/STOP and the current
 file, rows and size; and Logger, with uptime, free memory and RESTART. They sit
 below the data on purpose: the things you read constantly belong at the top, the
 things you press occasionally at the bottom.
 
+On a fresh logger the middle is empty and the tab is just health and controls,
+which is a complete and useful dashboard on its own.
+
+### Customising the dashboard
+
+![Building a dashboard](docs/img/customise.gif)
+
+*A logger with nothing on its card, to a laid-out dashboard. Recorded from the
+real page — the drag is a real pointer drag through the same handlers a finger
+goes through.*
+
+Press **Customise dashboard**. The grid becomes editable and a toolbar appears.
+
+![Customising the dashboard](docs/img/customising.png)
+
+While the grid is in this state the fast poll drops to a two-second heartbeat —
+the cells are placeholders being dragged around, so there is nothing live to
+update and no reason to ask the logger five times a second.
+
+Tap any cell to open the editor.
+
+<img src="docs/img/editor.png" alt="The cell editor" width="720">
+
+Choosing a signal fills in everything the frame map already knows — its unit,
+its `[min|max]` range, and how many decimals its scaling factor actually
+justifies — and suggests a shape from the unit and the name: `km/h` and `rpm`
+get a dial, `deg` with a negative minimum gets a centre-zero indicator, `bar` a
+half gauge, `degC` a thermometer, a signal with `VAL_` labels a state pill. All
+of it is a suggestion you can override; none of it is a question you have to
+answer.
+
+The preview at the top is the **real widget fed the real live value**, so the
+needle sits where it is going to sit.
+
+| | |
+|---|---|
+| **Ten ways to draw a value** | dial (speed, rpm, flow) · half dial (pressure, load) · centre-zero angle (steering, tilt, articulation) · compass (heading, yaw) · bar (percentages) · tank (fuel, oil level) · thermometer · plain number · trend (a rolling trace) · state (a coloured pill showing a `VAL_` name) |
+| **Arranging** | drag cells to swap them — pointer events, so it works with a finger as well as a mouse. Columns 1–6, rows 1–8, up to `DASH_MAX_CELLS` cells |
+| **Colour** | optional amber and red thresholds, and a *low values are the bad ones* switch for a level or a pressure that must not drop |
+| **Fill from frame map** | lays out everything the loaded `.dbc` describes, in file order, as far as the grid goes. Nothing has to be connected — this is the one to press at a desk, before going out |
+| **Fill from bus** | the same list, but the signals *actually arriving* are placed first and the rest are capped. This is the one to press standing at the machine, because a grid full of cells that will never update is worse than a small one where everything moves |
+| **Setup file** | export and import — see [The setup file](#the-setup-file) |
+
+### The setup file
+
+Everything customised on a logger — the dashboard cells **and** the values that
+can be sent — is one file. So there is **one** Export and **one** Import, in the
+header, on every tab, behind **Setup file**.
+
+<img src="docs/img/setup-file.png" alt="The setup file" width="720">
+
+**Export downloads to the device in your hand**, into its downloads folder.
+Nothing on the logger changes and no card is written, so it is safe to press
+mid-recording. **Import replaces both halves at once**, on the card and in the
+logger's own memory.
+
+The same sheet holds **this logger stands in for**, because it is a property of
+the whole setup rather than of either screen that reads it. A DBC's `BO_` line
+names the node that *transmits* each message:
+
+```
+BO_ 256 NodeStatus:  8 NodeA     the ECU sends it   -> a reading
+BO_ 288 HostCommand: 8 Host      the tool sends it  -> a command
+```
+
+Say which of those nodes this logger replaces and the two Fill buttons stop
+offering each other's messages. Nothing about recording changes — every frame
+that arrives is logged whoever the file says sends it. Leave it unset and both
+Fill buttons offer everything, as before.
+
+Two copies, one rule — because this is set up **at a desk, before you go out**,
+and has to be there when you arrive.
+
+```
+/dash.cfg on the SD card        the copy you can edit in any text editor,
+                                keep in version control, and copy between
+                                loggers. See examples/dash.cfg.
+
+NVS in the ESP32's own flash    survives a card swap, a reformat, and
+                                running with no card at all.
+```
+
+At boot the logger compares `/dash.cfg` against a hash of the text it last
+agreed with:
+
+- **hashes match** → nobody touched the card; the flash copy wins, which is
+  what preserves anything saved from the browser since the last boot
+- **hashes differ** → somebody edited the file; the card wins
+- **no file on the card** → the flash copy is written out to it, which is how
+  the file comes into existence
+- **nothing anywhere** → an empty grid, and the page says so
+
+The effect is the one people expect: *whichever you edited last is the one you
+get.* Saving in the browser writes the card immediately, through the task that
+owns it; the flash copy is written when no recording is running, because writing
+NVS stops the flash cache and the CAN interrupt is reached through a dispatcher
+that may not be resident in IRAM. Losing power in between costs nothing — the
+card is correct and the boot rule imports it.
+
+### The Bus tab
+
+![The Bus tab](docs/img/bus-view.png)
+
+**Live Signals** — every signal the frame map describes, with its current value
+and unit. **Identifiers on the wire** — every id seen since the recording
+started, its most recent payload, frame count, rate, and whether the frame map
+describes it. This is the tab for building a frame map, and the one to look at
+when a dashboard cell says a signal is missing.
+
 ### With no frame map
 
-Without a DBC the page does not pretend. The signal table says so and the
-identifier table becomes the live view, showing raw payloads as they change:
+Without a DBC the page does not pretend: there are no named signals to put on a
+dashboard, the Bus tab becomes the live view showing raw payloads as they
+change, and the Dashboard is health and controls.
 
 ![The dashboard with no frame map](docs/img/dashboard-raw.png)
 
-Like the firmware, the page names nothing of its own. It renders whatever the
-status document contains, and that document is built from the DBC and the
-traffic. Nothing about it changes when you swap buses — only the file on the
-card does.
+Like the firmware, the page names nothing of its own. Every widget, every unit
+and every range comes from the file on the card. Nothing about the page changes
+when you swap buses — only that file does.
 
 ### Preview it with no hardware
 
 ```bash
-python3 tools/preview_dashboard.py                          # raw-frame view
-python3 tools/preview_dashboard.py --dbc examples/example.dbc
+# the real page, against simulated data - opens on http://127.0.0.1:8080.
+# Starts from examples/machine.dbc and a COPY of examples/dash.cfg, so there is
+# a dashboard and a set of sendable values to look at from the first second.
+python3 tools/preview_dashboard.py
+
+# keep the changes: write them back to the example itself
+python3 tools/preview_dashboard.py --cfg examples/dash.cfg
+
+# a logger with nothing on its card, which is a different page
+python3 tools/preview_dashboard.py --empty --no-dbc
 ```
 
-That serves the real page, extracted from `src/webui.cpp`, against simulated
-data — so the preview can never drift from what the firmware ships. The
-screenshots above are generated from it:
+It prints what it loaded — `setup: 12 dashboard cells, 4 sendable values` — so an
+empty page is never a mystery.
+
+### Setting it up for your own bus, at a desk
+
+No logger, no wiring, no traffic. All you need is your `.dbc` and Python.
 
 ```bash
-python3 tools/capture_screenshots.py     # regenerates docs/img/
+python3 customise.py path/to/mine.dbc
+```
+
+or **double-click `customise.py`** and pick your file — from the list it finds,
+or press **b** to open your computer's own file browser. On Windows,
+`customise.bat` does the same and you can drag a `.dbc` straight onto it.
+`--browse` goes straight to the file dialog.
+
+That one command:
+
+- checks the file against the limits this firmware was built with, and says what
+  it could not read
+- picks a free port, starts the page and opens your browser at it
+- writes everything you build into `mine.cfg`, next to your `.dbc`, as you go
+
+Then, in the page:
+
+**1. Say who you are.** *Setup file* → **This logger stands in for**. A `.dbc`
+names the node that *sends* each message, so once the logger has an identity the
+two Fill buttons stop offering each other's messages — what your node sends are
+values to write, everything else are readings to watch.
+
+**2. Build the dashboard.** *Customise dashboard* → **Fill from frame map**. Every
+signal becomes a cell, drawn as its unit and name suggest. Delete what you do not
+want, drag the rest into order, tap any cell to change the shape, the range or the
+thresholds. Removing one closes the gap. The values moving on them are invented —
+the point is the layout.
+
+**3. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
+the frame map**, and pick the message your controller takes its settings from.
+Then fix the inputs: the one that should be a list of four tyre sizes becomes
+*Pick from a list I write*.
+
+**4. Take it with you.** Copy two files to the root of the SD card:
+
+```
+mine.dbc   ->  /frames.dbc
+mine.cfg   ->  /dash.cfg
+```
+
+Power the logger up and it opens on your dashboard, with your sendable values,
+having never been connected to a bus during any of it.
+
+#### Checking a frame map on its own
+
+```bash
+python3 tools/check_dbc.py path/to/mine.dbc          # counts, limits, direction
+python3 tools/check_dbc.py path/to/mine.dbc --list   # every message and signal
+```
+
+It names the lines it could not read, warns if the file overruns
+`DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS` / `DBC_MAX_VALDESC`, flags definition
+lines longer than `DBC_LINE_MAX` (which lose everything past the cut), and prints
+**who sends what** and which messages are multiplexed.
+
+It is pure Python — no compiler, no shell — which means it is a *second*
+implementation of `src/dbc.cpp` and would normally be a reason to distrust it.
+So `test/run_tests.sh` compiles the real parser and asserts the two agree,
+message for message and signal for signal, on every frame map in `examples/`.
+That test has already earned its place: it caught the Python reader reading a
+factor of `1e-06` as zero decimal places, which would have shown different
+digits at a desk than in the field.
+
+The page is extracted straight out of `src/webpage.cpp` on every request, so the
+preview can never drift from what the firmware serves, and editing the page and
+pressing refresh just works. **The data is invented** — the point of the tool is
+the interface, not the numbers. Layout changes are kept in memory and written
+back to `--cfg` if one is given, so a dashboard worked out here can be copied
+straight to the SD card.
+
+**The invented values follow the range you give a cell.** Narrow a gauge from
+`[0|4294967295]` down to 88–92 — the useful band around a steering-angle filter
+where 90 is straight — and the needle sweeps 88 to 92, instead of sitting pegged
+at the top of a scale nothing will ever reach. The value is remapped from the
+range the frame map declares into the range you chose, so it is the same motion
+expressed in your scale, and the Bus tab agrees with the dashboard about where
+the signal is running.
+
+The screenshots above are generated from it:
+
+```bash
+python3 tools/capture_screenshots.py     # regenerates docs/img/*.png
+python3 tools/capture_gifs.py            # regenerates the two walkthroughs
 ```
 
 Re-run that after changing the page, or this section will document a dashboard
@@ -433,14 +715,226 @@ that no longer exists.
 
 ### Why plain polling
 
-It is a plain `WebServer` with 2 Hz polling rather than an async server with
-websockets, on purpose: no third-party libraries, and the HTTP handler runs at
-the lowest priority and never touches the SD card or the CAN controller, so a
+It is a plain `WebServer` with polling rather than an async server with
+websockets, on purpose: no third-party libraries, so the PlatformIO and Arduino
+IDE builds are the same code with no install steps. The HTTP handler runs at the
+lowest priority and never touches the SD card or the CAN controller, so a
 browser hitting refresh cannot perturb a recording.
+
+The dashboard's request carries only the cells that exist, as text the decode
+task had already rendered — so the fast path copies strings and does no
+decoding, no formatting and no floating point. The two expensive tables live on
+the Bus tab, and are built only when that tab is open.
+
+The page itself is ~122 KB of HTML, CSS and hand-drawn SVG in one document with
+no external assets, streamed from flash to the socket a chunk at a time so it is
+never assembled in RAM. It has to load from a hotspot with no route anywhere,
+which rules out every CDN and therefore every gauge library there is.
 
 ---
 
-## 7. Why it does not lose frames
+## 7. Sending values back to the bus
+
+> **Read this before enabling it on a machine.** A CAN frame sent to a live
+> controller can move hydraulics, release a brake or enable a drive. The logger
+> sends what it is told and cannot know which. Everything below is about making
+> that deliberate rather than easy.
+
+Everything else in this firmware listens. This is the one part that talks: it
+writes a value into an ECU — a tyre size, a limit, a calibration offset — **while
+a recording is running**, so the change and its effect land in the same file.
+
+![Setting up what can be sent](docs/img/sending.gif)
+
+*Saying which node the logger stands in for, filling the sendable values from
+the frame map, arming, and sending. The frame it writes carries `Command = 32`
+because the `.dbc` says that is the opcode `WheelDia_mm` belongs to.*
+
+![The Send tab](docs/img/send-values.png)
+
+### Set the values up first, use them in the field
+
+The whole point is that nobody types a number next to a running machine. At the
+desk, press **Set up sendable values**.
+
+<img src="docs/img/send-setup.png" alt="Setting up the values that can be sent" width="620">
+
+Start with **Fill from the frame map**. Choose one message — or
+**every message this logger sends**, which is usually what you want, since a bus
+has one or two command frames and no reason to add them one at a time. Every
+signal in them becomes a value you can send, with the input guessed from the file — a signal with `VAL_` names
+becomes a list, a one-bit signal becomes two states, a signal with a declared
+range becomes a slider, anything else a number box. On
+[`examples/machine.dbc`](examples/machine.dbc) that turns `MachineConfig` into
+its four signals in one press.
+
+Then adjust each one: which signal it writes, and *how the value is picked*.
+
+| Input | For |
+|---|---|
+| **Pick from a list I write** | a tyre size that is one of the four your fleet uses; a gear ratio; anything with a small set of right answers |
+| **Pick from the frame map's own names** | a signal with `VAL_` labels — the list comes from the DBC, so it cannot disagree with it |
+| **Two states** | an enable, a mode flag, anything boolean, with your own labels rather than 0 and 1 |
+| **Slider** | a continuous limit, stopping exactly where the signal does |
+| **Type a number** | the fallback, not the default |
+
+Ranges come from the frame map, and are then **cut to what the bits can actually
+hold**: a 16-bit signal at factor 1 cannot carry 99999 however the file is
+annotated, and a slider that goes further than the wire does would aim the
+operator at a value that is silently clamped on the way out.
+
+These live in the same `/dash.cfg` as the dashboard, so they travel with it.
+[`examples/dash.cfg`](examples/dash.cfg) sets up four against
+[`examples/machine.dbc`](examples/machine.dbc), including the tyre size:
+
+```
+send 0 label="Tyre size" sig=MachineConfig.TyreSize unit=mm lo=400 hi=1400 \
+       preset=690 style=choice choices="620:620 mm|650:650 mm|690:690 mm|710:710 mm"
+```
+
+On the machine, the Send tab is then just: arm, pick, press.
+
+### Frames that only mean anything whole
+
+A value is not always a frame. Two cases need the whole frame sent at once, and
+both are read out of the DBC rather than left to be remembered.
+
+![Values that leave together](docs/img/send-groups.png)
+
+**Multiplexed commands.** A command frame often carries an opcode and a payload
+whose meaning depends on it:
+
+```
+BO_ 288 HostCommand: 8 Host
+ SG_ Command M         : 0|8@1+  ...     the selector
+ SG_ WheelDia_mm m32   : 8|16@1+ ...     only means "wheel diameter" under op 32
+```
+
+Writing `WheelDia_mm` on its own arrives as opcode 0 and is thrown away.
+So the logger **writes the selector automatically**, with the code the frame map
+says belongs to the signal being sent — inserted as raw bits, because a mux code
+is a bit pattern by definition and has no scaling of its own. The selector is not
+offered as a value to set up, because it is not a decision anybody should have to
+get right twice; the row that needs it just says *sent with Command = 32*.
+
+That example is in [`examples/example.dbc`](examples/example.dbc), and
+`test_encode.cpp` builds the frame from it and reads it back.
+
+A multiplexed frame is also the one case where the payload is **not** seeded from
+what the bus last said. The bytes mean different things on different pages, so
+carrying a previous page's bytes forward would send garbage under a new opcode.
+
+**The payloads of one multiplexed frame are kept as a set.** Filling adds all of
+them; removing any one removes all of them; and choosing one by hand brings the
+rest with it. Keeping two of five is keeping a half-described command — the
+operator sees *wheel diameter* and *amplitude* with no way to tell that three
+other opcodes exist. The setup sheet says so on each card, and the button reads
+**Remove all 6** rather than **Remove**.
+
+**Signals that are read as a set.** A plain message with several signals is one
+frame whichever signal you meant to change, so *Fill from the frame map* groups
+them: one box, one **Send all**, one frame. Behind it, the members are queued
+back to back with every one but the last held — each writes into the frame under
+construction and only the last transmits. The queue is drained by a single task,
+so nothing can slip in and split the group.
+
+Grouping is a `group=<n>` on the `send` lines, and any value can be pulled out of
+its group or put back in the setup sheet.
+
+### Arming
+
+Every Send button is dead until you press **ARM TRANSMIT**, and the logger
+disarms itself again after `TX_ARM_TIMEOUT_MS` (five minutes) without a send.
+
+<img src="docs/img/send-pinned.png" alt="The arm bar pinned to the top of a phone screen" width="300">
+
+Once the permission card scrolls away, a compact copy pins itself to the top of
+the screen, so **DISARM is always one press** however long the list of values is.
+It is fixed to the viewport rather than sticky in the flow, so nothing moves
+when it appears — which matters, because it appears while somebody is reaching
+for a Send button.
+
+This is not security — anyone on the hotspot can arm it. It is what stops a
+stray tap, a bookmarked page, or a browser restoring its tabs from sending a
+command nobody meant to send. It expires by itself because a gate that stays
+open is not a gate. Arming, disarming and every frame sent are written to the
+recording's `.log`.
+
+The gate is enforced **where the sending happens**, not in the browser and not
+in the HTTP handler: a repeating value stops the moment the gate closes.
+
+### What ends up in the recording
+
+An MCP2515 does not hear its own transmissions, so a frame the dashboard sent
+would otherwise be missing from the very file it was sent during — and a
+setpoint whose effect you can see but whose cause you cannot is worse than
+useless. Sent frames are therefore fed back into the recording, decoded the same
+way as everything else, with the message name prefixed:
+
+```
+t_us;id;name;signal;value;unit;raw
+1042318;0x110;TX:MachineConfig;TyreSize;690;mm;
+1042994;0x100;Drive;GroundSpeed;12.4;km/h;
+```
+
+**The seven-column schema is unchanged.** Nothing that predates this feature
+breaks; a reader that does not know about the prefix simply sees a message
+called `TX:MachineConfig`. `tools/parse_log.py` does know about it — it reports
+sent frames separately, marks them in `--list`, and groups them with the signal
+they wrote in `--wide` rather than making a second, nearly-empty column.
+
+### What happens on the wire
+
+`MCP2515::sendFrame()` puts the controller in **one-shot mode**, which is not
+the obvious choice and is the important one.
+
+Left to itself an MCP2515 retries an unacknowledged frame forever, and each
+failed attempt adds 8 to the transmit error counter. At 250 kbit/s, a frame sent
+to an ECU that is not there drives TEC from 0 to 255 in about **30 milliseconds**
+and the controller goes **bus-off** — which stops it *receiving* too. A logger
+that goes deaf because somebody pressed Send on a disconnected bus is a worse
+logger than one that cannot send at all.
+
+One-shot attempts the frame once, so TEC moves by 8 and the failure is reported
+instead of escalating. Losing arbitration is retried in software up to
+`TX_ATTEMPTS` times, because on a busy bus that is normal and is not a failure.
+The answer comes back as one of:
+
+| | |
+|---|---|
+| **sent and acknowledged** | at least one other node ACKed it, and TEC went *down* — which is the independent evidence, not just a status bit |
+| **nothing on the bus acknowledged it** | the ACK slot stayed empty. The most common reason a Send does not work, so it gets its own answer rather than a generic bus error |
+| **the bus was too busy to get on** | lost arbitration every attempt |
+| **listen-only mode** | `CAN_LISTEN_ONLY` is set, so the logger physically cannot drive the bus. Said out loud, rather than failing quietly |
+
+### Encoding
+
+A value is placed into its message by `dbcEncodeSignal()`, written as the mirror
+image of the decoder and reusing its bit walk, so `decode(encode(x)) == x` for
+every signal the logger can read. `test/test_encode.cpp` asserts exactly that by
+sweeping **every raw value** each signal can hold — a few thousand per run — and
+comparing the payload byte for byte. A transmit path that is subtly not the
+inverse of the receive path is the kind of bug that shows up as a machine doing
+the wrong thing, not as a wrong number on a screen.
+
+Two details that matter:
+
+- **The message's other signals are preserved.** The payload starts as the last
+  thing the bus said that message contained, and only the target signal's bits
+  are changed. Zeroing the rest would command every other signal in the message
+  to zero as a side effect of setting one.
+- **Out of range clamps, and says so.** Wrapping 70000 mm into 16 bits would put
+  4464 mm on the wire and nobody would ever know.
+
+### Turning it off entirely
+
+Set `CAN_LISTEN_ONLY` to `1` in `src/config.h`. The controller then physically
+cannot drive the bus, and the Send tab says so instead of appearing to work.
+That is the right setting for a logger left on a machine you do not own.
+
+---
+
+## 8. Why it does not lose frames
 
 This is the part worth copying if you build something else.
 
@@ -471,9 +965,30 @@ overflow flags (stage 1→2) and the queue-full counter (stage 2→3). A recordi
 that ends with `lost 0` is provably complete — that is what the *Data Integrity*
 card shows.
 
+**A non-zero figure is a floor, and says so.** The queue-full counter is exact:
+it counts frames. The controller's overflow flags are not — `EFLG` carries one
+sticky bit per receive buffer, so a service pass that finds them set knows *that*
+frames were lost, never how many. So the page reads `≥ 412 LOST`, and the log
+separates `ovfEvents` from `ovfFrames>=`.
+
+That distinction was worth drawing. The counter used to be incremented once per
+service pass, which in a fault that pinned the receiver made `lost` converge on
+a flat ~51/s — a poll rate wearing a loss figure's clothes. Checked against the
+4-bit rolling counters the bus itself carries, the true loss in three affected
+recordings was roughly **1.7× what was reported**:
+
+| recording | reported | actual, from rolling counters |
+|---|---|---|
+| A | 265 983 | 456 814 |
+| B | 271 305 | 478 986 |
+| C | 28 038 | 48 845 |
+
+The floor it now reports is still below the truth. It is at least honest about
+which direction it is wrong in.
+
 ---
 
-## 8. Surviving a power cut
+## 9. Surviving a power cut
 
 Two different things have to reach the card, and only the second one makes a
 recording readable again:
@@ -529,9 +1044,23 @@ would float and fire spuriously.
 
 ---
 
-## 9. Host-side tools
+## 10. Host-side tools
 
-Standard library only, except the plotter.
+Standard library only, except the plotter and the GIF recorder (`matplotlib`
+and `websocket-client`). **All of them are Python**, so they
+run the same on Windows, macOS and Linux with nothing installed — that is why
+there are no shell scripts here. (`test/run_tests.sh` and `arduino/sync.sh` are
+for contributors on Unix; the Arduino sketch folder has `arduino\sync.bat` for
+Windows.)
+
+```bash
+# lay the dashboard and the sendable values out for your own bus, at a desk.
+# Double-clickable; on Windows use customise.bat, or drag a .dbc onto it
+python3 customise.py path/to/mine.dbc
+
+# will this frame map load on the logger?
+python3 tools/check_dbc.py path/to/mine.dbc --list
+```
 
 ```bash
 # summary, per-id rates, and an integrity check
@@ -546,8 +1075,8 @@ python3 tools/parse_log.py 1.csv --wide wide.csv
 # plot (needs matplotlib); signals sharing a unit share an axis
 python3 tools/plot_log.py 1.csv 'MotorFeedback.*' -o out.png
 
-# the dashboard, with no hardware
-python3 tools/preview_dashboard.py --dbc examples/example.dbc
+# the same page directly, when you want the arguments rather than the prompts
+python3 tools/preview_dashboard.py --dbc examples/example.dbc --cfg mine.cfg
 
 # when a board will not enter download mode - see WINDOWS.md
 python tools/esp32_reset_probe.py COM3
@@ -579,7 +1108,7 @@ signature mismatch — only a real `pio run` does that, which is why CI does bot
 
 ---
 
-## 10. Tuning
+## 11. Tuning
 
 All in `src/config.h`:
 
@@ -589,7 +1118,8 @@ All in `src/config.h`:
 | `CAN_CRYSTAL_MHZ` | 8 | Must match your MCP2515 board |
 | `CAN_LISTEN_ONLY` | 0 | 1 = never drive the bus |
 | `DBC_PATH` | `/frames.dbc` | Where the frame map lives |
-| `DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS` | 64 / 256 | ~25 KB of static tables |
+| `DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS` | 256 / 1024 | Ceilings; the tables are sized to your file |
+| `DBC_HEAP_RESERVE` | 90 KB | Heap the frame map will not take, so Wi-Fi still starts |
 | `CANOPEN_DECODE` | 0 | Label unmapped ids CANopen-style |
 | `CSV_INCLUDE_RAW` | 0 | Keep the payload on decoded frames too |
 | `SD_BLOCK_BYTES` | 8192 | Bytes per SD write |
@@ -604,7 +1134,7 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 <details>
 <summary><i>expand</i></summary>
@@ -619,7 +1149,7 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 | One message logs as raw, the rest decode | Its identifier is not in the DBC — or it is, but with the 29-bit flag set/unset differently. |
 | `N line(s) of /frames.dbc could not be parsed` | Check the `.log` file. Interleaved `SG_` blocks and unsupported constructs are the usual causes. |
 | Values look scaled wrong | Factor, offset or start bit in the DBC. Set `CSV_INCLUDE_RAW = 1` and check the payload against the decoded value. |
-| `the frame map did not fit` | Raise `DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS`. Frames beyond it are still recorded, as raw bytes. |
+| `the frame map did NOT fit` | It says what it kept. Either the file passed a ceiling in `config.h`, or it wanted more heap than `DBC_HEAP_RESERVE` leaves. Frames beyond it are still recorded, as raw bytes. |
 | `lost` climbing | Slow SD card. Use a decent class-10, raise `SD_BLOCK_BYTES`, or check `maxWr` in `N.log`. |
 | Last seconds missing after a power cut | Expected without the power-fail input — see §8. If `maxSync` is large the card is slow at committing metadata. |
 | File exists but has only the header | Power was cut in the first second. The header is committed at start, so this is the floor, not corruption. |
@@ -635,7 +1165,7 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 
 </details>
 
-## 12. Verification status
+## 13. Verification status
 
 <details>
 <summary><i>expand</i></summary>
@@ -650,25 +1180,93 @@ xtensa-gcc 8.4.0 links a complete image, with **no warnings** from any of the te
 translation units under `-Wall -Wextra`:
 
 ```
-RAM:   [====      ]  35.1% (used 114896 bytes from 327680 bytes)
-Flash: [=====     ]  47.1% (used 925849 bytes from 1966080 bytes)
+RAM:   [==        ]  24.9% (used 81464 bytes from 327680 bytes)
+Flash: [=====     ]  54.7% (used 1075849 bytes from 1966080 bytes)
 ```
 
-Flash sits at 47 % of one 1.9 MB app slot, so the OTA partition scheme has ample
-room. RAM includes the ~25 KB of frame-map tables, the 24 KB frame queue and the
-13 KB CSV staging buffer.
+Flash sits at 55 % of one 1.9 MB app slot, so the OTA partition scheme still has
+ample room; the web page accounts for about 122 KB of it. That RAM figure is **static** memory, which is the one with a hard ceiling. It
+holds the 24 KB frame queue and the 13 KB CSV staging buffer; the frame map, the
+live values and the saved dashboard are all on the heap and sized to what is
+actually loaded.
 
-**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 128
-assertions across the DBC parser, the CSV schema, the CANopen layer and the
-logger, and all pass. That covers Intel and Motorola bit extraction, signed
-values, exact decimal scaling, value tables, multiplexing, IEEE floats, counter
-unwrapping, malformed DBC input, table overflow, the seven-field row invariant,
-the header block and the dashboard's DOM/status contract.
+**Static RAM is the binding constraint on this chip, not flash.** That is not a
+guess: the first build of the dashboard overflowed `dram0_0_seg` by 2248 bytes,
+and `DASH_MAX_CELLS` and `TX_MAX_COMMANDS` were cut to 36 and 10 to fit. Raising
+them to 32 later failed the link again, by 3960 bytes.
+
+Moving the big tables to the heap is what paid for the rest of this:
+
+| | before | after |
+|---|---|---|
+| Static RAM | 37.8 % (123,872 B) | **24.9 %** (81,464 B) |
+| Dashboard cells | 36 | 48 — the whole 6 × 8 grid |
+| Sendable values | 10 | 32 |
+| Frame map | fixed 64 msgs / 256 signals, 32 KB always | sized to the file, up to 1024 signals |
+| Live values | fixed 5 KB always | sized to the map |
+
+**32 sendable values is a hard ceiling, not a budget.** Whether a value is
+repeating is carried as a bit in a 32-bit mask, in the firmware and in the
+browser alike, and JavaScript's bitwise operators are 32-bit whatever you do to
+them. Going past 32 needs a different representation, not a bigger number in
+`config.h`.
+
+**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 309
+assertions across the DBC parser, the signal encoder, the CSV schema, the CANopen
+layer, the MCP2515 driver, the saved dashboard and the logger, and all pass. That
+covers Intel and Motorola bit extraction, signed values, exact decimal scaling,
+value tables, multiplexing, IEEE floats, counter unwrapping, malformed DBC input,
+table overflow, the seven-field row invariant, the config round trip, and the
+page's DOM and JSON contract.
+
+Two of those are worth naming, because they check a property rather than a
+handful of examples:
+
+- **`decode(encode(x)) == x` for every raw value.** `test_encode.cpp` sweeps
+  every value each signal in a deliberately awkward frame map can hold — a few
+  thousand per run — and compares the payload byte for byte. A transmit path
+  that is subtly not the inverse of the receive path is the kind of bug that
+  shows up as a machine doing the wrong thing.
+- **An unacknowledged frame does not reach bus-off.** `test_mcp2515.cpp` drives
+  the real driver against a simulated controller that never ACKs, and asserts
+  the frame is attempted **once** and reported, rather than retried into
+  bus-off — which would take the receive path down with it.
+- **The desk tools read a frame map exactly as the firmware does.**
+  `tools/check_dbc.py` and the preview share one reader written in Python so
+  they need no compiler; the test compiles `src/dbc.cpp` and asserts the two
+  produce the same messages, signals, bit widths, decimal places, units,
+  transmitters and multiplex codes for every file in `examples/`. It caught the
+  Python reader treating a factor of `1e-06` as zero decimal places.
+- **A real-sized frame map loads whole.** `test_dbc.cpp` builds a 104-message,
+  707-signal map — the shape of the bus that exposed the old fixed tables — and
+  asserts every message and every signal survives, that a small file gets a
+  small table, and that a 27-character signal name is not clipped.
+- **The per-identifier log line cannot be wrong.** `test_decode.cpp` asserts it
+  writes an empty string when there is no traffic (it used to print
+  uninitialised stack), never leaves a half-written entry (`snprintf`'s return
+  value was being added blind), never runs past its buffer, and that its rolling
+  window reports every identifier over successive lines rather than the same
+  nine for ever.
+- **A multiplexed command frame carries its own selector.** `test_encode.cpp`
+  builds `HostCommand.WheelDia_mm` the way `cantx.cpp` does and reads the frame
+  back: selector 32, payload 1380, selector still 32 after the payload is
+  rewritten, and a clamp rather than a wrap past the bit limit.
+
+**Verified — the web app, in a real browser.** The page is driven headlessly
+against the simulator: customising a dashboard, dragging cells, saving, reloading
+from the stored file, arming, and sending. Every screenshot in this README is
+generated by `tools/capture_screenshots.py` from that same page.
 
 **NOT verified — anything requiring hardware.** Nothing here has been run against
 an actual ESP32, an MCP2515, an SD card or a live CAN bus. The wiring, bit
 timing, throughput figures and SD behaviour are reasoned from the datasheets and
 the code, not measured.
+
+**NOT verified — transmitting to a real ECU.** The encoder is proven against its
+own decoder and the driver against a simulated controller, but no frame from this
+firmware has been put on a real wire or acknowledged by a real node. The one-shot
+and bus-off reasoning comes from the MCP2515 datasheet, not from a scope. Bench
+it against a node you can afford to confuse before pointing it at a machine.
 
 **NOT verified — the power-cut path specifically.** The sync interval, the
 emergency-close sequence and the hold-up capacitor sizing are reasoned from how

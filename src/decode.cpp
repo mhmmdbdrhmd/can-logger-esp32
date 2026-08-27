@@ -1,4 +1,6 @@
 #include "decode.h"
+
+#include <stdlib.h>
 #include <stdarg.h>
 #include "fmt.h"
 #include "config.h"
@@ -18,7 +20,34 @@ void busReset(BusStats &b) {
 }
 
 void liveReset(LiveSignals &l) {
-  memset(&l, 0, sizeof(l));
+  if (l.text)   memset(l.text,   0, (size_t)l.cap * LIVE_TEXT_MAX);
+  if (l.lastMs) memset(l.lastMs, 0, (size_t)l.cap * sizeof(uint32_t));
+  if (l.seen)   memset(l.seen,   0, (size_t)l.cap);
+  l.seenCount = 0;
+}
+
+void liveFree(LiveSignals &l) {
+  free(l.text); free(l.lastMs); free(l.seen);
+  l.text = nullptr; l.lastMs = nullptr; l.seen = nullptr;
+  l.cap = 0; l.seenCount = 0;
+}
+
+bool liveAllocate(LiveSignals &l, uint16_t signals) {
+  liveFree(l);
+  if (!signals) return true;
+
+  l.text   = (char (*)[LIVE_TEXT_MAX])calloc(signals, LIVE_TEXT_MAX);
+  l.lastMs = (uint32_t *)calloc(signals, sizeof(uint32_t));
+  l.seen   = (uint8_t  *)calloc(signals, 1);
+
+  if (!l.text || !l.lastMs || !l.seen) {
+    /* The live view is a convenience; the recording is not. Give the memory
+     * back and carry on with an empty one rather than failing the load. */
+    liveFree(l);
+    return false;
+  }
+  l.cap = signals;
+  return true;
 }
 
 /* Returns the table slot for this identifier, or -1 when the table is full. */
@@ -70,6 +99,55 @@ void busObserve(BusStats &b, const CanFrame &f, const DbcDb *db) {
     *p++ = kDigits[f.data[i] & 0x0Fu];
   }
   *p = '\0';
+
+  /* And as bytes, for the transmit path - see the note in decode.h. */
+  memcpy(b.lastData[slot], f.data, 8);
+  b.lastLen[slot] = n;
+}
+
+uint8_t busFormatIds(const BusStats &b, uint8_t *cursor, char *out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  out[0] = '\0';                 /* an empty table must not leave stack junk */
+
+  const uint8_t used = b.used;
+  if (!used || !cursor) return 0;
+  if (*cursor >= used) *cursor = 0;
+
+  size_t  k     = 0;
+  uint8_t shown = 0;
+
+  for (uint8_t n = 0; n < used; n++) {
+    const uint8_t i = (uint8_t)((*cursor + n) % used);
+
+    /* snprintf returns what it WANTED to write, not what it wrote. Adding that
+     * blind walks k past the end and leaves the last entry cut off mid-number,
+     * which then reads as a plausible count and is not one. */
+    const int w = snprintf(out + k, cap - k, "0x%lX=%lu(%lu/s)%s ",
+                           (unsigned long)b.id[i],
+                           (unsigned long)b.count[i],
+                           (unsigned long)b.rate[i],
+                           b.known[i] ? "" : "?");
+    if (w < 0 || (size_t)w >= cap - k) { out[k] = '\0'; break; }
+    k += (size_t)w;
+    shown++;
+  }
+
+  /* Advance even when nothing fitted, so a single over-long entry cannot pin
+   * the window on itself for ever. */
+  *cursor = (uint8_t)((*cursor + (shown ? shown : 1)) % used);
+  return shown;
+}
+
+bool busLastPayload(const BusStats &b, uint32_t id, bool ext,
+                    uint8_t *out, uint8_t *lenOut) {
+  for (uint8_t i = 0; i < b.used; i++) {
+    if (b.id[i] != id || (bool)b.ext[i] != ext) continue;
+    if (!b.lastLen[i]) return false;
+    if (out)    memcpy(out, b.lastData[i], 8);
+    if (lenOut) *lenOut = b.lastLen[i];
+    return true;
+  }
+  return false;
 }
 
 void busTick(BusStats &b, uint32_t elapsedMs) {
@@ -99,7 +177,7 @@ static char *putPayload(char *p, const CanFrame &f) {
  * decodes anything, and it never learns a signal's name from the firmware. */
 static void publishLive(const DbcDb *db, uint16_t sigIndex,
                         const char *text, size_t len) {
-  if (!db || sigIndex >= DBC_MAX_SIGNALS) return;
+  if (!db || sigIndex >= g_live.cap) return;
   if (len > LIVE_TEXT_MAX - 1) len = LIVE_TEXT_MAX - 1;
 
   memcpy(g_live.text[sigIndex], text, len);
@@ -142,6 +220,13 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
   const DbcMessage *m = _db ? dbcFind(*_db, f.id, ext) : nullptr;
   const char *msgName = m ? m->name : nullptr;
 
+  /* A frame this logger sent is written into the same file, in the same
+   * schema, with its message name prefixed. The seven columns are unchanged -
+   * every existing parser keeps working - and a reader can tell a command
+   * apart from the data around it by looking at the name, which is where a
+   * reader would look anyway. */
+  const bool isTx = (f.tx != 0);
+
 #if CANOPEN_DECODE
   char coName[CANOPEN_NAME_MAX];
   coName[0] = '\0';
@@ -167,6 +252,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
       if (!v.ok) continue;          /* declared past the end of this payload */
 
       p = putPrefix(p, t, f.id, ext);
+      if (isTx) p = putStr(p, "TX:");
       p = putStr(p, msgName);
       *p++ = ';';
       p = putStr(p, s.name);
@@ -177,8 +263,14 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
       else if (v.exact) p = fmtFixed(p, v.scaled, v.dec);
       else              p = fmtDouble(p, v.fval);
 
-      publishLive(_db, (uint16_t)(m->firstSignal + i), valStart,
-                  (size_t)(p - valStart));
+      /* Deliberately not published to the live view. What the dashboard shows
+       * is what the bus said, not what this logger asked for - a gauge that
+       * jumps to the commanded value the moment Send is pressed would be
+       * reporting the request as though it were the answer. */
+      if (!isTx) {
+        publishLive(_db, (uint16_t)(m->firstSignal + i), valStart,
+                    (size_t)(p - valStart));
+      }
 
       *p++ = ';';
       p = putStr(p, s.unit);
@@ -199,6 +291,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
     const uint8_t nf = canopenFields(f.id, f.data, f.len, fld, CANOPEN_MAX_FIELDS);
     for (uint8_t i = 0; i < nf && emitted < DECODE_MAX_ROWS; i++) {
       p = putPrefix(p, t, f.id, ext);
+      if (isTx) p = putStr(p, "TX:");
       p = putStr(p, msgName);
       *p++ = ';';
       p = putStr(p, fld[i].name);
@@ -222,6 +315,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
    * card in full and can be decoded offline later.                         */
   if (!emitted) {
     p = putPrefix(p, t, f.id, ext);
+    if (isTx) p = putStr(p, "TX:");
     p = putStr(p, msgName);
     *p++ = ';';                    /* end of name   */
     *p++ = ';';                    /* signal, empty */
@@ -230,7 +324,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
     p = putPayload(p, f);
     *p++ = '\n';
     emitted = 1;
-    g_bus.undecoded++;
+    if (!isTx) g_bus.undecoded++;
   }
 
   (void)rawDone;
@@ -408,15 +502,21 @@ size_t csvHeaderBlock(char *buf, size_t cap, const char *filename,
     return (size_t)(n + k);
   }
 
+  /* The name cap is stated whether or not it bit, because it is a property of
+   * the file anyone reads later: matching these rows against the source DBC by
+   * exact name only works if you know where the names stop. */
   int k = snprintf(buf + n, cap - (size_t)n,
     "# FRAME MAP: %s\n"
     "#   %s\n"
     "#   %u messages, %u signals%s%s\n"
+    "#   names are cut to %u characters%s\n"
     "#\n",
     DBC_PATH, db.version[0] ? db.version : "(no VERSION string)",
     (unsigned)db.msgCount, (unsigned)db.sigCount,
     db.inexact  ? ", some values via floating point" : ", all values exact",
-    db.overflow ? ", TRUNCATED - the map did not fit" : "");
+    db.overflow ? ", TRUNCATED - the map did not fit" : "",
+    (unsigned)(DBC_NAME_MAX - 1),
+    db.nameClipped ? " - SOME WERE CUT" : "");
   if (k < 0 || (size_t)(n + k) >= cap) return 0;
   n += k;
 

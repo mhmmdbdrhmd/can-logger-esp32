@@ -3,6 +3,9 @@
 #include "decode.h"
 #include "fmt.h"
 #include <string>
+#include <sstream>
+#include <set>
+#include <string.h>
 
 uint32_t   g_fakeMs = 0;
 FakeSerial Serial;
@@ -40,12 +43,12 @@ static CanFrame mk(uint32_t id, uint64_t us, std::initializer_list<uint8_t> b,
   return f;
 }
 
+/* Loads the map the way the firmware does: count, size the tables to the file,
+ * then parse. Feeding dbcParseLine() with no tables allocated parses nothing. */
 static void feed(DbcDb &db, const char *const *lines) {
-  char buf[DBC_LINE_MAX];
-  for (const char *const *l = lines; *l; l++) {
-    snprintf(buf, sizeof(buf), "%s", *l);
-    dbcParseLine(db, buf);
-  }
+  std::string text;
+  for (const char *const *l = lines; *l; l++) { text += *l; text += '\n'; }
+  dbcLoadText(db, text.c_str(), text.size());
 }
 
 static const char *const MAP[] = {
@@ -212,6 +215,88 @@ int main() {
     }
     printf("  mean frame %.1f bytes -> %.1f KB/s at 1000 frames/s\n",
            total / 100.0, total / 100.0 * 1000 / 1024.0);
+  }
+
+  /* ==================================================================
+   *  The per-identifier log line.
+   *
+   *  Every one of these asserts a bug found in ten hours of real recordings:
+   *  an uninitialised buffer printed as %s, a list that ran past the line
+   *  limit and pushed the totals off the end, and snprintf's return value
+   *  added blind so the last entry was cut mid-number.
+   * ================================================================== */
+  printf("\n== the per-identifier log line ==\n");
+  {
+    BusStats b;
+    busReset(b);
+    char    line[LOG_LINE_CHARS];
+    uint8_t cur = 0;
+
+    /* (a) No traffic at all. The old code left `per` uninitialised and the
+     *     log printed whatever was on the stack. */
+    memset(line, 0x5A, sizeof(line));
+    ck("an empty table writes an empty string",
+       busFormatIds(b, &cur, line, sizeof(line)) == 0 && line[0] == '\0');
+
+    /* A busy bus: far more identifiers than a line can hold. */
+    const uint32_t N = BUS_TRACK_IDS;
+    for (uint32_t i = 0; i < N; i++) {
+      for (int r = 0; r < 700 + (int)i; r++) busNote(b, 0x18FEF100u + i, true,
+                                                     (i % 2) == 0, 1000);
+    }
+    busTick(b, 1000);
+    ck("the table filled", b.used == N, std::to_string(b.used));
+
+    /* (b) and (c): whatever it writes must fit, must be nul-terminated, and
+     *     must never end in a half-written entry. */
+    cur = 0;
+    std::set<std::string> seen;
+    uint8_t  totalShown = 0;
+    bool     partial = false, overran = false;
+
+    for (int pass = 0; pass < 12; pass++) {
+      memset(line, 0x5A, sizeof(line));
+      const uint8_t n = busFormatIds(b, &cur, line, sizeof(line));
+      totalShown = (uint8_t)(totalShown + n);
+
+      const char *nul = (const char *)memchr(line, '\0', sizeof(line));
+      if (!nul) { overran = true; break; }
+
+      /* Split on spaces. Each entry must be complete: 0x<id>=<n>(<r>/s) */
+      std::string  text(line);
+      std::istringstream is(text);
+      std::string  tok;
+      int          entries = 0;
+      while (is >> tok) {
+        entries++;
+        if (tok.rfind("0x", 0) != 0 || tok.find('=') == std::string::npos ||
+            tok.find("/s)") == std::string::npos) {
+          partial = true;
+        }
+        seen.insert(tok.substr(0, tok.find('=')));
+      }
+      if (entries != n) partial = true;
+    }
+
+    ck("never writes past the buffer", !overran);
+    ck("never leaves a half-written entry", !partial);
+    ck("more than one identifier fits a line", totalShown >= 12,
+       std::to_string(totalShown));
+
+    /* The window rotates, so a hundred-identifier bus is fully reported over
+     * a minute of once-a-second lines instead of showing the same nine for
+     * ever. Twelve passes is more than enough to cover forty. */
+    ck("the window covers every identifier", seen.size() == N,
+       std::to_string(seen.size()) + " of " + std::to_string(N));
+
+    /* A buffer too small for even one entry must still terminate. */
+    char tiny[8];
+    memset(tiny, 0x5A, sizeof(tiny));
+    cur = 0;
+    ck("a buffer too small fits nothing and still terminates",
+       busFormatIds(b, &cur, tiny, sizeof(tiny)) == 0 && tiny[0] == '\0');
+    ck("and the cursor still moves, so it cannot pin itself", cur != 0,
+       std::to_string(cur));
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);

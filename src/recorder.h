@@ -37,7 +37,22 @@ struct RecStatus {
   uint32_t framesRx      = 0;   /* frames pulled out of the controller      */
   uint32_t frameRate     = 0;   /* frames/s over the last second            */
   uint32_t queueDropped  = 0;   /* frame queue was full - data WAS lost     */
-  uint32_t canOverflow   = 0;   /* MCP2515 dropped it before we read it     */
+
+  /* Two different things, kept apart because conflating them made the loss
+   * figure wrong by about forty percent in ten hours of field recordings.
+   *
+   * canOvfEvents counts SERVICE PASSES that found the controller's overflow
+   * flags set. In the wedged state that is one per 20 ms poll, so it converges
+   * on a flat ~51/s - a poll rate wearing a loss figure's clothes.
+   *
+   * canOvfFramesMin is a LOWER BOUND on frames actually lost. EFLG has one
+   * sticky bit per receive buffer, so a pass that finds both set means at
+   * least two frames went missing; how many more is not knowable from the
+   * controller, which only remembers that it happened. Measured against the
+   * rolling counters carried by the bus itself, the true figure was roughly
+   * 1.7x this - so treat it as the floor it is, never as the total. */
+  uint32_t canOvfEvents    = 0;
+  uint32_t canOvfFramesMin = 0;
   uint32_t queuePeak     = 0;   /* deepest the frame queue has ever been    */
   uint32_t writeCount    = 0;
   uint32_t writeMaxUs    = 0;
@@ -82,6 +97,17 @@ bool recorderBeginSD();
  * is mounted and before the first recording starts. Absence of the file is not
  * an error: the logger then records raw payload bytes. */
 void recorderLoadDbc();
+
+/* Reconciles the dashboard layout on the card with the one in flash. Call
+ * after dashStoreBegin() and after recorderLoadDbc(); see dashstore.h for the
+ * rule that decides which copy wins. Absence of the file is not an error. */
+void recorderLoadDash();
+
+/* Asks the writer task to mirror the current layout back to DASH_PATH, so the
+ * card keeps agreeing with flash after an edit in the browser. Asynchronous,
+ * like the start/stop requests, because the web handler must never wait on the
+ * SD card - a slow card would stall the HTTP loop, not just this write. */
+void recorderRequestSaveDash();
 
 /* Asynchronous requests - honoured by the writer task on its next pass, so
  * they are safe to call from the web handler or from setup(). */

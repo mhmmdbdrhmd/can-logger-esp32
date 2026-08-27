@@ -1,0 +1,79 @@
+VERSION "machine.dbc - a worked example: what a mobile machine bus tends to look like"
+
+NS_ :
+
+BS_:
+
+BU_ Drive Chassis Hydraulic Host
+
+
+CM_ "  ---------------------------------------------------------------------
+       This file exists to be a REALISTIC example, not a real machine.
+       The identifiers are made up. What is deliberate is the shape:
+
+         - every signal carries a [min|max] that means something physically,
+           not just the range its bits happen to span. That annotation is what
+           the dashboard scales a gauge from, so a file that writes [0|65535]
+           for a road speed produces a gauge that never leaves the stop.
+         - the units are the ones the dashboard recognises when it suggests a
+           widget: km/h and rpm suggest a dial, deg suggests an angle, bar a
+           half gauge, degC a thermometer, % a bar.
+         - MachineConfig is a message the logger SENDS rather than receives,
+           which is what the Send tab is for.
+       ---------------------------------------------------------------------";
+
+
+BO_ 256 Drive: 8 Drive
+ SG_ GroundSpeed : 0|12@1+ (0.0625,0) [0|50] "km/h" Host
+ SG_ Direction : 12|2@1+ (1,0) [0|3] "" Host
+ SG_ Gear : 14|3@1+ (1,0) [0|4] "" Host
+ SG_ EngineSpeed : 24|16@1+ (0.5,0) [0|3000] "rpm" Host
+ SG_ ThrottlePos : 40|8@1+ (0.4,0) [0|100] "%" Host
+
+BO_ 257 Steering: 8 Chassis
+ SG_ SteeringAngle : 0|16@1- (0.01,0) [-45|45] "deg" Host
+ SG_ ArticulationAngle : 16|16@1- (0.01,0) [-40|40] "deg" Host
+ SG_ SteeringRate : 32|16@1- (0.1,0) [-200|200] "deg/s" Host
+
+BO_ 258 Attitude: 8 Chassis
+ SG_ Heading : 0|16@1+ (0.01,0) [0|359.99] "deg" Host
+ SG_ Roll : 16|16@1- (0.01,0) [-30|30] "deg" Host
+ SG_ Pitch : 32|16@1- (0.01,0) [-30|30] "deg" Host
+
+BO_ 259 Hydraulics: 8 Hydraulic
+ SG_ SystemPressure : 0|16@1+ (0.1,0) [0|350] "bar" Host
+ SG_ PilotPressure : 16|16@1+ (0.1,0) [0|60] "bar" Host
+ SG_ OilTemperature : 32|8@1+ (1,-40) [-40|120] "degC" Host
+ SG_ OilLevel : 40|8@1+ (0.5,0) [0|100] "%" Host
+ SG_ FilterBlocked : 48|1@1+ (1,0) [0|1] "" Host
+
+BO_ 260 Wheels: 8 Chassis
+ SG_ TyrePressFL : 0|8@1+ (0.05,0) [0|12] "bar" Host
+ SG_ TyrePressFR : 8|8@1+ (0.05,0) [0|12] "bar" Host
+ SG_ TyrePressRL : 16|8@1+ (0.05,0) [0|12] "bar" Host
+ SG_ TyrePressRR : 24|8@1+ (0.05,0) [0|12] "bar" Host
+ SG_ FrontAxleLoad : 32|16@1+ (1,0) [0|12000] "kg" Host
+
+BO_ 261 Electrical: 8 Chassis
+ SG_ BatteryVoltage : 0|16@1+ (0.01,0) [0|32] "V" Host
+ SG_ AlternatorCurrent : 16|16@1- (0.1,0) [-200|200] "A" Host
+ SG_ FuelLevel : 32|8@1+ (0.4,0) [0|100] "%" Host
+ SG_ CoolantTemp : 40|8@1+ (1,-40) [-40|120] "degC" Host
+
+BO_ 272 MachineConfig: 8 Host
+ SG_ TyreSize : 0|16@1+ (1,0) [400|1400] "mm" Chassis
+ SG_ SpeedLimit : 16|8@1+ (0.25,0) [0|50] "km/h" Drive
+ SG_ WeightCalib : 24|16@1- (0.1,0) [-500|500] "kg" Chassis
+ SG_ WorkMode : 40|4@1+ (1,0) [0|3] "" Drive
+
+
+CM_ BO_ 272 "Written BY the logger, not read from the bus. These are the values
+the Send tab exists for: a tyre size the machine needs in order to turn wheel
+pulses into a distance, a speed limit, a load-cell calibration offset.";
+CM_ SG_ 272 TyreSize "Rolling circumference in millimetres. Setting this wrong
+does not fail: it silently scales every distance and speed the machine reports.";
+
+VAL_ 256 Direction 0 "neutral" 1 "forward" 2 "reverse" 3 "invalid" ;
+VAL_ 256 Gear 0 "N" 1 "1" 2 "2" 3 "3" 4 "4" ;
+VAL_ 259 FilterBlocked 0 "ok" 1 "blocked" ;
+VAL_ 272 WorkMode 0 "transport" 1 "loading" 2 "precision" 3 "service" ;

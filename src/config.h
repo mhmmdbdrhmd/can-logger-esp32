@@ -91,13 +91,38 @@
  * -------------------------------------------------------------------------*/
 #define DBC_PATH            "/frames.dbc"
 
-/* Static capacity of the frame map. Sized for a comfortable machine bus; raise
- * if the parser reports "table full", but watch the heap - the tables are
- * roughly DBC_MAX_MESSAGES*48 + DBC_MAX_SIGNALS*72 + DBC_MAX_VALDESC*40 bytes,
- * about 25 KB at these defaults. */
-#define DBC_MAX_MESSAGES    64
-#define DBC_MAX_SIGNALS     256
-#define DBC_MAX_VALDESC     128
+/* CEILINGS on the frame map, not its size.
+ *
+ * The tables are counted from the file and allocated to fit it (see dbc.h), so
+ * a twenty-signal bus costs two kilobytes and only a genuinely large file gets
+ * anywhere near these. They exist so a corrupt or hostile file cannot ask for
+ * a gigabyte, and so the arithmetic stays in uint16_t.
+ *
+ * They were 64 / 256 / 128 and FIXED, which cost real data: a field recording
+ * of a 104-message, 707-signal steering bus decoded the first 256 signals and
+ * wrote the other 451 as raw payload, with one line in the CSV header to say
+ * so. Nothing about the numbers was wrong for the bus they were chosen for -
+ * being fixed at all was the problem. */
+#define DBC_MAX_MESSAGES    256
+#define DBC_MAX_SIGNALS     1024
+#define DBC_MAX_VALDESC     2048
+
+/* Heap the frame map will NOT take, whatever the file asks for.
+ *
+ * The map is loaded before the radio starts, so an unbounded map could leave
+ * the Wi-Fi stack with nothing and take the web app down to decode a few more
+ * signals - the wrong trade in both directions. When the file needs more than
+ * the budget allows, the request is scaled down proportionally and the load
+ * reports what it kept, which is the same "map did not fit" path that has
+ * always existed. Wi-Fi AP plus the web server wants roughly 50 KB; the rest
+ * is margin for the writer's buffers and the task stacks. */
+#define DBC_HEAP_RESERVE    90000UL
+/* Nodes named in BU_. Kept because a DBC says who TRANSMITS each message, and
+ * that is the only thing in the file that separates "a reading to watch" from
+ * "a command to send". Names are stored once and referenced by index, so this
+ * is a fixed table and the only one left in static memory - 32 names is a
+ * kilobyte. Eight was not enough: a real J1939 steering bus named 24. */
+#define DBC_MAX_NODES       32
 
 /* ---------------------------------------------------------------------------
  *  4. CANopen
@@ -270,6 +295,118 @@
 /* Leave empty for no password. Anyone on the same network (or joined to the
  * hotspot) can otherwise reflash the logger. */
 #define OTA_PASSWORD        "canlogger"
+
+/* ---------------------------------------------------------------------------
+ *  12. THE OPERATOR'S DASHBOARD
+ *
+ *  A grid of cells, each drawing one signal from the frame map the way the
+ *  user asked for it. Nothing here is bus-specific either: the layout is a
+ *  file, the same way the frame map is.
+ *
+ *  The layout lives in the ESP32's own NVS flash so it survives a card swap,
+ *  and is mirrored to DASH_PATH on the card so it can be edited in a text
+ *  editor and copied between loggers. See dash.h for which one wins.
+ * -------------------------------------------------------------------------*/
+#define DASH_PATH           "/dash.cfg"
+
+/* Written first, then renamed over DASH_PATH. A power cut partway through a
+ * direct write would leave a half-parsed layout on the card, which the boot
+ * rule would then read as somebody's edit and import over the good copy. */
+#define DASH_TMP_PATH       "/dash.tmp"
+
+/* Grid limits. Six across is about where a cell stops being readable on a
+ * phone; eight down is more than fits on any screen without scrolling, which
+ * is the point at which a dashboard has stopped being a dashboard.
+ *
+ * DASH_MAX_CELLS covers the whole 6x8 grid. It used to be 36 - less than
+ * cols x rows - because the configuration sat in static RAM and static RAM is
+ * the binding constraint on this chip: the first version of the dashboard
+ * overflowed `dram0_0_seg` outright. It now lives on the heap (see dash.h), so
+ * the grid no longer has to be clipped to fit the segment.
+ *
+ * Raising these is bounded by the heap rather than by the link step, so the
+ * honest test is the free-memory figure on the Dashboard tab after a boot with
+ * a full configuration loaded, not a build that succeeds. */
+#define DASH_MAX_COLS       6
+#define DASH_MAX_ROWS       8
+#define DASH_MAX_CELLS      48
+
+/* How often the browser asks for the cell values, and the floor it is clamped
+ * to. 200 ms is five updates a second: a needle with a CSS transition across
+ * that interval looks continuous, and the request itself only carries the
+ * cells actually on screen, so it is far cheaper than the status document.
+ * Below ~100 ms the ESP32 pays real time for smoothness nobody can see. */
+#define DASH_POLL_MS        200
+#define DASH_STALE_MS       3000    /* a cell fades if its message stops     */
+#define DASH_POLL_MIN_MS    100
+
+/* Serialised size of the whole configuration - layout and setpoints. Also the
+ * size of the buffer it is built in, so it is charged to the stack of whoever
+ * saves, not held permanently. */
+#define DASH_NODE_MAX       24
+#define DASH_CFG_MAX        6144
+
+/* ---------------------------------------------------------------------------
+ *  13. SENDING VALUES BACK TO THE BUS
+ *
+ *  Everything above is passive. This is not: it lets the dashboard write a
+ *  value into an ECU - a tyre size, a limit, a calibration - while a recording
+ *  is running, so the change and its effect land in the same file.
+ *
+ *  READ THIS BEFORE ENABLING IT ON A MACHINE. A CAN frame sent to a live
+ *  controller can move hydraulics, release a brake or enable a drive. The
+ *  logger cannot know which; it sends what it is told. The protections it does
+ *  offer are:
+ *
+ *    - CAN_LISTEN_ONLY above overrides everything here. A logger in listen-only
+ *      mode physically cannot drive the bus, and Send says so rather than
+ *      failing quietly.
+ *    - the dashboard must be ARMED before any Send button works, and disarms
+ *      itself again after TX_ARM_TIMEOUT_MS without a send,
+ *    - every arm, disarm and send is written to the recording's .log,
+ *    - one-shot mode in the controller means an unacknowledged frame is
+ *      reported once instead of being retried into bus-off (see mcp2515.h).
+ * -------------------------------------------------------------------------*/
+/* Saved values the Send tab offers.
+ *
+ * 32, and 32 is a hard ceiling rather than a budget: whether a value is
+ * repeating is carried as a bit in a 32-bit mask, in the firmware and in the
+ * browser alike, and JavaScript's bitwise operators are 32-bit whatever you do
+ * to them. Going further means a different representation, not a bigger number
+ * here.
+ *
+ * It used to be ten, because each one costs about 200 bytes and they sat in
+ * static RAM. They are on the heap now (see dash.h), which is what paid for
+ * the other twenty-two. */
+#define TX_MAX_COMMANDS     32
+
+/* The option list behind a "pick one of these" input, as text. Enough for six
+ * or so labelled choices - more than anyone should be asked to scan while
+ * standing next to a running machine. */
+#define TX_CHOICES_MAX      80
+
+/* Requests queued from the web handler to the CAN task, which is the only task
+ * allowed to touch the controller. Small on purpose: this is an operator
+ * pressing a button, not a data path. */
+#define TX_QUEUE_LEN        8
+
+/* Results kept for the browser to collect. The dashboard polls several times a
+ * second and reads four at a time, so a burst cannot outrun this. */
+#define TX_RESULT_RING      4
+
+/* How long the dashboard stays armed with nothing being sent. Long enough to
+ * work through a set of values, short enough that a forgotten browser tab on a
+ * phone in someone's pocket is not still armed an hour later. */
+#define TX_ARM_TIMEOUT_MS   300000UL
+
+/* Fastest a cyclic setpoint may repeat. The CAN task wakes every 20 ms, so
+ * anything below that would simply be rounded up to it. */
+#define TX_CYCLIC_MIN_MS    50
+
+/* Attempts before a send is reported as having lost arbitration. Losing it once
+ * on a busy bus is normal; losing it three times running means the identifier
+ * is too low a priority to get on the wire. */
+#define TX_ATTEMPTS         3
 
 #define FIRMWARE_NAME    "CAN Logger ESP32"
 #define FIRMWARE_VERSION "1.0.0"

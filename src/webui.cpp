@@ -5,6 +5,10 @@
 #include "logger.h"
 #include "netcfg.h"
 #include "dbc.h"
+#include "dash.h"
+#include "dashstore.h"
+#include "cantx.h"
+#include "webpage.h"
 
 #include <WebServer.h>
 #include <ESPmDNS.h>
@@ -12,349 +16,18 @@
 static WebServer *s_srv = nullptr;
 
 /* ==========================================================================
- *  The page. One file, no external assets - it must load with no internet.
- * ======================================================================== */
-static const char PAGE_HTML[] PROGMEM = R"HTML(<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAN Logger</title>
-<style>
-:root{
-  --bg:#0e1116; --panel:#171c24; --line:#252c38; --txt:#e8edf5; --dim:#8b97a8;
-  --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --acc:#3b82f6;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);
-  font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:14px;padding-bottom:32px;-webkit-text-size-adjust:100%}
-h1{font-size:19px;margin:0;letter-spacing:.2px}
-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-#conn{margin-left:auto;font-size:13px;color:var(--dim)}
-.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
-/* Five status tiles across on a desktop, wrapping to one on a phone. */
-.grid5{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
-.ctl{margin-top:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
-.meter{height:6px;border-radius:3px;background:#0d1219;margin-top:12px;overflow:hidden}
-.meter span{display:block;height:100%;width:0;background:var(--ok);
-  transition:width .4s ease,background .4s ease}
-button.reboot{background:transparent;border:1px solid var(--line);color:var(--dim);
-  font-weight:500}
-button.reboot:hover{border-color:var(--bad);color:var(--bad)}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
-.card h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;
-  color:var(--dim);margin:0 0 10px;font-weight:600}
-.state{display:flex;align-items:center;gap:12px}
-.dot{width:18px;height:18px;border-radius:50%;flex:none;background:var(--dim);
-  box-shadow:0 0 0 4px rgba(255,255,255,.05)}
-.dot.ok{background:var(--ok);box-shadow:0 0 0 4px rgba(34,197,94,.18)}
-.dot.warn{background:var(--warn);box-shadow:0 0 0 4px rgba(245,158,11,.18)}
-.dot.bad{background:var(--bad);box-shadow:0 0 0 4px rgba(239,68,68,.18)}
-.dot.rec{animation:pulse 1.2s ease-in-out infinite}
-@keyframes pulse{50%{opacity:.35}}
-.big{font-size:23px;font-weight:650;line-height:1.15}
-.sub{font-size:13px;color:var(--dim);margin-top:5px}
-button{font:inherit;font-weight:650;border:0;border-radius:11px;padding:15px 22px;
-  color:#fff;cursor:pointer;width:100%;margin-top:12px;letter-spacing:.02em}
-.start{background:var(--ok)} .stop{background:var(--bad)}
-button:active{transform:translateY(1px)}
-.scroll{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
-/* Headers and cells must share an alignment or the columns visibly disagree,
-   which is what happened when th was right-aligned and td was not. Alignment
-   is set per column instead, on both. */
-th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
-  text-align:left;font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
-th.num,td.num{text-align:right;font-variant-numeric:tabular-nums}
-/* Fixed layout so the columns do not jump about as values change width. */
-table.sig{table-layout:fixed}
-table.sig th.c1,table.sig td.c1{width:30%}
-table.sig th.c2,table.sig td.c2{width:30%}
-table.sig th.c3,table.sig td.c3{width:22%}
-table.sig th.c4,table.sig td.c4{width:18%;padding-left:14px}
-td.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-td{padding:6px 8px;border-bottom:1px solid #1b212b;font-size:14px}
-td.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-tr.un td{color:var(--dim)}
-#term{background:#080b0f;border:1px solid var(--line);border-radius:12px;
-  margin-top:12px;height:290px;overflow:auto;padding:11px 13px;
-  font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  color:#a8b6c8;white-space:pre-wrap;word-break:break-word}
-#term div.W{color:var(--warn)} #term div.E{color:var(--bad)}
-#term div.I{color:#cfe0f5}
-.foot{color:var(--dim);font-size:12px;margin-top:12px;text-align:center}
-</style></head><body>
-
-<header>
-  <h1>CAN Logger</h1>
-  <span id="conn">connecting...</span>
-</header>
-
-<div class="grid grid5">
-  <div class="card">
-    <h2>SD Card</h2>
-    <div class="state"><span class="dot" id="d_sd"></span>
-      <div><div class="big" id="t_sd">--</div><div class="sub" id="s_sd"></div></div></div>
-  </div>
-
-  <div class="card">
-    <h2>Bus</h2>
-    <div class="state"><span class="dot" id="d_can"></span>
-      <div><div class="big" id="t_can">--</div><div class="sub" id="s_can"></div></div></div>
-  </div>
-
-  <div class="card">
-    <h2>Interrupt Path</h2>
-    <div class="state"><span class="dot" id="d_irq"></span>
-      <div><div class="big" id="t_irq">--</div><div class="sub" id="s_irq"></div></div></div>
-  </div>
-
-  <div class="card">
-    <h2>Data Integrity</h2>
-    <div class="state"><span class="dot" id="d_lost"></span>
-      <div><div class="big" id="t_lost">--</div><div class="sub" id="s_lost"></div></div></div>
-  </div>
-
-  <div class="card">
-    <h2>CAN Bus Load</h2>
-    <div class="state"><span class="dot" id="d_load"></span>
-      <div><div class="big" id="t_load">--</div><div class="sub" id="s_load"></div></div></div>
-    <div class="meter"><span id="loadbar"></span></div>
-  </div>
-</div>
-
-<div class="card" style="margin-top:12px">
-  <h2>Live Signals</h2>
-  <div class="scroll">
-    <table class="sig"><thead><tr>
-      <th class="c1">Message</th><th class="c2">Signal</th>
-      <th class="c3 num">Value</th><th class="c4">Unit</th>
-    </tr></thead><tbody id="sigs"></tbody></table>
-  </div>
-  <div class="sub" id="s_sigs">&nbsp;</div>
-</div>
-
-<div class="card" style="margin-top:12px">
-  <h2>Identifiers on the wire</h2>
-  <div class="scroll">
-    <table><thead><tr>
-      <th>ID</th><th>Last payload</th><th>Frames</th><th>Rate</th><th>Mapped</th>
-    </tr></thead><tbody id="ids"></tbody></table>
-  </div>
-  <div class="sub" id="s_ids">&nbsp;</div>
-</div>
-
-<div class="card" style="margin-top:12px">
-  <h2>Live Log</h2>
-  <div id="term"></div>
-</div>
-
-<div class="grid ctl">
-  <div class="card">
-    <h2>Recording</h2>
-    <div class="state"><span class="dot" id="d_rec"></span>
-      <div><div class="big" id="t_rec">--</div><div class="sub" id="s_rec"></div></div></div>
-    <button id="btn" class="start" onclick="toggle()">START</button>
-  </div>
-
-  <div class="card">
-    <h2>Logger</h2>
-    <div class="state"><span class="dot ok"></span>
-      <div><div class="big">RUNNING</div><div class="sub" id="s_up">&nbsp;</div></div></div>
-    <button class="reboot" onclick="reboot()">RESTART</button>
-  </div>
-</div>
-
-<div class="foot" id="foot">&nbsp;</div>
-
-<script>
-var seq = 0, rec = false, fails = 0;
-
-function q(id){return document.getElementById(id)}
-function setDot(id,cls){q(id).className = 'dot ' + cls}
-function hms(s){
-  var h=Math.floor(s/3600), m=Math.floor(s/60)%60, x=s%60;
-  return (h<10?'0':'')+h+':'+(m<10?'0':'')+m+':'+(x<10?'0':'')+x;
-}
-
-function toggle(){
-  fetch(rec ? '/api/stop' : '/api/start', {method:'POST'});
-  q('btn').textContent = '...';
-}
-
-function reboot(){
-  if(!confirm('Restart the logger?\n\nAny running recording is closed and '+
-              'saved first. The next recording goes to a new file.')) return;
-  fetch('/api/reboot', {method:'POST'});
-  q('conn').textContent = 'restarting...';
-  setTimeout(function(){ location.reload(); }, 8000);
-}
-
-/* Everything below renders whatever the payload contains. No signal, message
-   or identifier is named anywhere in this page - the frame map on the card
-   decides what appears, and an empty map simply yields raw frames. */
-function esc(s){
-  return String(s).replace(/[&<>]/g, function(c){
-    return c === '&' ? '&amp;' : (c === '<' ? '&lt;' : '&gt;');
-  });
-}
-
-function paintIds(list){
-  var body = q('ids'), html = '', i;
-  for(i=0;i<list.length;i++){
-    var e = list[i];
-    html += '<tr class="'+(e.k?'':'un')+'"><td class="mono">'+esc(e.id)+
-            '</td><td class="mono">'+esc(e.d)+'</td><td>'+
-            e.n.toLocaleString()+'</td><td>'+e.r+'/s</td><td>'+
-            (e.k?'yes':'raw')+'</td></tr>';
-  }
-  body.innerHTML = html || '<tr><td colspan="5">nothing received yet</td></tr>';
-}
-
-function paintSigs(list, mapped){
-  var body = q('sigs'), html = '', i;
-  for(i=0;i<list.length;i++){
-    var e = list[i];
-    html += '<tr><td class="c1 ell" title="'+esc(e.m)+'">'+esc(e.m)+
-            '</td><td class="c2 ell" title="'+esc(e.s)+'">'+esc(e.s)+
-            '</td><td class="c3 num mono">'+esc(e.v)+
-            '</td><td class="c4">'+esc(e.u)+'</td></tr>';
-  }
-  if(!html){
-    html = '<tr><td colspan="4">' + (mapped
-      ? 'no mapped frame has arrived yet'
-      : 'no frame map on the card - see the raw frames below') + '</td></tr>';
-  }
-  body.innerHTML = html;
-}
-
-function paint(d){
-  q('conn').textContent = (d.ap ? 'Hotspot ' : 'Wi-Fi ') + d.ip;
-
-  /* --- SD --- */
-  if(!d.sd){ setDot('d_sd','bad'); q('t_sd').textContent='NOT FOUND';
-             q('s_sd').textContent='Insert a FAT32 card and restart'; }
-  else if(d.sdErr){ setDot('d_sd','bad'); q('t_sd').textContent='WRITE ERROR';
-             q('s_sd').textContent='Card may be full or was removed'; }
-  else { setDot('d_sd','ok'); q('t_sd').textContent='READY';
-             q('s_sd').textContent=d.sdType+', '+(d.sdMB/1024).toFixed(1)+' GB'; }
-
-  /* --- interrupt path ---
-     The receive path only keeps up if the controller's INT line actually
-     fires. When it does not, the 20 ms fallback poll caps throughput at about
-     100 frames/s no matter what the bus is doing, so it gets its own tile
-     rather than being buried in the log. */
-  if(!d.can){
-    setDot('d_irq','warn'); q('t_irq').textContent='IDLE';
-    q('s_irq').textContent='No traffic, nothing to interrupt on';
-  } else if(d.intStuck){
-    setDot('d_irq','bad'); q('t_irq').textContent='NOT FIRING';
-    q('s_irq').textContent='Running on the fallback poll - check the INT wire';
-  } else {
-    setDot('d_irq','ok'); q('t_irq').textContent=d.irq.toLocaleString()+' /s';
-    q('s_irq').textContent='ISR healthy - INT line '+(d.intLevel?'idle high':'asserted');
-  }
-
-  /* --- CAN bus load --- */
-  var L = d.load;
-  q('t_load').textContent = L+'%';
-  q('s_load').textContent = d.fps.toLocaleString()+' frames/s';
-  var bar = q('loadbar');
-  bar.style.width = Math.min(L,100)+'%';
-  if(L < 60){ setDot('d_load','ok');   bar.style.background='var(--ok)'; }
-  else if(L < 80){ setDot('d_load','warn'); bar.style.background='var(--warn)'; }
-  else { setDot('d_load','bad'); bar.style.background='var(--bad)'; }
-
-  /* --- recording --- */
-  rec = !!d.rec;
-  if(rec){
-    setDot('d_rec','ok rec');
-    q('t_rec').textContent = 'REC  ' + hms(d.elapsed);
-    q('s_rec').textContent = d.file+'  -  '+d.rows.toLocaleString()+' rows, '+
-                             (d.kb/1024).toFixed(1)+' MB';
-    q('btn').textContent='STOP'; q('btn').className='stop';
-  } else if(d.pf){
-    setDot('d_rec','bad');
-    q('t_rec').textContent='POWER LOSS';
-    q('s_rec').textContent=d.file+' was closed safely - press START for a new file';
-    q('btn').textContent='START'; q('btn').className='start';
-  } else {
-    setDot('d_rec','warn');
-    q('t_rec').textContent='STOPPED';
-    q('s_rec').textContent='Nothing is being saved';
-    q('btn').textContent='START'; q('btn').className='start';
-  }
-
-  /* --- bus --- */
-  if(d.can){ setDot('d_can','ok'); q('t_can').textContent='RECEIVING';
-             q('s_can').textContent=d.fps+' frames/s'; }
-  else { setDot('d_can','bad'); q('t_can').textContent='NO DATA';
-             q('s_can').textContent='Check the wiring, bit rate and crystal'; }
-
-  /* --- integrity --- */
-  if(!d.lost){ setDot('d_lost','ok'); q('t_lost').textContent='ALL GOOD';
-               q('s_lost').textContent='No frames lost - up to '+d.risk+
-                 ' ms at risk if power is cut'; }
-  else { setDot('d_lost','bad'); q('t_lost').textContent=d.lost+' LOST';
-               q('s_lost').textContent='Some frames could not be saved'; }
-
-  /* --- signals and identifiers --- */
-  paintSigs(d.sig, d.dbc);
-  q('s_sigs').textContent = d.dbc
-      ? ('frame map loaded: '+d.dbcMsg+' messages, '+d.dbcSig+' signals'+
-         (d.sigMore ? '  -  showing the first '+d.sig.length : ''))
-      : 'add a DBC file to the card to decode signals in real time';
-
-  paintIds(d.ids);
-  q('s_ids').textContent = d.idMore
-      ? ('more identifiers are on the bus than the table tracks - all of them '+
-         'are still recorded')
-      : 'every identifier seen since the recording started';
-
-  q('s_up').textContent = 'up '+hms(Math.floor(d.up/1000))+
-                          ', '+Math.round(d.heap/1024)+' KB free';
-  /* Uptime and free memory live in the Logger card now, so the footer is just
-     the firmware string - no leading separator. */
-  q('foot').textContent = d.fw;
-}
-
-function pollStatus(){
-  fetch('/api/status').then(function(r){return r.json()})
-    .then(function(d){ fails=0; paint(d); })
-    .catch(function(){ if(++fails>2) q('conn').textContent='connection lost'; });
-}
-
-function pollLog(){
-  fetch('/api/log?since='+seq).then(function(r){return r.json()})
-    .then(function(d){
-      seq = d.seq;
-      if(!d.lines.length) return;
-      var t = q('term');
-      var atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 40;
-      for(var i=0;i<d.lines.length;i++){
-        var s = d.lines[i], div = document.createElement('div');
-        var m = s.match(/^\[[^\]]*\]\s(\w)\s/);
-        div.className = m ? m[1] : '';
-        div.textContent = s;
-        t.appendChild(div);
-      }
-      while(t.childNodes.length > 300) t.removeChild(t.firstChild);
-      if(atBottom) t.scrollTop = t.scrollHeight;
-    }).catch(function(){});
-}
-
-pollStatus(); pollLog();
-setInterval(pollStatus, 500);
-setInterval(pollLog, 700);
-</script>
-</body></html>)HTML";
-
-/* ==========================================================================
  *  Handlers
  * ======================================================================== */
 static void handleRoot() {
   s_srv->sendHeader("Cache-Control", "no-store");
-  s_srv->send_P(200, "text/html", PAGE_HTML);
+
+  /* Chunked, so the page streams from flash to the socket without ever being
+   * assembled in RAM. The parts are only split for readability - the browser
+   * sees one document. */
+  s_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
+  s_srv->send(200, "text/html", "");
+  for (uint8_t i = 0; i < PAGE_PART_COUNT; i++) s_srv->sendContent_P(PAGE_PARTS[i]);
+  s_srv->sendContent("");
 }
 
 /* Appends a JSON string body (no surrounding quotes). Names and units come out
@@ -368,7 +41,9 @@ static void jsonStr(String &out, const char *s) {
 }
 
 static void handleStatus() {
-  const uint32_t lost = g_rec.queueDropped + g_rec.canOverflow;
+  /* A FLOOR, not a total: the controller's overflow flags are sticky and say
+   * only that it happened, never how often. Reported as such by the page. */
+  const uint32_t lost = g_rec.queueDropped + g_rec.canOvfFramesMin;
 
   String j;
   j.reserve(2048);
@@ -391,6 +66,8 @@ static void handleStatus() {
   j += ",\"intLevel\":"; j += (uint32_t)g_rec.intLevel;
   j += ",\"load\":";    j += g_rec.busLoadPct;
   j += ",\"lost\":";    j += lost;
+  j += ",\"ovfEv\":";   j += g_rec.canOvfEvents;
+  j += ",\"qDrop\":";   j += g_rec.queueDropped;
   j += ",\"dbc\":";     j += g_rec.dbcLoaded ? 1 : 0;
   j += ",\"dbcMsg\":";  j += (uint32_t)g_rec.dbcMessages;
   j += ",\"dbcSig\":";  j += (uint32_t)g_rec.dbcSignals;
@@ -422,7 +99,7 @@ static void handleStatus() {
     const DbcMessage &m = g_dbc.msg[mi];
     for (uint16_t k = 0; k < m.signalCount && shown < WEB_MAX_SIGNALS; k++) {
       const uint16_t si = m.firstSignal + k;
-      if (si >= DBC_MAX_SIGNALS || !g_live.seen[si]) continue;
+      if (si >= g_live.cap || !g_live.seen[si]) continue;
 
       if (shown) j += ',';
       j += "{\"m\":\""; jsonStr(j, m.name);
@@ -487,6 +164,404 @@ static void handleStop() {
   s_srv->send(200, "application/json", "{\"ok\":1}");
 }
 
+
+/* ==========================================================================
+ *  The dashboard
+ *
+ *  Three endpoints, deliberately shaped around what costs the ESP32 time:
+ *
+ *    /api/dash        polled several times a second. Carries ONLY the cells
+ *                     that are actually configured, as the text the decode
+ *                     task already rendered - so the fast path copies strings
+ *                     and does no decoding, no formatting and no float work.
+ *    /api/dash/cfg    the layout, as the same text that lives on the card.
+ *                     One format, one parser, and Export/Import are then just
+ *                     this endpoint's body.
+ *    /api/signals     the picker list. Fetched once, when the editor opens.
+ *                     Streamed rather than assembled, because a full frame map
+ *                     is bigger than anything else this firmware puts in RAM.
+ * ======================================================================== */
+
+/* Bumped whenever the layout is saved, so a second browser notices that the
+ * first one changed it instead of quietly showing a stale grid. */
+static uint32_t s_dashGen = 1;
+
+static void handleDash() {
+  String j;
+  j.reserve(1024);
+
+  const uint8_t cells = dashCellCount(g_dash);
+  const uint32_t now  = millis();
+
+  /* Note what is NOT here: the grid's own cols and rows. They were, and they
+   * collided with the recording's row count under the same name - the document
+   * carried "rows" twice and the second one won. The browser gets the layout
+   * from /api/dash/cfg anyway; this endpoint only has to say WHEN it changed,
+   * which is what gen is for. */
+  j  = "{\"gen\":";   j += s_dashGen;
+  j += ",\"poll\":";  j += g_dash.pollMs;
+  /* The cap comes from the firmware, so the browser cannot offer a slot the
+   * logger has no room to store. */
+  j += ",\"max\":";   j += (uint32_t)DASH_MAX_CELLS;
+
+  /* One entry per cell slot. An empty slot, an unresolved signal and a signal
+   * that has simply not arrived yet are three different things and the page
+   * draws them differently, so they are three different values here:
+   *   null   nothing configured in this slot
+   *   ""     configured, but the frame map has no such signal
+   *   "..."  the value, with `f` saying whether it is still fresh */
+  j += ",\"v\":[";
+  for (uint8_t i = 0; i < cells; i++) {
+    if (i) j += ',';
+    const DashCell &c = g_dash.cell[i];
+    if (!dashCellUsed(c)) { j += "null";  continue; }   /* empty slot        */
+    if (c.sig < 0)        { j += "false"; continue; }   /* no such signal     */
+    if (c.sig >= (int16_t)g_live.cap || !g_live.seen[c.sig]) {
+      j += "\"\"";  continue;                              /* not arrived yet */
+    }
+    j += '"';
+    jsonStr(j, g_live.text[c.sig]);
+    j += '"';
+  }
+  j += ']';
+
+  /* Freshness, so a cell whose message stopped arriving fades instead of
+   * showing a value that is minutes old as though it were current. */
+  j += ",\"f\":[";
+  for (uint8_t i = 0; i < cells; i++) {
+    if (i) j += ',';
+    const DashCell &c = g_dash.cell[i];
+    const bool fresh = dashCellUsed(c) && c.sig >= 0 &&
+                       c.sig < (int16_t)g_live.cap && g_live.seen[c.sig] &&
+                       (now - g_live.lastMs[c.sig]) < DASH_STALE_MS;
+    j += fresh ? '1' : '0';
+  }
+  j += ']';
+
+  /* The whole of the logger's state EXCEPT the two big arrays.
+   *
+   * This is what lets the dashboard be one request. The expensive parts of
+   * /api/status are the per-signal and per-identifier tables - they are loops
+   * over the frame map that build kilobytes of JSON - and the dashboard needs
+   * neither: it has its own values above. Everything else is a handful of
+   * counters, so carrying them here costs almost nothing and saves a second
+   * poll running alongside the first. */
+  j += ",\"rec\":";   j += g_rec.recording ? 1 : 0;
+  j += ",\"can\":";   j += g_rec.canOk ? 1 : 0;
+  j += ",\"sd\":";    j += g_rec.sdOk ? 1 : 0;
+  j += ",\"sdErr\":"; j += g_rec.sdError ? 1 : 0;
+  j += ",\"sdType\":\""; j += g_rec.sdType; j += '"';
+  j += ",\"sdMB\":";  j += (uint32_t)g_rec.sdSizeMB;
+  j += ",\"lost\":";  j += (uint32_t)(g_rec.queueDropped + g_rec.canOvfFramesMin);
+  j += ",\"ovfEv\":"; j += g_rec.canOvfEvents;
+  j += ",\"qDrop\":"; j += g_rec.queueDropped;
+  j += ",\"fps\":";   j += g_rec.frameRate;
+  j += ",\"irq\":";   j += g_rec.irqRate;
+  j += ",\"intStuck\":"; j += g_rec.intStuck ? 1 : 0;
+  j += ",\"intLevel\":"; j += (uint32_t)g_rec.intLevel;
+  j += ",\"load\":";  j += g_rec.busLoadPct;
+  j += ",\"risk\":";  j += (uint32_t)SD_SYNC_INTERVAL_MS;
+  j += ",\"file\":\""; j += (const char *)(g_rec.csvName[0] ? g_rec.csvName + 1 : "-");
+  j += '"';
+  j += ",\"elapsed\":"; j += recorderElapsedMs() / 1000UL;
+  j += ",\"rows\":";  j += (uint32_t)g_rec.rows;
+  j += ",\"kb\":";    j += (uint32_t)(g_rec.bytes / 1024ULL);
+  j += ",\"pf\":";    j += g_rec.powerFail ? 1 : 0;
+  j += ",\"dbc\":";   j += g_rec.dbcLoaded ? 1 : 0;
+  j += ",\"up\":";    j += millis();
+  j += ",\"heap\":";  j += (uint32_t)ESP.getFreeHeap();
+  j += ",\"ap\":";    j += netIsAp() ? 1 : 0;
+  j += ",\"ip\":\"";  j += netIp(); j += '"';
+  j += ",\"fw\":\"";  j += FIRMWARE_NAME " v" FIRMWARE_VERSION; j += '"';
+
+  /* ---- transmit ---- */
+  j += ",\"arm\":";     j += txArmed() ? 1 : 0;
+  j += ",\"armLeft\":"; j += (uint32_t)(txArmRemainingMs() / 1000UL);
+  j += ",\"txOk\":";    j += g_tx.sent;
+  j += ",\"txBad\":";   j += g_tx.failed;
+  j += ",\"cyc\":";     j += g_tx.cyclicOn;
+  j += ",\"canTx\":";   j += CAN_LISTEN_ONLY ? 0 : 1;
+
+  /* The last few outcomes, newest last. The browser matches them by ticket;
+   * sending several means a burst of sends is not lost between two polls. */
+  j += ",\"n\":"; j += (uint32_t)g_tx.ringCount;
+  j += ",\"tx\":[";
+  const uint8_t have = (g_tx.ringCount < TX_RESULT_RING)
+                     ? g_tx.ringCount : (uint8_t)TX_RESULT_RING;
+  const uint8_t show = have < 4 ? have : 4;
+  for (uint8_t k = 0; k < show; k++) {
+    const uint8_t slot =
+        (uint8_t)((g_tx.ringCount - show + k) % TX_RESULT_RING);
+    const TxOutcome &o = g_tx.ring[slot];
+    if (k) j += ',';
+    char id[16];
+    snprintf(id, sizeof(id), o.ext ? "0x%08lX" : "0x%03lX", (unsigned long)o.id);
+    j += "{\"t\":";    j += o.ticket;
+    j += ",\"s\":";    j += o.status;
+    j += ",\"cmd\":";  j += o.cmd;
+    j += ",\"id\":\""; j += id; j += '"';
+    j += ",\"c\":";    j += o.clamped ? 1 : 0;
+    j += ",\"tec\":";  j += o.tecDelta;
+    j += ",\"m\":\"";  jsonStr(j, txStatusText(o.status)); j += '"';
+    j += '}';
+  }
+  j += "]}";
+
+  s_srv->sendHeader("Cache-Control", "no-store");
+  s_srv->send(200, "application/json", j);
+}
+
+/* The layout as text - byte for byte what is on the card. Doubles as Export. */
+static void handleDashCfgGet() {
+  char *buf = (char *)malloc(DASH_CFG_MAX);
+  if (!buf) { s_srv->send(500, "text/plain", "out of memory"); return; }
+
+  const size_t n = dashSerialize(g_dash, buf, DASH_CFG_MAX);
+  s_srv->sendHeader("Cache-Control", "no-store");
+  s_srv->setContentLength(n);
+  s_srv->send(200, "text/plain", "");
+  s_srv->sendContent(buf);
+  free(buf);
+}
+
+/* And the same text back the other way, which is both Save and Import. Going
+ * through the identical parser the card uses means the browser cannot produce
+ * a layout the file format cannot express. */
+static void handleDashCfgPost() {
+  const String body = s_srv->arg("plain");
+  if (body.length() == 0) {
+    s_srv->send(400, "application/json", "{\"ok\":0,\"err\":\"empty\"}");
+    return;
+  }
+  if (body.length() >= DASH_CFG_MAX) {
+    s_srv->send(413, "application/json",
+                "{\"ok\":0,\"err\":\"the layout is too large\"}");
+    return;
+  }
+
+  dashReset(g_dash);
+  const uint16_t errors  = dashParse(g_dash, body.c_str(), body.length());
+  const uint16_t missing = dashResolve(g_dash, g_dbc);
+
+  /* The card first, through the task that owns it - that copy is the one the
+   * next boot reads and the one a power cut has to survive. Flash catches up
+   * when no recording is running; see dashstore.h. */
+  recorderRequestSaveDash();
+  const bool saved = dashStoreSave();
+  s_dashGen++;
+
+  LOG_LIVE(LVL_INFO, "dashboard layout saved: %ux%u grid, %u bytes",
+           (unsigned)g_dash.cols, (unsigned)g_dash.rows,
+           (unsigned)body.length());
+
+  String j;
+  j.reserve(160);
+  j  = "{\"ok\":";      j += saved ? 1 : 0;
+  j += ",\"pending\":"; j += dashStorePending() ? 1 : 0;
+  j += ",\"errors\":";  j += errors;
+  j += ",\"missing\":"; j += missing;
+  j += ",\"gen\":";     j += s_dashGen;
+  j += '}';
+  s_srv->send(200, "application/json", j);
+}
+
+/* Everything the editor needs to offer a signal: its name, unit, the range the
+ * DBC annotates it with, what its bits can actually hold, and any value labels.
+ * Streamed a message at a time - a full frame map is several times larger than
+ * anything else this firmware builds in RAM, and building it as one String
+ * would be the largest allocation in the program for the sake of a list that
+ * is fetched when somebody opens a dialog. */
+static void handleSignals() {
+  s_srv->sendHeader("Cache-Control", "no-store");
+  s_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
+  s_srv->send(200, "application/json", "");
+
+  String j;
+  j.reserve(1400);
+  j = "{\"loaded\":";
+  j += g_dbc.loaded ? 1 : 0;
+
+  /* The BU_ node list, and further down each message's transmitter. This is
+   * the only thing a DBC says about direction, and it is what lets the
+   * customiser stop offering command frames as gauges. */
+  j += ",\"nodes\":[";
+  for (uint8_t i = 0; i < g_dbc.nodeCount; i++) {
+    if (i) j += ',';
+    j += '"'; jsonStr(j, g_dbc.node[i]); j += '"';
+  }
+  j += "],\"me\":\"";
+  jsonStr(j, g_dash.node);
+  j += "\",\"m\":[";
+
+  char num[40];
+  for (uint16_t mi = 0; mi < g_dbc.msgCount; mi++) {
+    const DbcMessage &m = g_dbc.msg[mi];
+    if (mi) j += ',';
+
+    snprintf(num, sizeof(num), m.ext ? "0x%08lX" : "0x%03lX", (unsigned long)m.id);
+    j += "{\"n\":\""; jsonStr(j, m.name);
+    j += "\",\"id\":\""; j += num;
+    j += "\",\"tx\":\""; jsonStr(j, dbcTxNode(g_dbc, m));
+    j += "\",\"mux\":";
+    j += (m.muxSignal >= 0) ? 1 : 0;
+    j += ",\"s\":[";
+
+    for (uint16_t k = 0; k < m.signalCount; k++) {
+      const uint16_t si = (uint16_t)(m.firstSignal + k);
+      if (si >= g_dbc.sigCount) break;
+      const DbcSignal &sg = g_dbc.sig[si];
+      if (k) j += ',';
+
+      j += "{\"i\":";   j += si;
+      j += ",\"n\":\""; jsonStr(j, sg.name);
+      j += "\",\"u\":\""; jsonStr(j, sg.unit);
+      j += "\",\"b\":";  j += sg.bits;
+
+      /* Both ranges. The annotation is what the bus designer meant and makes
+       * the better default; the bit limits are what is actually possible and
+       * are what a setpoint has to be clamped to. */
+      j += ",\"r\":";   j += sg.hasRange ? 1 : 0;
+      snprintf(num, sizeof(num), ",\"lo\":%.6g,\"hi\":%.6g",
+               (double)sg.phyMin, (double)sg.phyMax);
+      j += num;
+
+      double blo = 0, bhi = 0;
+      dbcSignalLimits(sg, &blo, &bhi);
+      snprintf(num, sizeof(num), ",\"blo\":%.6g,\"bhi\":%.6g", blo, bhi);
+      j += num;
+
+      /* Decimal places the factor actually justifies: showing 12.4000 km/h
+       * from a factor of 0.1 is three digits of invention. */
+      j += ",\"d\":"; j += sg.exact ? sg.dec : 3;
+
+      /* -1 plain, -2 the multiplexor, >= 0 the mux code that selects it. A
+       * signal only reachable under one mux code cannot be written without
+       * writing that code as well, which is what makes this worth sending. */
+      j += ",\"mx\":"; j += sg.muxValue;
+
+      /* Value labels, which are what makes a signal worth drawing as a state
+       * rather than as a number. */
+      j += ",\"v\":[";
+      for (uint8_t vi = 0; vi < sg.valCount; vi++) {
+        const uint16_t vk = (uint16_t)(sg.valFirst + vi);
+        if (sg.valFirst < 0 || vk >= g_dbc.valCount) break;
+        if (vi) j += ',';
+        j += '"';
+        jsonStr(j, g_dbc.val[vk].label);
+        j += '"';
+      }
+      j += "]}";
+    }
+    j += "]}";
+
+    /* Flush at message boundaries so the buffer never grows with the map. */
+    if (j.length() > 1024) { s_srv->sendContent(j); j = ""; }
+  }
+
+  j += "]}";
+  s_srv->sendContent(j);
+  s_srv->sendContent("");
+}
+
+/* ==========================================================================
+ *  Transmit
+ * ======================================================================== */
+static void txReply(uint32_t ticket) {
+  String j;
+  j.reserve(64);
+  j  = "{\"ticket\":"; j += ticket;
+  j += ",\"n\":";      j += (uint32_t)g_tx.ringCount;
+  j += '}';
+  s_srv->send(200, "application/json", j);
+}
+
+static void handleTxArm() {
+  const bool on = s_srv->hasArg("on") && s_srv->arg("on") == "1";
+  txArm(on, "the web dashboard");
+
+  String j;
+  j.reserve(64);
+  j  = "{\"arm\":";     j += txArmed() ? 1 : 0;
+  j += ",\"armLeft\":"; j += (uint32_t)(txArmRemainingMs() / 1000UL);
+  j += '}';
+  s_srv->send(200, "application/json", j);
+}
+
+static uint8_t hexPair(const char *p) {
+  uint8_t v = 0;
+  for (uint8_t i = 0; i < 2; i++) {
+    const char c = p[i];
+    v = (uint8_t)(v << 4);
+    if      (c >= '0' && c <= '9') v |= (uint8_t)(c - '0');
+    else if (c >= 'a' && c <= 'f') v |= (uint8_t)(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') v |= (uint8_t)(c - 'A' + 10);
+  }
+  return v;
+}
+
+static void handleTxSend() {
+  uint32_t ticket = 0;
+
+  if (s_srv->hasArg("id")) {
+    /* A one-off frame, typed in rather than saved. */
+    const uint32_t id  = (uint32_t)strtoul(s_srv->arg("id").c_str(), nullptr, 0);
+    const bool     ext = s_srv->hasArg("ext") ? (s_srv->arg("ext") == "1")
+                                              : (id > 0x7FF);
+    const String   hex = s_srv->arg("data");
+    uint8_t data[8] = {0};
+    uint8_t len = 0;
+    for (size_t i = 0; i + 1 < (size_t)hex.length() && len < 8; i += 2) {
+      data[len++] = hexPair(hex.c_str() + i);
+    }
+    ticket = txSendRaw(id, ext, data, len);
+  } else if (s_srv->hasArg("cmds")) {
+    /* A group: several values that only mean anything in the same frame, sent
+     * as "cmds=0,2,3&values=32,1,1380". Every member but the last is queued
+     * holding, so one frame leaves with all of them in it. Parsed in place -
+     * a handful of comma-separated numbers does not justify a tokeniser. */
+    const String  ids = s_srv->arg("cmds");
+    const String  vs  = s_srv->arg("values");
+    const char   *ip  = ids.c_str();
+    const char   *vp  = vs.c_str();
+
+    uint8_t idx[TX_MAX_COMMANDS];
+    float   val[TX_MAX_COMMANDS];
+    uint8_t n = 0;
+    while (*ip && n < TX_MAX_COMMANDS) {
+      idx[n] = (uint8_t)strtoul(ip, nullptr, 10);
+      val[n] = (float)atof(vp);
+      n++;
+      const char *ic = strchr(ip, ',');
+      const char *vc = strchr(vp, ',');
+      if (!ic || !vc) break;
+      ip = ic + 1;
+      vp = vc + 1;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+      ticket = txSendPart(idx[i], val[i], (uint8_t)(i + 1) < n);
+    }
+  } else {
+    const uint8_t cmd = (uint8_t)strtoul(s_srv->arg("cmd").c_str(), nullptr, 10);
+    const float   val = (float)atof(s_srv->arg("value").c_str());
+    ticket = txSendCommand(cmd, val);
+  }
+  txReply(ticket);
+}
+
+static void handleTxCyclic() {
+  const uint8_t cmd = (uint8_t)strtoul(s_srv->arg("cmd").c_str(), nullptr, 10);
+  const bool    on  = s_srv->hasArg("on") && s_srv->arg("on") == "1";
+  const float   val = (float)atof(s_srv->arg("value").c_str());
+  txSetCyclic(cmd, on, val);
+
+  String j;
+  j.reserve(48);
+  j  = "{\"cyc\":"; j += g_tx.cyclicOn;
+  j += ",\"n\":";   j += (uint32_t)g_tx.ringCount;
+  j += '}';
+  s_srv->send(200, "application/json", j);
+}
+
 void webBegin() {
   s_srv = new WebServer(g_net.httpPort);
 
@@ -498,6 +573,15 @@ void webBegin() {
   s_srv->on("/api/stop",    HTTP_POST, handleStop);
   s_srv->on("/api/stop",    HTTP_GET,  handleStop);
   s_srv->on("/api/reboot",  HTTP_POST, handleReboot);
+
+  s_srv->on("/api/dash",      HTTP_GET,  handleDash);
+  s_srv->on("/api/dash/cfg",  HTTP_GET,  handleDashCfgGet);
+  s_srv->on("/api/dash/cfg",  HTTP_POST, handleDashCfgPost);
+  s_srv->on("/api/signals",   HTTP_GET,  handleSignals);
+
+  s_srv->on("/api/tx/arm",    HTTP_POST, handleTxArm);
+  s_srv->on("/api/tx/send",   HTTP_POST, handleTxSend);
+  s_srv->on("/api/tx/cyclic", HTTP_POST, handleTxCyclic);
 
   /* Anything else goes to the dashboard, including the captive-portal probes
    * phones fire when they join the hotspot. */

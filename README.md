@@ -1289,7 +1289,7 @@ translation units under `-Wall -Wextra`:
 
 ```
 RAM:   [==        ]  24.9% (used 81496 bytes from 327680 bytes)
-Flash: [======    ]  55.2% (used 1084601 bytes from 1966080 bytes)
+Flash: [======    ]  55.3% (used 1086745 bytes from 1966080 bytes)
 ```
 
 Flash sits at 55 % of one 1.9 MB app slot, so the OTA partition scheme still has

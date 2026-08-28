@@ -62,6 +62,29 @@ A third route to the same broken set: a value whose message is no longer in the
 loaded map is not recognised as multiplexed either. The clearing above removes
 those values outright, so the case no longer arises.
 
+### The editor now boxes a message's values together, like the Send tab
+
+Four cards in a row with four Remove buttons invites you to treat them as four
+independent things. On the wire they are one frame, and the Send tab has always
+drawn them that way. The editor now does too: one box per message, the message
+name and what the grouping means in its header, and a **Remove all N** on the
+header.
+
+Inside the box the rule follows what the frame actually allows:
+
+- **Multiplexed payloads** have *no* individual Remove. The group's button is the
+  only one, because keeping some payloads of a multiplexed command describes only
+  part of it.
+- **A plain message whose signals go out together** keeps a Remove on each value
+  as well, because wanting three of its four signals is a legitimate thing to
+  want.
+
+Worth knowing when reading your own file: a message is only multiplexed if the
+`.dbc` says so with `M` and `m0`/`m1` markers. `MachineConfig` in the example and
+`ABS_Cmd` in a typical tester file have overlapping signals but no markers, so
+they are plain groups — they are sent whole, and their values may be removed one
+at a time.
+
 ### `customize.py` asked which .dbc to use
 
 It should never have. With no argument it now opens the page with no frame map

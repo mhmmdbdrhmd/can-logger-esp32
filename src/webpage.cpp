@@ -256,6 +256,16 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}
   padding:11px 0 4px}
 .sendgroup .ghead b{font-size:13px;letter-spacing:.08em;text-transform:uppercase}
 .sendgroup .ghead span{font-size:12px;color:var(--dim)}
+/* The group's own Remove, in the editor. Compact and pushed to the right, like
+   the one on each card - left at full width it reads as the group's main
+   action, which on a screen full of values it very much is not. */
+.sendgroup .ghead button{width:auto;margin:0 0 0 auto;padding:7px 12px;
+  font-size:12px;color:var(--bad);border-color:transparent;background:transparent}
+.sendgroup .ghead button:hover{border-color:var(--bad)}
+/* Editor groups only: let the explanation take the space it needs so the button
+   stays on the first line with the name, instead of being pushed to a third. */
+.txgroup .ghead{align-items:center}
+.txgroup .ghead span{flex:1 1 240px}
 .sendgroup .sendrow{border-bottom:1px dashed #1b212b}
 .sendgroup .sendrow:last-of-type{border-bottom:0}
 .sendrow .lbl em{font-style:normal;color:var(--acc)}
@@ -2521,37 +2531,76 @@ function renderTxEdit(){
       'Nothing set up yet. Press "Add a value" below.'));
   }
 
+  /* Values of one message are boxed together, the same way the Send tab boxes
+     them, because that is what they are on the wire: one frame. Seeing four
+     cards in a row with four Remove buttons invites you to treat them as four
+     independent things, which for a multiplexed set they are not. */
+  var byMsg = {};
+  keys.forEach(function(k){
+    var mn = TXED[k].sig ? msgOf(TXED[k].sig) : '';
+    if(mn) (byMsg[mn] = byMsg[mn] || []).push(k);
+  });
+  var wraps = {};
+
   keys.forEach(function(i){
     var t = TXED[i];
     var card = el('div', 'txcard');
 
+    var mates = muxSiblings(i);
+    var isMux = mates.length > 1;
+    var mname = t.sig ? msgOf(t.sig) : '';
+    var unit  = (mname && byMsg[mname] && byMsg[mname].length > 1)
+                ? byMsg[mname] : null;
+
+    /* The box, built once for the first value of the message. */
+    if(unit && !wraps[mname]){
+      var wrap = el('div', 'sendgroup txgroup');
+      var gh = el('div', 'ghead');
+      gh.appendChild(el('b', null, mname));
+
+      var sel = '';
+      if(isMux){
+        DBC.m.forEach(function(m){
+          if(m.n !== mname) return;
+          m.s.forEach(function(sg2){ if(sg2.mx === -2) sel = sg2.n; });
+        });
+      }
+      gh.appendChild(el('span', null, isMux
+        ? 'these ' + unit.length + ' are payloads of one multiplexed frame, '
+          + 'chosen by ' + (sel || 'a selector') + ' — they are added and '
+          + 'removed together'
+        : 'these ' + unit.length + ' go out together, in one frame'));
+
+      var gdel = el('button', null, 'Remove all ' + unit.length);
+      gdel.onclick = function(){
+        unit.forEach(function(k){ delete TXED[k]; });
+        renderTxEdit();
+      };
+      gh.appendChild(gdel);
+      wrap.appendChild(gh);
+      box.appendChild(wrap);
+      wraps[mname] = wrap;
+    }
+
     var head = el('div', 'head');
     head.appendChild(el('b', null, t.label || 'Untitled value'));
-    var mates = muxSiblings(i);
-    var del = el('button', null,
-                 mates.length > 1 ? 'Remove all ' + mates.length : 'Remove');
-    if(mates.length > 1){
-      del.title = 'The payloads of one multiplexed frame are kept as a set';
+
+    /* One Remove per value, EXCEPT in a multiplexed set: there the only honest
+       button is the group's, because keeping some payloads of a multiplexed
+       command describes only part of it. A plain group may be split - you may
+       genuinely want three of its four signals - so those keep theirs. */
+    if(!isMux){
+      var del = el('button', null, 'Remove');
+      del.onclick = function(){
+        delete TXED[i];
+        renderTxEdit();
+      };
+      head.appendChild(del);
     }
-    del.onclick = function(){
-      mates.forEach(function(k){ delete TXED[k]; });
-      renderTxEdit();
-    };
-    head.appendChild(del);
     card.appendChild(head);
 
-    if(mates.length > 1){
-      var mn = msgOf(t.sig);
-      var selName = '';
-      DBC.m.forEach(function(m){
-        if(m.n !== mn) return;
-        m.s.forEach(function(sg2){ if(sg2.mx === -2) selName = sg2.n; });
-      });
-      card.appendChild(el('div', 'sub',
-        'One of ' + mates.length + ' payloads of ' + mn + ', chosen by '
-        + (selName || 'a selector') + '. They are added and removed together, '
-        + 'because keeping some of them describes only part of the command.'));
-    }
+    /* What the set is gets said once, on the box's header, rather than being
+       repeated on every card inside it. */
 
     var f = el('div', 'fields');
     function field(lbl, key, type, span, attrs){
@@ -2772,7 +2821,7 @@ function renderTxEdit(){
 
     card.appendChild(f2);
 
-    box.appendChild(card);
+    (wraps[mname] || box).appendChild(card);
   });
 }
 

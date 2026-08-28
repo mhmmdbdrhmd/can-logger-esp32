@@ -385,6 +385,7 @@ sys.exit(1)
 AGREE
 done
 
+
 if python3 "$here/../tools/check_dbc.py" "$here/../examples/example.dbc" > "$out/chk" 2>&1; then
     echo "  ok   check_dbc.py reports a clean file as clean"
 else
@@ -397,6 +398,88 @@ else
     echo "  ok   check_dbc.py reports an unreadable line and exits nonzero"
 fi
 
+echo
+echo "=== a setup and a frame map that do not belong together ==="
+# The firmware drops what a newly loaded map cannot account for
+# (dashDropUnresolved) and so does the desk tool (prune_cfg in
+# tools/preview_dashboard.py). Two implementations of one rule is how a page
+# comes to write a layout back over a card that had just been cleaned, so this
+# asserts they agree: same survivors, same order, same answer about the role.
+"$CXX" "${FLAGS[@]}" -x c++ - "$src/dash.cpp" "$src/dbc.cpp" -o "$out/t_prune" <<'PRUNE' || fail=1
+#include "dash.h"
+#include <stdio.h>
+#include <vector>
+uint32_t g_fakeMs = 0;
+FakeSerial Serial;
+FakeEsp    ESP;
+static std::string slurp(const char *path) {
+  std::string t;
+  FILE *f = fopen(path, "rb");
+  if (!f) return t;
+  int c;
+  while ((c = fgetc(f)) != EOF) t += (char)c;
+  fclose(f);
+  return t;
+}
+int main(int argc, char **argv) {
+  if (argc < 3) return 1;
+  const std::string ctext = slurp(argv[1]), dtext = slurp(argv[2]);
+
+  DashConfig cfg;
+  dashReset(cfg);
+  dashParse(cfg, ctext.data(), ctext.size());
+  DbcDb db = {};
+  dbcLoadText(db, dtext.c_str(), dtext.size());
+
+  printf("dropped\t%u\n", (unsigned)dashDropUnresolved(cfg, db));
+  printf("role\t%s\n", cfg.role);
+  for (int i = 0; i < DASH_MAX_CELLS; i++)
+    if (dashCellUsed(cfg.cell[i])) printf("cell\t%s\n", cfg.cell[i].ref);
+  for (int i = 0; i < TX_MAX_COMMANDS; i++)
+    if (txCommandUsed(cfg.tx[i]))
+      printf("send\t%s\n", cfg.tx[i].kind == TXK_SIGNAL ? cfg.tx[i].ref : "-raw-");
+  return 0;
+}
+PRUNE
+
+for f in "$here"/../examples/*.dbc; do
+    "$out/t_prune" "$here/../examples/dash.cfg" "$f" > "$out/prune.txt" 2>/dev/null
+    python3 - "$here/../examples/dash.cfg" "$f" "$out/prune.txt" <<'SAME' || fail=1
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
+from preview_dashboard import load_dbc, prune_cfg, _sig_of
+
+cfg_path, dbc_path, cdump = sys.argv[1], sys.argv[2], sys.argv[3]
+db = load_dbc(dbc_path)
+by_ref = {m["n"] + "." + s["n"]: s for m in db["m"] for s in m["s"]}
+text, gone = prune_cfg(open(cfg_path).read(), by_ref, db.get("nodes", []))
+
+mine = ["dropped\t%d" % gone]
+role = [l.split(None, 1)[1].strip('"') for l in text.splitlines()
+        if l.startswith("role ")]
+mine.append("role\t%s" % (role[0] if role else ""))
+for line in text.splitlines():
+    if line.startswith("cell "):
+        mine.append("cell\t%s" % _sig_of(line))
+    elif line.startswith("send "):
+        mine.append("send\t%s" % (_sig_of(line) or "-raw-"))
+theirs = [l for l in open(cdump).read().splitlines() if l]
+
+name = os.path.basename(dbc_path)
+if mine == theirs:
+    print("  ok   dash.cfg against %-16s %s dropped, both agree"
+          % (name, gone))
+    sys.exit(0)
+print("  FAIL dash.cfg against %s - prune_cfg and dashDropUnresolved disagree"
+      % name)
+for a, b in zip(mine + [""] * len(theirs), theirs + [""] * len(mine)):
+    if a != b:
+        print("       python: %s" % a)
+        print("       c     : %s" % b)
+        break
+sys.exit(1)
+SAME
+done
 echo
 echo "=== the Arduino sketch folder regenerates from src/ ==="
 if "$here/../arduino/sync.sh" --check; then

@@ -294,9 +294,12 @@ int main() {
        half-described command the grouping exists to prevent. */
     {
       DashConfig d = c;
+      snprintf(d.role, sizeof(d.role), "%s", "Vehicle");
       const uint16_t gone = dashDropUnresolved(d, db);
       ck("loading a new map drops what it cannot account for", gone == 1,
          std::to_string(gone) + " dropped");
+      ck("a role the new map still names is left alone",
+         strcmp(d.role, "Vehicle") == 0, d.role);
       ck("and closes the gap rather than leaving a hole",
          dashCellUsed(d.cell[0]) && dashCellUsed(d.cell[1]) &&
          !dashCellUsed(d.cell[2]), "two cells, contiguous");
@@ -314,11 +317,23 @@ int main() {
         " SG_ Cmd_Op : 0|8@1+ (1,0) [0|255] \"\" ABS_ECU\n";
       dbcLoadText(other, unrelated, strlen(unrelated));
       DashConfig e = c;
+      snprintf(e.role, sizeof(e.role), "%s", "Vehicle");
       const uint16_t all = dashDropUnresolved(e, other);
-      ck("an unrelated frame map clears the setup", all == 5,
+      ck("an unrelated frame map clears the setup", all == 6,
          std::to_string(all) + " dropped");
       ck("and leaves nothing behind",
          !dashCellUsed(e.cell[0]) && !txCommandUsed(e.tx[0]), "empty");
+      /* The role went with it. Nothing in the new file transmits under that
+         name, so keeping it would leave the header asserting a role while both
+         Fill buttons quietly stopped separating anything by it. */
+      ck("including a role no node of the new map answers to", e.role[0] == 0,
+         e.role);
+
+      DashConfig f = c;
+      snprintf(f.role, sizeof(f.role), "%s", "Tester");
+      dashDropUnresolved(f, other);
+      ck("a role the new map DOES name survives it",
+         strcmp(f.role, "Tester") == 0, f.role);
       dbcFree(other);
     }
 

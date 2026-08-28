@@ -96,25 +96,82 @@ def factor_decimals(fac_text, off_text):
 
 
 def _multipart_file(raw, ctype):
-    """The one file out of a multipart/form-data body.
+    """The one file out of a multipart/form-data body, as (name, bytes).
 
     The firmware streams these to the SD card with the ESP32 WebServer's own
     parser; here there is exactly one known sender - our own page - so finding
     the boundary and taking what is between the headers and the closing marker
     is enough, and pulling in `email` or `cgi` for it is not.
+
+    The name matters here in a way it does not on the logger, which has exactly
+    one card and calls it /frames.dbc. At a desk you load one map after
+    another, and the setup you build has to land beside the map it was built
+    for rather than in a single file that outlives all of them.
     """
     m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', ctype or "")
     if not m:
-        return b""
+        return "", b""
     sep = b"--" + (m.group(1) or m.group(2)).strip().encode()
     for part in raw.split(sep):
         head, _, data = part.partition(b"\r\n\r\n")
         if b"filename=" not in head or not data:
             continue
+        fn = re.search(rb'filename="([^"]*)"', head)
+        name = fn.group(1).decode("utf-8", "replace") if fn else ""
         # Exactly the one CRLF that separates the data from the next boundary -
         # rstrip would eat a final newline the file genuinely has.
-        return data[:-2] if data.endswith(b"\r\n") else data
-    return b""
+        return name, (data[:-2] if data.endswith(b"\r\n") else data)
+    return "", b""
+
+
+def _sig_of(line):
+    """The Message.Signal a cell or sendable line names, or None."""
+    m = re.search(r'sig=("([^"]*)"|(\S+))', line)
+    return (m.group(2) or m.group(3)) if m else None
+
+
+def prune_cfg(text, by_ref, nodes):
+    """Everything in a setup that this frame map cannot account for, removed.
+
+    The same rule as dashDropUnresolved() in src/dash.cpp, and it has to STAY
+    the same rule: a setup built here is copied onto the card, so a preview
+    that keeps what the firmware would drop teaches a layout the logger will
+    not have. Slots are renumbered from zero for the same reason the firmware
+    compacts its arrays - a hole where the old map's signals used to be reads
+    as a layout that is still half there.
+    """
+    out, dropped = [], 0
+    cells = sends = 0
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("cell "):
+            ref = _sig_of(s)
+            if not ref or ref not in by_ref:
+                dropped += 1
+                continue
+            out.append(re.sub(r"^(\s*cell)\s+\d+", r"\g<1> %d" % cells, line))
+            cells += 1
+        elif s.startswith("send "):
+            ref = _sig_of(s)
+            # A one-off frame names an identifier, not a signal, so no frame
+            # map can invalidate it.
+            if ref and ref not in by_ref:
+                dropped += 1
+                continue
+            out.append(re.sub(r"^(\s*send)\s+\d+", r"\g<1> %d" % sends, line))
+            sends += 1
+        elif s.startswith(("role ", "node ")):
+            m = re.match(r'(?:role|node)\s+("([^"]*)"|(\S+))', s)
+            name = (m.group(2) or m.group(3)) if m else ""
+            # No BU_ node of this name means the answer is not stale but
+            # unanswerable: nothing in the new file transmits under it.
+            if name and name in nodes:
+                out.append(line)
+            else:
+                dropped += 1
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n", dropped
 
 
 def load_dbc(path):
@@ -323,6 +380,12 @@ def main():
                          "COPY of examples/dash.cfg in the temp directory, so the "
                          "preview always opens with something to look at and never "
                          "edits the file in the repo")
+    ap.add_argument("--cfg-dir",
+                    help="where a setup goes when the frame map is loaded from "
+                         "the PAGE rather than named here: <that map>.cfg in "
+                         "this directory. One setup per frame map, so loading a "
+                         "second map can never open on the first one's layout "
+                         "or write over its file")
     ap.add_argument("--empty", action="store_true",
                     help="start with no setup at all - the page as it looks on a "
                          "logger with nothing on its card")
@@ -349,10 +412,13 @@ def main():
     #
     # The example layout is seeded ONLY when the example frame map is also in
     # use. Against somebody else's .dbc every cell in it would name a signal
-    # that does not exist, which is a worse start than an empty grid.
+    # that does not exist, which is a worse start than an empty grid - and with
+    # NO frame map at all it is worse still: eight cells that all read
+    # "unknown", which is precisely the stale-looking page this tool must never
+    # open on.
     example_dbc = ROOT / "examples" / "machine.dbc"
     own_dbc = bool(args.dbc) and Path(args.dbc).resolve() != example_dbc.resolve()
-    if not args.cfg and not args.empty and not own_dbc:
+    if not args.cfg and not args.empty and args.dbc and not own_dbc:
         seed = ROOT / "examples" / "dash.cfg"
         if seed.exists():
             args.cfg = str(Path(tempfile.gettempdir()) / "preview-dash.cfg")
@@ -575,7 +641,8 @@ def main():
 
             if p == "/api/dbc":
                 nonlocal dbc, flat, by_ref
-                data = _multipart_file(raw, self.headers.get("Content-Type", ""))
+                name, data = _multipart_file(raw,
+                                             self.headers.get("Content-Type", ""))
                 if not data:
                     self._json({"ok": 0, "err": "the upload did not finish"})
                     return
@@ -596,11 +663,36 @@ def main():
                 print("frame map replaced from the web app: "
                       "%d messages, %d signals" % (len(dbc["m"]), len(flat)),
                       flush=True)
+
+                # The setup follows the map. The logger has one card and one
+                # /dash.cfg; a desk has a drawer of .dbc files and one window
+                # open all afternoon, so the setup for the map being loaded is
+                # picked up here and the one for the map being left behind is
+                # left alone rather than written over.
+                if args.cfg_dir and name:
+                    args.cfg = str(Path(args.cfg_dir)
+                                   / (Path(name).stem + ".cfg"))
+                    state["cfg"] = (Path(args.cfg).read_text()
+                                    if Path(args.cfg).exists() else DEFAULT_CFG)
+
+                # And whatever is now in hand is held to this map, by the same
+                # rule the firmware applies in dashDropUnresolved().
+                state["cfg"], gone = prune_cfg(state["cfg"], by_ref,
+                                               dbc.get("nodes", []))
+                state["gen"] += 1
+                state["over"] = {}       # overrides named the old map's signals
+                if args.cfg:
+                    Path(args.cfg).write_text(state["cfg"])
+                    print("setup for this map: %s%s"
+                          % (args.cfg,
+                             " (%d item(s) the map does not describe removed)"
+                             % gone if gone else ""), flush=True)
+
                 self._json({"ok": 1, "bytes": len(data),
                             "messages": len(dbc["m"]), "signals": len(flat),
                             "nodes": len(dbc.get("nodes", [])),
                             "errors": 0, "inexact": 0, "missing": 0,
-                            "dropped": 0, "clipped": 0})
+                            "dropped": gone, "clipped": 0})
                 return
 
             if p == "/api/dash/cfg":

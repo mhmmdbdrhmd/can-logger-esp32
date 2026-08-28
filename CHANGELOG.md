@@ -2,7 +2,7 @@
 
 ## v1.1.1
 
-Five bugs in v1.1.0. The worst of them silently deleted work.
+Six bugs in v1.1.0. The worst of them silently deleted work.
 
 ### Remove deleted every value of a message except the one you pressed
 
@@ -55,6 +55,40 @@ signals are still there. One-off frames named by identifier are never touched.
 This is deliberately **not** what happens at boot, where an unresolvable cell is
 still kept and drawn as such: there the usual cause is a card with no DBC on it,
 and throwing away a layout over that would be far worse.
+
+### ...and the desk tool handed it straight back the next morning
+
+The fix above was the logger's half. `customize.py` still opened on a **single
+`desk-setup.cfg`**, written by whatever map was loaded last — so running it with
+no argument re-seeded a setup built for another bus, against no frame map at
+all, and the page came up on a screen of `unknown` cells with a role naming a
+node that was nowhere in sight. Exactly the symptom the fix above was meant to
+end, arriving by a different door.
+
+Three things were wrong, and all three are fixed:
+
+- **One setup per frame map, always.** The `.cfg` is named after the `.dbc`. With
+  no map named on the command line the page starts *empty*, and loading one from
+  the page opens that map's own setup — beside the `.dbc` when there is one,
+  beside `customize.py` when the map came from the file picker. Loading a second
+  map in the same session switches to its file and leaves the first exactly as
+  it was, instead of writing the new bus over the old bus's setup.
+- **The preview server never pruned its own copy.** Only the browser did, and
+  only the browser's save put the result on disk. It now applies the same rule
+  as `dashDropUnresolved()` in the firmware, and `test/run_tests.sh` asserts the
+  two implementations agree — same survivors, same order, same answer about the
+  role — because one rule with two implementations is how this came back in the
+  first place.
+- **A role outlived the map that named it.** `role "Tester"` against a file with
+  no `Tester` node is not stale but unanswerable: nothing transmits under that
+  name, so both Fill buttons stop separating anything while the header goes on
+  claiming a role. It is now cleared with everything else the new map cannot
+  account for, and the question is asked again.
+
+The page also **re-reads** the setup after a map is loaded rather than pruning a
+second copy of it in the browser. Two copies pruning themselves independently is
+how a browser holding the old layout gets to write it back over a card that had
+just been cleaned.
 
 ### Values from a swapped-out map could be deleted one at a time
 

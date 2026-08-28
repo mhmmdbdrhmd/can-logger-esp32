@@ -20,9 +20,13 @@ empty and the Frame map button loads a .dbc from wherever you keep it, which
 is the same button the logger itself has.
 
 It opens the logger's real web page in your browser, fed with simulated data,
-and writes everything you build into a .cfg file next to your .dbc. Copy the
-two files onto the SD card as /frames.dbc and /dash.cfg and the logger starts
-up with your dashboard already on it.
+and writes everything you build into a .cfg file named after your .dbc and
+sitting beside it. Copy the two onto the SD card as /frames.dbc and /dash.cfg
+and the logger starts up with your dashboard already on it.
+
+One setup per frame map, always. Start with no frame map and the page starts
+empty; load one and its own .cfg is what opens - and what a second frame map
+cannot account for is dropped rather than left reading "unknown".
 
 No hardware, no wiring, no CAN traffic, and nothing to install - just Python,
 which is why this is a .py and not a shell script: it runs the same way on
@@ -132,10 +136,17 @@ def main():
                   "read.\n")
 
     # The setup lands next to the frame map, named after it, so the pair stays
-    # together and it is obvious which .cfg belongs to which .dbc. With no
-    # frame map yet there is nothing to name it after, so it goes beside this
-    # script until one is loaded.
-    cfg = dbc.with_suffix(".cfg") if dbc is not None else ROOT / "desk-setup.cfg"
+    # together and it is obvious which .cfg belongs to which .dbc.
+    #
+    # With no frame map there is nothing to name it after YET, and there is no
+    # single catch-all file either. There was, and it was the bug: a setup
+    # built for one bus was read back the next day beside no frame map at all,
+    # and the page opened on eighteen cells that every one read "unknown". A
+    # setup means nothing without the map it was written against, so with no
+    # map this starts empty and the file is chosen the moment one is loaded -
+    # <that map>.cfg, in this directory, which is also what comes BACK if you
+    # load the same map again tomorrow.
+    cfg = dbc.with_suffix(".cfg") if dbc is not None else None
     port = free_port()
     url = "http://127.0.0.1:%d/" % port
 
@@ -143,7 +154,9 @@ def main():
     print("  frame map   %s"
           % (dbc if dbc is not None
              else "none yet - load one with Frame map, top right"))
-    print("  your setup  %s   (written as you go)" % cfg)
+    print("  your setup  %s"
+          % ("%s   (written as you go)" % cfg if cfg is not None
+             else "named after the frame map, in %s, once you load one" % ROOT))
     print("  open        %s" % url)
     print("  role        %s"
           % (role if role else "not set - both Fill buttons offer everything "
@@ -163,20 +176,29 @@ def main():
       %s   ->  /dash.cfg
 
   Close this window (or press Ctrl-C) when you are done.
-""" % cfg.name)
+""" % (cfg.name if cfg is not None else "the .cfg named after it"))
 
     threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)),
                      daemon=True).start()
 
     import preview_dashboard
-    sys.argv = ["preview_dashboard.py", "--cfg", str(cfg), "--port", str(port)]
+    # --cfg-dir is where a setup goes for a map loaded from the PAGE. Beside
+    # the .dbc when there is one, otherwise beside this script - either way one
+    # setup per frame map, never a shared file that outlives the map it was
+    # built for.
+    sys.argv = ["preview_dashboard.py", "--port", str(port),
+                "--cfg-dir", str(dbc.parent if dbc is not None else ROOT)]
+    sys.argv += ["--cfg", str(cfg)] if cfg is not None else []
     sys.argv += ["--dbc", str(dbc)] if dbc is not None else ["--no-dbc"]
     if role:
         sys.argv += ["--role", role]
     try:
         return preview_dashboard.main()
     except KeyboardInterrupt:
-        print("\n\nStopped. Your setup is in %s" % cfg)
+        print("\n\nStopped. Your setup is in %s"
+              % (cfg if cfg is not None
+                 else "the .cfg named after the frame map you loaded, in %s"
+                      % ROOT))
         return 0
 
 

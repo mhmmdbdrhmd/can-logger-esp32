@@ -1709,39 +1709,6 @@ function loadCfg(){
       startPolls();
     });
 }
-/* Every cell and setpoint the loaded frame map cannot account for, removed and
-   the gaps closed. Returns how many went.
-
-   Deliberately NOT what happens when the page merely reloads: a cell that
-   cannot resolve because the logger has no DBC on its card is a temporary
-   problem, and throwing away a layout over it would be much worse than drawing
-   it as unresolvable. This runs only when somebody has actually loaded a
-   different map. */
-function dropUnresolved(){
-  var have = {};
-  DBC.m.forEach(function(m){
-    m.s.forEach(function(sg){ have[m.n + '.' + sg.n] = 1; });
-  });
-
-  var gone = 0;
-  function prune(map, isRaw){
-    var keep = {}, w = 0;
-    Object.keys(map).map(Number).sort(function(a, b){ return a - b; })
-      .forEach(function(k){
-        var e = map[k];
-        /* A one-off frame names an identifier, not a signal, so no frame map
-           can invalidate it. */
-        if(isRaw && e && !e.sig){ keep[w++] = e; return; }
-        if(e && e.sig && have[e.sig]){ keep[w++] = e; return; }
-        gone++;
-      });
-    return keep;
-  }
-  CFG.cells = prune(CFG.cells, false);
-  CFG.tx    = prune(CFG.tx,    true);
-  return gone;
-}
-
 function loadDbc(force){
   if(DBC.m.length && !force) return Promise.resolve();
   return fetch('/api/signals').then(function(r){ return r.json(); })
@@ -3200,24 +3167,21 @@ q('dbcpick').onchange = function(){
         toast('Frame map not loaded', d.err || 'the logger refused it', 'bad');
         return;
       }
-      return loadDbc(1).then(function(){
-        /* A different frame map is a different bus. Anything the new one
-           cannot account for goes, rather than sitting there as a cell that
-           reads "unknown" for ever - and it has to go here as well as on the
-           logger, because this copy is what gets saved back over the setup
-           file a moment later. */
-        var gone = dropUnresolved();
+      /* A different frame map is a different bus. The logger has already
+         thrown out every cell, sendable value and role the new file cannot
+         account for, and saved what survived - so the setup is RE-READ here
+         rather than pruned a second time in the browser. Two copies pruning
+         themselves independently is exactly how a page holding the old layout
+         gets to write it back over a card that had just been cleaned. */
+      return loadDbc(1).then(loadCfg).then(function(){
         toast('Frame map loaded', d.messages + ' message(s), ' + d.signals
               + ' signal(s)'
               + (d.errors ? ', ' + d.errors + ' line(s) unreadable' : '')
-              + (gone ? ' — ' + gone + ' cell(s) and value(s) from the old map '
+              + (d.dropped ? ' — ' + d.dropped + ' item(s) from the old map '
                         + 'removed' : ''), 'ok');
-        renderGrid();
-        renderSend();
-        var done = gone ? saveCfg() : Promise.resolve();
         /* Straight into the question that has to be answered before either
            Fill button is worth pressing. */
-        return done.then(openRole);
+        return openRole();
       });
     })
     .catch(function(){

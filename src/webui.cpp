@@ -457,8 +457,13 @@ static void handleDbcDone() {
   if (dropped) {
     recorderRequestSaveDash();
     dashStoreSave();
-    LOG_LIVE(LVL_INFO, "%u cell(s) and setpoint(s) dropped - the new frame map "
-                       "does not describe their signals", (unsigned)dropped);
+    /* Any OTHER browser still holding the old layout re-reads on a new gen.
+     * Without this it would carry on showing cells this map cannot decode,
+     * and would write them straight back the next time it saved. */
+    s_dashGen++;
+    LOG_LIVE(LVL_INFO, "%u item(s) dropped - cells, setpoints and the logger's "
+                       "role that the new frame map does not describe",
+             (unsigned)dropped);
   }
 
   j  = "{\"ok\":";        j += g_dbc.loaded ? 1 : 0;

@@ -586,6 +586,18 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
 uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db) {
   uint16_t dropped = 0;
 
+  /* The role names a node of the OLD map. If the new file has no such node the
+   * answer is not merely stale, it is unanswerable - and left alone the header
+   * would go on asserting "Role: Tester" while both Fill buttons quietly
+   * stopped separating anything, because nothing transmits under that name.
+   * Cleared, so the page asks the question again against the new file. */
+  if (c.role[0]) {
+    bool known = false;
+    for (uint8_t i = 0; i < db.nodeCount && !known; i++)
+      known = strcmp(db.node[i], c.role) == 0;
+    if (!known) { c.role[0] = 0; dropped++; }
+  }
+
   for (uint8_t i = 0; i < DASH_MAX_CELLS; i++) {
     DashCell &d = c.cell[i];
     if (!dashCellUsed(d)) continue;

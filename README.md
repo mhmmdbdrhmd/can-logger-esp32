@@ -576,12 +576,20 @@ immediately, saying how many saved cells no longer match if any do not.
 
 **Loading a map clears what the new one cannot account for.** A different frame
 map means a different bus, so every cell and every sendable value naming a
-signal the new file does not have is removed and the gaps closed — on the
-logger and in the page, so the card and the screen agree. Load an unrelated
-`.dbc` and you get an empty setup, which is the honest result; reload a
-corrected version of the same one and your layout survives, because its signals
-are still there. One-off frames named by identifier are never touched: they name
-no signal, so no frame map can invalidate them.
+signal the new file does not have is removed and the gaps closed. The role goes
+the same way if the new file has no `BU_` node of that name — it is not merely
+stale then, it is unanswerable, and the header would go on claiming a role while
+both Fill buttons quietly stopped separating anything by it, so the question is
+asked again. Load an unrelated `.dbc` and you get an empty setup, which is the
+honest result; reload a corrected version of the same one and your layout
+survives, because its signals are still there. One-off frames named by
+identifier are never touched: they name no signal, so no frame map can
+invalidate them.
+
+The logger does the clearing and the page **re-reads** the result rather than
+repeating it on its own copy. That is deliberate: two copies pruning themselves
+independently is exactly how a browser holding the old layout gets to write it
+back over a card that had just been cleaned.
 
 This is not what happens at boot. There, a cell whose signal is missing is kept
 and drawn as unresolvable — the usual reason is a card with no DBC on it, and
@@ -738,6 +746,14 @@ That one command:
   it could not read
 - picks a free port, starts the page and opens your browser at it
 - writes everything you build into `mine.cfg`, next to your `.dbc`, as you go
+
+**One setup per frame map, always.** The `.cfg` is named after the `.dbc` and
+sits beside it — and when the map came from the page rather than the command
+line, beside `customize.py`. So starting with no frame map starts *empty*, and
+loading a map opens that map's own setup: yesterday's work on another bus can
+neither appear as a screen of `unknown` cells nor be written over. Load a second
+map in the same session and the same rule applies — the first map's file is left
+exactly as it was.
 
 Then, in the page:
 

@@ -266,6 +266,9 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}
    stays on the first line with the name, instead of being pushed to a third. */
 .txgroup .ghead{align-items:center}
 .txgroup .ghead span{flex:1 1 240px}
+.txgroup .ghead select.gkind{width:auto;margin:0 0 0 auto;padding:6px 10px;
+  font-size:12px}
+.txgroup .ghead select.gkind + button{margin-left:8px}
 .sendgroup .sendrow{border-bottom:1px dashed #1b212b}
 .sendgroup .sendrow:last-of-type{border-bottom:0}
 .sendrow .lbl em{font-style:normal;color:var(--acc)}
@@ -2446,12 +2449,17 @@ function muxSelectorOf(name){
 function txUnitKey(map, i){
   var t = map[i];
   if(!t || !t.sig) return 'i' + i;
-  var code = muxCodeOf(t.sig);
-  if(code !== null)  return 'x' + msgOf(t.sig) + '#' + code;
-  if(t.group)        return 'g' + t.group;
-  /* Multiplexed by its own record, with no map loaded to say which code. Held
-     together rather than scattered: the desk tool starts with no frame map. */
-  if(t.mux)          return 'm' + msgOf(t.sig);
+  /* The value's own `mux` flag decides, not the frame map. Filling sets it from
+     the map, so the file's answer is still the default - but a .dbc that is
+     multiplexed IN FACT and does not say so is common enough that the answer
+     has to be changeable, and once changed it has to stick. */
+  if(t.mux){
+    var code = muxCodeOf(t.sig);
+    /* Per selector code when the map says which; otherwise per group, which is
+       what a hand-marked frame has instead. */
+    return 'x' + msgOf(t.sig) + '#' + (code === null ? (t.group || 0) : code);
+  }
+  if(t.group) return 'g' + t.group;
   return 'i' + i;
 }
 
@@ -2468,7 +2476,7 @@ function txUnits(map){
     });
   order.forEach(function(u){
     u.kind = u.ids.length < 2 ? 'single'
-           : (u.key.charAt(0) === 'x' || u.key.charAt(0) === 'm') ? 'multiplexed'
+           : u.key.charAt(0) === 'x' ? 'multiplexed'
            : 'grouped';
   });
   return order;
@@ -2479,10 +2487,21 @@ function txUnitNote(map, u){
   var t = map[u.ids[0]];
   var mn = msgOf(t.sig || '');
   if(u.kind !== 'multiplexed'){
-    return 'grouped — these ' + u.ids.length + ' go out together, in one frame';
+    return 'grouped — these ' + u.ids.length + ' go out together, in one frame'
+         + (isMuxMsg(mn) ? ', and you have said they may be removed one at a '
+                           + 'time even though the frame map multiplexes them'
+                         : '');
   }
   var sel  = muxSelectorOf(mn);
   var code = muxCodeOf(t.sig);
+  if(code === null){
+    return DBC.m.length
+      ? 'multiplexed — you marked these ' + u.ids.length + ' as one frame. The '
+        + 'frame map does not say so, which is usual for a .dbc whose signals '
+        + 'overlap without an M/m marker'
+      : 'multiplexed — these ' + u.ids.length + ' are one frame, from the setup '
+        + 'file. No frame map is loaded to say which selector code';
+  }
   return 'multiplexed — these ' + u.ids.length + ' are the payload of '
        + (sel ? sel + ' = ' + code : 'one selector code')
        + ', so they are one frame: sent together, removed together';
@@ -2604,6 +2623,42 @@ function renderTxEdit(){
       var gh = el('div', 'ghead');
       gh.appendChild(el('b', null, mname));
       gh.appendChild(el('span', null, txUnitNote(TXED, u)));
+
+      /* Which kind this frame is, and the one place it can be corrected.
+         A .dbc that is multiplexed in fact and does not say so - overlapping
+         signals with no M/m marker - is common, and nothing can infer it:
+         guessing would refuse frames that are legitimately one message's
+         signals side by side. So the file's answer is the default and this is
+         the override, on the box rather than on a card, because it is a fact
+         about the frame and not about any one value in it. */
+      var kind = el('select', 'gkind');
+      var kg = el('option', null, 'grouped');
+      kg.value = 'g';
+      var km = el('option', null, 'multiplexed');
+      km.value = 'x';
+      kind.appendChild(kg);
+      kind.appendChild(km);
+      kind.value = isMux ? 'x' : 'g';
+      kind.title = 'grouped: one frame, and you may remove its values one at a '
+                 + 'time.\nmultiplexed: one frame that only means anything '
+                 + 'whole - no value of it can be removed on its own.';
+      (function(ids, want){
+        kind.onchange = function(){
+          var toMux = kind.value === 'x';
+          /* A shared group id as well as the flag: with no frame map loaded
+             there is nothing else holding the set together, and the desk tool
+             starts with no frame map. */
+          var g = 0;
+          ids.forEach(function(k){ if(TXED[k].group) g = TXED[k].group; });
+          if(!g) g = freeGroup();
+          ids.forEach(function(k){
+            TXED[k].mux   = toMux ? 1 : 0;
+            TXED[k].group = g;
+          });
+          renderTxEdit();
+        };
+      })(unit.slice(), isMux);
+      gh.appendChild(kind);
 
       var gdel = el('button', null, 'Remove all ' + unit.length);
       gdel.onclick = function(){
@@ -2856,8 +2911,14 @@ function renderTxEdit(){
       };
       gd.appendChild(gs);
       f2.appendChild(gd);
-    } else if(t.group){
-      t.group = 0;                    /* a group of one is not a group */
+    } else if(t.group && (!u || u.ids.length < 2)){
+      /* A group of one is not a group. Only a group of one, though: a
+         multiplexed unit is offered no dropdown at all, and clearing its group
+         here threw away the one thing that holds it together when no frame map
+         is loaded - so a hand-marked frame came back from the file as loose
+         values, and a real one merged its two selector codes into a single box
+         that would have gone out as one impossible frame. */
+      t.group = 0;
     }
 
     card.appendChild(f2);

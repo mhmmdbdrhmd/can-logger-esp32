@@ -32,6 +32,11 @@ out as asked. A setup file written before this can still contain one, so
 `cantx.cpp` refuses it as well rather than transmitting a single frame with the
 last member's opcode written over both payloads.
 
+**The kind can be corrected by hand.** The box header carries a **grouped /
+multiplexed** picker, because a `.dbc` that is multiplexed in fact and does not
+say so is common and no tool can infer it. The file's answer is the default;
+the choice is kept in the setup file and holds with no frame map loaded.
+
 `tools/check_dbc.py` also warns when a message the file does **not** mark as
 multiplexed has signals sharing bits — the shape of a frame that is multiplexed
 in fact and does not say so. Nothing can infer that (guessing would refuse

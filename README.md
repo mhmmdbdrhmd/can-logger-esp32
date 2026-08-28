@@ -975,6 +975,15 @@ group that spans two codes cannot be built from the page at all, and the logger
 refuses one that reaches it from an older setup file rather than sending one
 frame with the last member's opcode written over both payloads.
 
+**When the `.dbc` does not say it is multiplexed.** Overlapping signals with no
+`M`/`m` marker are common — a bench command frame whose second byte means one
+thing under one opcode and something else under another. Nothing can infer that
+(guessing would refuse frames that are legitimately one message's signals side
+by side), so the box header carries a **grouped / multiplexed** picker: the
+file's answer is the default, and changing it sticks, in the setup file, with or
+without a frame map loaded. Marking a group *multiplexed* takes away the
+individual **Remove** — it becomes a frame that only means anything whole.
+
 **Signals that are read as a set.** A plain message with several signals is one
 frame whichever signal you meant to change, so *Fill from the frame map* groups
 them: one box, one **Send all**, one frame. Behind it, the members are queued

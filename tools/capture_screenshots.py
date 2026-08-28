@@ -94,8 +94,28 @@ def wait_up(url, timeout=20):
     return False
 
 
+def port_is_free(port):
+    """Nothing must already be listening on PORT.
+
+    wait_up() only proves that SOMETHING answers, not that it is the server this
+    run started. With another preview left over on the same port - easily done,
+    it is the obvious port to reach for by hand - every shot is taken of that
+    server instead, and the pictures come out looking almost right: correct page,
+    correct size, wrong frame map and wrong dialog open. Wrong figures that look
+    plausible are worse than a crash, so this refuses to start.
+    """
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
 def main():
     chrome = find_chrome()
+    if not port_is_free(PORT):
+        sys.exit("something is already listening on 127.0.0.1:%d - stop it "
+                 "first, or these shots would be taken of it rather than of a "
+                 "server started here" % PORT)
     os.makedirs(OUT, exist_ok=True)
 
     for name, tab, layout, with_dbc, (w, h), run in SHOTS:

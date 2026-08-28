@@ -600,7 +600,7 @@ def main():
                             "messages": len(dbc["m"]), "signals": len(flat),
                             "nodes": len(dbc.get("nodes", [])),
                             "errors": 0, "inexact": 0, "missing": 0,
-                            "clipped": 0})
+                            "dropped": 0, "clipped": 0})
                 return
 
             if p == "/api/dash/cfg":

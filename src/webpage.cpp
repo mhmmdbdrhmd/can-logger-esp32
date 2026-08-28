@@ -848,6 +848,7 @@ function parseCfg(text){
           style: p.style || 'number', choices: p.choices || '',
           id: p.id || '', data: p.data || '', ext: p.ext === '1' ? 1 : 0,
           cyclic: numOr(p.cyclic, 0), group: numOr(p.group, 0),
+          mux: p.mux === '1' ? 1 : 0,
           raw: p.id !== undefined || p.data !== undefined
         };
       }
@@ -900,6 +901,7 @@ function dumpCfg(){
       if(t.choices) s += ' choices=' + quote(t.choices);
     }
     if(t.group)  s += ' group=' + Math.round(t.group);
+    if(t.mux)    s += ' mux=1';
     if(t.cyclic) s += ' cyclic=' + Math.round(t.cyclic);
     out.push(s);
   });
@@ -1697,6 +1699,39 @@ function loadCfg(){
       startPolls();
     });
 }
+/* Every cell and setpoint the loaded frame map cannot account for, removed and
+   the gaps closed. Returns how many went.
+
+   Deliberately NOT what happens when the page merely reloads: a cell that
+   cannot resolve because the logger has no DBC on its card is a temporary
+   problem, and throwing away a layout over it would be much worse than drawing
+   it as unresolvable. This runs only when somebody has actually loaded a
+   different map. */
+function dropUnresolved(){
+  var have = {};
+  DBC.m.forEach(function(m){
+    m.s.forEach(function(sg){ have[m.n + '.' + sg.n] = 1; });
+  });
+
+  var gone = 0;
+  function prune(map, isRaw){
+    var keep = {}, w = 0;
+    Object.keys(map).map(Number).sort(function(a, b){ return a - b; })
+      .forEach(function(k){
+        var e = map[k];
+        /* A one-off frame names an identifier, not a signal, so no frame map
+           can invalidate it. */
+        if(isRaw && e && !e.sig){ keep[w++] = e; return; }
+        if(e && e.sig && have[e.sig]){ keep[w++] = e; return; }
+        gone++;
+      });
+    return keep;
+  }
+  CFG.cells = prune(CFG.cells, false);
+  CFG.tx    = prune(CFG.tx,    true);
+  return gone;
+}
+
 function loadDbc(force){
   if(DBC.m.length && !force) return Promise.resolve();
   return fetch('/api/signals').then(function(r){ return r.json(); })
@@ -2585,6 +2620,9 @@ function renderTxEdit(){
       /* Choosing one payload of a multiplexed frame by hand brings the rest
          with it, for the same reason removing one takes the rest away. */
       var mn = msgOf(v);
+      /* On the card being edited too - fillFromMessage below skips refs that
+         are already set up, so this one would otherwise never be marked. */
+      t.mux = isMuxMsg(mn) ? 1 : 0;
       if(isMuxMsg(mn)){
         DBC.m.forEach(function(m2){
           if(m2.n === mn) fillFromMessage(m2);
@@ -2684,11 +2722,20 @@ function renderTxEdit(){
     f2.appendChild(rd);
 
     /* Which other values this one leaves with. Offered only for signals of the
-       same message, because a group is one frame and a frame is one message. */
-    var mates = Object.keys(TXED).map(Number).filter(function(k){
+       same message, because a group is one frame and a frame is one message.
+
+       NOT called `mates`. It was, and `var` is function-scoped, so this
+       assignment reached back and overwrote the mux-sibling list the Remove
+       button above had already closed over - a list that deliberately INCLUDES
+       this card, where this one deliberately excludes it. Remove therefore
+       deleted every value of the message except the one whose button was
+       pressed, while its label, computed before the overwrite, still said the
+       right number. On a plain four-signal message, pressing Remove threw away
+       the other three and kept the one you asked it to delete. */
+    var groupMates = Object.keys(TXED).map(Number).filter(function(k){
       return k !== i && TXED[k].sig && msgOf(TXED[k].sig) === msgOf(t.sig || '');
     });
-    if(mates.length){
+    if(groupMates.length){
       var gd = el('div');
       gd.style.gridColumn = 'span 2';
       var gid = 'txgrp' + i;
@@ -2710,10 +2757,10 @@ function renderTxEdit(){
         else {
           /* Join whatever group the others already form, or start one. */
           var g = 0;
-          mates.forEach(function(k){ if(TXED[k].group) g = TXED[k].group; });
+          groupMates.forEach(function(k){ if(TXED[k].group) g = TXED[k].group; });
           if(!g) g = freeGroup();
           t.group = g;
-          mates.forEach(function(k){ TXED[k].group = g; });
+          groupMates.forEach(function(k){ TXED[k].group = g; });
         }
         renderTxEdit();
       };
@@ -2789,7 +2836,11 @@ function isMuxMsg(name){
 function muxSiblings(idx){
   var t = TXED[idx];
   var mn = (t && t.sig) ? msgOf(t.sig) : '';
-  if(!mn || !isMuxMsg(mn)) return [idx];
+  /* The value's own record first, the frame map only as a fallback. Asking the
+     map alone made the set dissolve whenever the map was absent - which is the
+     normal state of the desk tool before a .dbc has been loaded, and of the
+     logger itself when the card has no frame map on it. */
+  if(!mn || !(t.mux || isMuxMsg(mn))) return [idx];
   return Object.keys(TXED).map(Number).filter(function(k){
     return TXED[k].sig && msgOf(TXED[k].sig) === mn;
   });
@@ -2824,6 +2875,9 @@ function fillFromMessage(m){
     if(i >= MAXSEND){ r.full = true; return; }
     var t = txFromSignal(ref, s);
     t.group = group;
+    /* Carried on the value, not looked up later: the Remove button has to know
+       these belong together even when no frame map is loaded to ask. */
+    t.mux = m.mux ? 1 : 0;
     TXED[i] = t;
     r.added++;
   });
@@ -3098,16 +3152,23 @@ q('dbcpick').onchange = function(){
         return;
       }
       return loadDbc(1).then(function(){
+        /* A different frame map is a different bus. Anything the new one
+           cannot account for goes, rather than sitting there as a cell that
+           reads "unknown" for ever - and it has to go here as well as on the
+           logger, because this copy is what gets saved back over the setup
+           file a moment later. */
+        var gone = dropUnresolved();
         toast('Frame map loaded', d.messages + ' message(s), ' + d.signals
               + ' signal(s)'
-              + (d.errors  ? ', ' + d.errors + ' line(s) unreadable' : '')
-              + (d.missing ? ', ' + d.missing + ' saved cell(s) no longer match'
-                           : ''), 'ok');
+              + (d.errors ? ', ' + d.errors + ' line(s) unreadable' : '')
+              + (gone ? ' — ' + gone + ' cell(s) and value(s) from the old map '
+                        + 'removed' : ''), 'ok');
         renderGrid();
         renderSend();
+        var done = gone ? saveCfg() : Promise.resolve();
         /* Straight into the question that has to be answered before either
            Fill button is worth pressing. */
-        openRole();
+        return done.then(openRole);
       });
     })
     .catch(function(){

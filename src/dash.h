@@ -143,6 +143,18 @@ struct TxCommand {
    * that way. */
   uint8_t  group;
 
+  /* 1 if this value is one payload of a MULTIPLEXED message.
+   *
+   * Recorded rather than looked up, because the thing that needs to know is the
+   * customizer's Remove button, and it needs to know even when the frame map is
+   * not loaded - opening the page before a .dbc reaches the card, or after the
+   * map has been swapped for another one. Ask the map and the answer becomes
+   * "not multiplexed" the moment the map is absent: the set stops being
+   * recognised as a set and its payloads become deletable one at a time, which
+   * is exactly the half-described command the grouping exists to prevent. So
+   * the fact travels with the value instead of being re-derived. */
+  uint8_t  mux;
+
   /* TXK_RAW */
   uint32_t id;
   uint8_t  ext;
@@ -223,6 +235,24 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap);
  * than hiding - a cell pointing at a signal this DBC does not have is the
  * normal result of swapping cards, and the user needs to see it. */
 uint16_t dashResolve(DashConfig &c, const DbcDb &db);
+
+/* Throw away every cell and every setpoint the frame map cannot account for,
+ * and close the gaps they leave. Returns how many went.
+ *
+ * NOT what happens at boot. There, a cell whose signal is missing is kept and
+ * drawn as unresolvable, because the usual reason is a card with no DBC on it
+ * or a file that failed to parse - and silently destroying a layout somebody
+ * built at a desk because the card was in the other pocket is unforgivable.
+ *
+ * This is for the other case: somebody has DELIBERATELY loaded a different
+ * frame map. Then the old cells are not "temporarily unresolvable", they are
+ * about a bus this logger is no longer looking at, and keeping them is what
+ * turns a fresh start into a screen of unknowns. It also breaks things
+ * quietly: values from a multiplexed message stop being recognised as a set
+ * once the message is gone from the map, so they can be deleted one at a time
+ * - which is precisely the half-described command the grouping exists to
+ * prevent. */
+uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db);
 
 /* FNV-1a over the serialised text. Used only to notice that /dash.cfg was
  * edited outside the logger; it is not a checksum against corruption. */

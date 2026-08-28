@@ -357,6 +357,17 @@ def main():
     chrome = find_chrome()
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg is not on PATH")
+
+    # Nothing may already hold PORT: waiting for "something answers" would
+    # otherwise record a leftover preview instead of the one started here, and
+    # the result looks almost right - which is the dangerous kind of wrong.
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        if s.connect_ex(("127.0.0.1", PORT)) == 0:
+            sys.exit("something is already listening on 127.0.0.1:%d - stop it "
+                     "first, or the recording would be of that instead" % PORT)
+
     os.makedirs(OUT, exist_ok=True)
 
     names = sys.argv[1:] or list(SCENES)

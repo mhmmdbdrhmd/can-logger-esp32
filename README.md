@@ -1,6 +1,6 @@
 <h1 align="center">can-logger-esp32</h1>
 <p align="center"><i>ESP32 CAN logger with optional DBC decoding</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.1.0"><img alt="release" src="https://img.shields.io/badge/release-v1.1.0-8957E5?style=flat-square"></a></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.1.1"><img alt="release" src="https://img.shields.io/badge/release-v1.1.1-8957E5?style=flat-square"></a></p>
 
 > Log a CAN bus to SD with **nothing bus-specific compiled in** — identifiers, scaling and units all come from a DBC file on the card.
 
@@ -312,7 +312,7 @@ and Windows all send the same bytes, so the same two commands do it everywhere:
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-v1.1.0-4mb-merged.bin
+python3 tools/flash.py --image can-logger-esp32-v1.1.1-4mb-merged.bin
 ```
 
 It finds the board itself, and says what to try if the chip never enters
@@ -574,6 +574,20 @@ holding and puts it on the card as `/frames.dbc`. The map is rebuilt on the spot
 — no reboot, no card reader, no laptop cable — and the dashboard re-binds to it
 immediately, saying how many saved cells no longer match if any do not.
 
+**Loading a map clears what the new one cannot account for.** A different frame
+map means a different bus, so every cell and every sendable value naming a
+signal the new file does not have is removed and the gaps closed — on the
+logger and in the page, so the card and the screen agree. Load an unrelated
+`.dbc` and you get an empty setup, which is the honest result; reload a
+corrected version of the same one and your layout survives, because its signals
+are still there. One-off frames named by identifier are never touched: they name
+no signal, so no frame map can invalidate them.
+
+This is not what happens at boot. There, a cell whose signal is missing is kept
+and drawn as unresolvable — the usual reason is a card with no DBC on it, and
+destroying a layout built at a desk because the card was in the other pocket
+would be unforgivable.
+
 It is streamed to the card a chunk at a time rather than held in memory: a real
 machine's `.dbc` runs to ninety kilobytes, which is more than the frame map
 built from it and a third of this chip's free heap. It lands on a temporary name
@@ -703,9 +717,15 @@ empty page is never a mystery.
 No logger, no wiring, no traffic. All you need is your `.dbc` and Python.
 
 ```bash
-python3 customize.py path/to/mine.dbc
+python3 customize.py                                   # load the .dbc in the page
+python3 customize.py path/to/mine.dbc                  # or start with it
 python3 customize.py path/to/mine.dbc --role Tester    # if one of them is you
 ```
+
+**It never asks a question in the terminal.** With no argument the page opens
+empty and its own **Frame map** button loads a `.dbc` from wherever you keep it
+— the same button the logger itself has, so there is one way to do this rather
+than two.
 
 or **double-click `customize.py`** and pick your file — from the list it finds,
 or press **b** to open your computer's own file browser. On Windows,
@@ -721,23 +741,26 @@ That one command:
 
 Then, in the page:
 
-**1. Say which node you are** — or skip. *Role*, in the header. See [which node
+**1. Load your frame map** if you did not name one on the command line —
+*Frame map*, in the header.
+
+**2. Say which node you are** — or skip. *Role*, in the header. See [which node
 this logger is](#which-node-this-logger-is); `--role` above answers it before
 the page opens, and the button changes it afterwards. Skip if you are only
 listening, and both Fill buttons will offer everything.
 
-**2. Build the dashboard.** *Customize dashboard* → **Fill from frame map**. Every
+**3. Build the dashboard.** *Customize dashboard* → **Fill from frame map**. Every
 signal becomes a cell, drawn as its unit and name suggest. Delete what you do not
 want, drag the rest into order, tap any cell to change the shape, the range or the
 thresholds. Removing one closes the gap. The values moving on them are invented —
 the point is the layout.
 
-**3. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
+**4. Build the sendable values.** Send tab → *Set up sendable values* → **Fill from
 the frame map**, and pick the message your controller takes its settings from.
 Then fix the inputs: the one that should be a list of four tyre sizes becomes
 *Pick from a list I write*.
 
-**4. Take it with you.** Copy two files to the root of the SD card:
+**5. Take it with you.** Copy two files to the root of the SD card:
 
 ```
 mine.dbc   ->  /frames.dbc
@@ -1266,7 +1289,7 @@ translation units under `-Wall -Wextra`:
 
 ```
 RAM:   [==        ]  24.9% (used 81496 bytes from 327680 bytes)
-Flash: [=====     ]  55.0% (used 1080957 bytes from 1966080 bytes)
+Flash: [======    ]  55.2% (used 1084601 bytes from 1966080 bytes)
 ```
 
 Flash sits at 55 % of one 1.9 MB app slot, so the OTA partition scheme still has
@@ -1296,7 +1319,7 @@ browser alike, and JavaScript's bitwise operators are 32-bit whatever you do to
 them. Going past 32 needs a different representation, not a bigger number in
 `config.h`.
 
-**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 313
+**Verified — the portable logic, natively.** `./test/run_tests.sh` runs 322
 assertions across the DBC parser, the signal encoder, the CSV schema, the CANopen
 layer, the MCP2515 driver, the saved dashboard and the logger, and all pass. That
 covers Intel and Motorola bit extraction, signed values, exact decimal scaling,

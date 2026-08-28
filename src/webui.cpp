@@ -448,7 +448,18 @@ static void handleDbcDone() {
            (unsigned long)s_dbcUpBytes, DBC_PATH);
 
   recorderLoadDbc();
+
+  /* A different frame map means the old layout is about a different bus. What
+   * cannot be found in the new one goes, rather than lingering as a screen of
+   * unknowns - and the result is saved, so the card agrees with the page. */
+  const uint16_t dropped = dashDropUnresolved(g_dash, g_dbc);
   const uint16_t missing = dashResolve(g_dash, g_dbc);
+  if (dropped) {
+    recorderRequestSaveDash();
+    dashStoreSave();
+    LOG_LIVE(LVL_INFO, "%u cell(s) and setpoint(s) dropped - the new frame map "
+                       "does not describe their signals", (unsigned)dropped);
+  }
 
   j  = "{\"ok\":";        j += g_dbc.loaded ? 1 : 0;
   j += ",\"bytes\":";     j += (uint32_t)s_dbcUpBytes;
@@ -458,6 +469,7 @@ static void handleDbcDone() {
   j += ",\"errors\":";    j += (uint32_t)g_dbc.lineErrors;
   j += ",\"inexact\":";   j += g_dbc.inexact ? 1 : 0;
   j += ",\"missing\":";   j += (uint32_t)missing;
+  j += ",\"dropped\":";   j += (uint32_t)dropped;
   j += ",\"clipped\":";   j += (uint32_t)g_dbc.nameClipped;
   j += '}';
   s_srv->send(200, "application/json", j);

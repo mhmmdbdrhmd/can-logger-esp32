@@ -177,6 +177,78 @@ if shutil.which("node"):
         bad |= (r.returncode != 0)
 else:
     print("  skip JS syntax (node not installed)")
+
+# A name declared with `var` twice inside one function is legal JavaScript and
+# silently wrong: `var` is function-scoped, so the second declaration reaches
+# back and overwrites the first for every closure already holding it. That cost
+# a real bug - two `var mates`, one meaning "the values that LEAVE together"
+# (excluding this card) and one meaning "the values that are REMOVED together"
+# (including it). The Remove button captured the first and was handed the
+# second, so it deleted every value of a message except the one whose button was
+# pressed, while its label, computed before the overwrite, still read correctly.
+# Nothing about that is a syntax error, so only a check like this notices it.
+def _close(text, open_brace):
+    """Index of the } matching the { at open_brace."""
+    d = 0
+    for k in range(open_brace, len(text)):
+        if text[k] == "{":
+            d += 1
+        elif text[k] == "}":
+            d -= 1
+            if d == 0:
+                return k
+    return len(text)
+
+
+def scopes(text, label="(top level)"):
+    """Every function body in `text`, each paired with a name, innermost too.
+
+    EVERY function, not only the declared ones: the bug this exists for lived in
+    an anonymous forEach callback, which a check that only walks `function foo()`
+    would have blanked out as somebody else's scope and never looked at.
+    """
+    out = []
+    for m in re.finditer(r"\bfunction\b\s*(\w*)\s*\([^)]*\)\s*\{", text):
+        b = m.end() - 1
+        e = _close(text, b)
+        nm = m.group(1) or label + " callback"
+        body = text[b + 1:e]
+        out.append((nm, body))
+        out.extend(scopes(body, nm))
+    return out
+
+
+dupes = []
+for block in scripts:
+    for name, body in scopes(block):
+        # Blank every nested function body: a `var` inside one belongs to that
+        # function, not this one, and it is visited as its own scope anyway.
+        flat, j = [], 0
+        while True:
+            f = body.find("function", j)
+            if f < 0:
+                flat.append(body[j:]); break
+            b = body.find("{", f)
+            if b < 0:
+                flat.append(body[j:]); break
+            e = _close(body, b)
+            flat.append(body[j:b])
+            flat.append(" " * (e - b))           # keep offsets, drop content
+            j = e
+        flat, seen = "".join(flat), set()
+
+        for v in re.finditer(r"\bvar\s+(\w+)\b", flat):
+            if v.group(1) in seen:
+                dupes.append("%s: var %s declared twice" % (name, v.group(1)))
+            seen.add(v.group(1))
+if dupes:
+    print("  FAIL a var is declared twice in one function scope:")
+    for d in sorted(set(dupes)):
+        print("       " + d)
+    bad = 1
+else:
+    print("  ok   no var is declared twice in one function scope")
+
 sys.exit(1 if bad else 0)
 PAGECHECK
 

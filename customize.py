@@ -2,9 +2,10 @@
 """
 Set the logger's dashboard and sendable values up at a desk, before going out.
 
-    python3 customize.py                  pick a .dbc it finds, ask, or browse
-    python3 customize.py path/to/mine.dbc use this frame map
-    python3 customize.py --browse         go straight to the file dialog
+    python3 customize.py                  open the page with no frame map, and
+                                          load one from it with Frame map
+    python3 customize.py path/to/mine.dbc start with this frame map
+    python3 customize.py --browse         pick one in your file browser first
     python3 customize.py mine.dbc --role Tester
                                           say which node the logger IS, so Fill
                                           can tell a command from a reading.
@@ -13,6 +14,10 @@ Set the logger's dashboard and sendable values up at a desk, before going out.
     python customize.py                   (Windows)
 
 Or just double-click this file. On Windows you can also drag a .dbc onto it.
+
+It never asks a question in the terminal. With no argument it opens the page
+empty and the Frame map button loads a .dbc from wherever you keep it, which
+is the same button the logger itself has.
 
 It opens the logger's real web page in your browser, fed with simulated data,
 and writes everything you build into a .cfg file next to your .dbc. Copy the
@@ -50,27 +55,14 @@ def free_port(preferred=8080):
     return preferred
 
 
-def find_dbcs():
-    """Frame maps worth offering, nearest first, without duplicates."""
-    seen, out = set(), []
-    for folder in (Path.cwd(), ROOT, ROOT / "examples"):
-        try:
-            for f in sorted(folder.glob("*.dbc")):
-                r = f.resolve()
-                if r not in seen:
-                    seen.add(r)
-                    out.append(f)
-        except OSError:
-            pass
-    return out
-
 
 def browse():
     """The operating system's own file picker.
 
     tkinter ships with Python on Windows and macOS and is one package away on
-    Linux, so this is a "usually" rather than an "always" - hence the caller
-    always keeps a way through that is only typing.
+    Linux, so this is a "usually" rather than an "always". When it is not
+    there the page simply opens with no frame map and its own Frame map button
+    loads one - which is a better dead end than a prompt in a terminal.
     """
     try:
         import tkinter
@@ -96,41 +88,6 @@ def browse():
     return Path(picked) if picked else None
 
 
-def choose_dbc():
-    found = find_dbcs()
-
-    if not found:
-        print("No .dbc file next to this script or in the current folder.\n")
-        print("  b. browse for it")
-        print("  or type the full path")
-        typed = input("\nchoice [b]: ").strip().strip('"')
-        if typed in ("", "b", "B"):
-            return browse()
-        return Path(typed)
-
-    print("Frame maps I can see:\n")
-    for i, f in enumerate(found, 1):
-        where = "" if f.parent == Path.cwd() else "   (%s)" % f.parent.name
-        print("  %d. %s%s" % (i, f.name, where))
-    print("\n  b. browse for another one...")
-    print()
-    pick = input("which one? [1] ").strip()
-
-    if pick in ("b", "B"):
-        picked = browse()
-        if picked:
-            return picked
-        # No dialog on this machine. Do not dead-end - ask for the path.
-        typed = input("\npath to your .dbc (blank for %s): "
-                      % found[0].name).strip().strip('"')
-        return Path(typed) if typed else found[0]
-    if not pick:
-        return found[0]
-    if pick.isdigit() and 1 <= int(pick) <= len(found):
-        return found[int(pick) - 1]
-    return Path(pick.strip('"'))
-
-
 def main():
     print(__doc__.strip().splitlines()[0])
     print()
@@ -151,62 +108,69 @@ def main():
         del argv[i:i + 2]
 
     args = [a for a in argv if a not in ("--browse", "-b")]
+    # No question, ever. A frame map given here is used; otherwise the page
+    # opens empty and its own Frame map button loads one - which is the same
+    # button the logger has, so there is one way to do it rather than two.
+    dbc = None
     if args and Path(args[0].strip('"')).suffix.lower() == ".dbc":
         dbc = Path(args[0].strip('"'))            # or dragged onto the icon
     elif argv and not args:
         dbc = browse()                            # --browse, straight to it
-    else:
-        dbc = choose_dbc()
 
-    if dbc is None:
-        print("\nNothing chosen.")
-        return 0
-    if not dbc.is_file():
+    if dbc is not None and not dbc.is_file():
         print("\nNo such file: %s" % dbc)
-        input("\npress Enter to close ")
         return 2
 
-    # Check it against the logger's limits first. A frame map the ESP32 cannot
-    # hold is better found now than after a drive to the machine.
-    from check_dbc import check
-    print()
-    rc = check(str(dbc))
-    if rc != 0:
-        print("\nCarrying on anyway - you can still lay out whatever it did "
-              "read.\n")
+    if dbc is not None:
+        # Check it against the logger's limits first. A frame map the ESP32
+        # cannot hold is better found now than after a drive to the machine.
+        from check_dbc import check
+        print()
+        rc = check(str(dbc))
+        if rc != 0:
+            print("\nCarrying on anyway - you can still lay out whatever it did "
+                  "read.\n")
 
     # The setup lands next to the frame map, named after it, so the pair stays
-    # together and it is obvious which .cfg belongs to which .dbc.
-    cfg = dbc.with_suffix(".cfg")
+    # together and it is obvious which .cfg belongs to which .dbc. With no
+    # frame map yet there is nothing to name it after, so it goes beside this
+    # script until one is loaded.
+    cfg = dbc.with_suffix(".cfg") if dbc is not None else ROOT / "desk-setup.cfg"
     port = free_port()
     url = "http://127.0.0.1:%d/" % port
 
     print("\n" + "=" * 68)
-    print("  frame map   %s" % dbc)
+    print("  frame map   %s"
+          % (dbc if dbc is not None
+             else "none yet - load one with Frame map, top right"))
     print("  your setup  %s   (written as you go)" % cfg)
     print("  open        %s" % url)
     print("  role        %s"
           % (role if role else "not set - both Fill buttons offer everything "
                                "(change it in the page, top right)"))
     print("=" * 68)
-    print("""
-  1. Role (top right)  -> which of these is this logger, or skip
-  2. Dashboard -> Customize dashboard -> Fill from frame map
-  3. Send -> Set up sendable values -> Fill from the frame map
 
+    steps = [] if dbc is not None else ["Frame map (top right) -> load your .dbc"]
+    steps += ["Role (top right)     -> which of these is this logger, or skip",
+              "Dashboard -> Customize dashboard -> Fill from frame map",
+              "Send -> Set up sendable values -> Fill from the frame map"]
+    print()
+    for n, line in enumerate(steps, 1):
+        print("  %d. %s" % (n, line))
+    print("""
   Then copy onto the SD card:
-      %s   ->  /frames.dbc
+      your .dbc   ->  /frames.dbc
       %s   ->  /dash.cfg
 
   Close this window (or press Ctrl-C) when you are done.
-""" % (dbc.name, cfg.name))
+""" % cfg.name)
 
     threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)),
                      daemon=True).start()
 
     import preview_dashboard
-    sys.argv = ["preview_dashboard.py", "--dbc", str(dbc),
-                "--cfg", str(cfg), "--port", str(port)]
+    sys.argv = ["preview_dashboard.py", "--cfg", str(cfg), "--port", str(port)]
+    sys.argv += ["--dbc", str(dbc)] if dbc is not None else ["--no-dbc"]
     if role:
         sys.argv += ["--role", role]
     try:

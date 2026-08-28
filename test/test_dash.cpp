@@ -122,10 +122,23 @@ int main() {
       "send 0 label=\"Tyre size\" sig=WheelInfo.TireSize lo=400 hi=1200 step=5 preset=690 unit=mm\n"
       "send 1 label=\"Axle mode\" sig=WheelInfo.Mode lo=0 hi=3 step=1 preset=0 group=2\n"
       "send 2 label=\"Axle load\" sig=WheelInfo.Load lo=0 hi=9000 step=10 preset=0 group=2\n"
-      "send 3 label=\"Wake node\" id=0x700 data=00 cyclic=500\n");
+      "send 3 label=\"Wake node\" id=0x700 data=00 cyclic=500\n"
+      "send 4 label=\"Wheel dia\" sig=Cmd.WheelDia lo=300 hi=3000 mux=1\n");
 
     ck("the node this logger is survives a round trip",
        strcmp(a.role, "Tester") == 0, a.role);
+
+    /* Whether a value is one payload of a multiplexed message is carried BY the
+       value, not looked up in the frame map, because the customizer's Remove
+       button has to group the set even when no map is loaded - the desk tool
+       before a .dbc is chosen, or a logger whose card has none. Looked up, the
+       answer becomes "not multiplexed" the moment the map is away, the set
+       stops being a set, and the payloads can be deleted one at a time. So it
+       has to survive the round trip through the file. */
+    ck("a multiplexed payload is remembered as one", a.tx[4].mux == 1,
+       std::to_string(a.tx[4].mux));
+    ck("and an ordinary value is not", a.tx[0].mux == 0,
+       std::to_string(a.tx[0].mux));
 
     /* This setting was called `node` in an earlier version, and was briefly
        removed altogether. A setup file written by any of those has to keep its
@@ -271,6 +284,43 @@ int main() {
     ck("a resolved cell has an index", c.cell[0].sig >= 0);
     ck("an unresolved cell is marked, not dropped",
        c.cell[2].sig < 0 && dashCellUsed(c.cell[2]));
+
+    /* ...but only at boot. Loading a DIFFERENT frame map is a statement that
+       this logger is now looking at another bus, and the cells from the old
+       one are not temporarily unresolvable, they are wrong. Left in place they
+       are a screen of unknowns - and worse, values from a multiplexed message
+       stop being recognised as a set the moment their message leaves the map,
+       so they become deletable one at a time, which is exactly the
+       half-described command the grouping exists to prevent. */
+    {
+      DashConfig d = c;
+      const uint16_t gone = dashDropUnresolved(d, db);
+      ck("loading a new map drops what it cannot account for", gone == 1,
+         std::to_string(gone) + " dropped");
+      ck("and closes the gap rather than leaving a hole",
+         dashCellUsed(d.cell[0]) && dashCellUsed(d.cell[1]) &&
+         !dashCellUsed(d.cell[2]), "two cells, contiguous");
+      ck("the survivors are the ones the new map describes",
+         strcmp(d.cell[0].ref, "Drive.Speed") == 0 &&
+         strcmp(d.cell[1].ref, "Steering.Angle") == 0, d.cell[1].ref);
+      ck("setpoints the map still describes are kept",
+         txCommandUsed(d.tx[0]) && txCommandUsed(d.tx[1]), "both");
+
+      /* Nothing at all in common: the honest result is an empty setup, not a
+         grid of cells that will never resolve. */
+      DbcDb other = {};
+      const char *unrelated =
+        "BO_ 800 ABS_Cmd: 8 Tester\n"
+        " SG_ Cmd_Op : 0|8@1+ (1,0) [0|255] \"\" ABS_ECU\n";
+      dbcLoadText(other, unrelated, strlen(unrelated));
+      DashConfig e = c;
+      const uint16_t all = dashDropUnresolved(e, other);
+      ck("an unrelated frame map clears the setup", all == 5,
+         std::to_string(all) + " dropped");
+      ck("and leaves nothing behind",
+         !dashCellUsed(e.cell[0]) && !txCommandUsed(e.tx[0]), "empty");
+      dbcFree(other);
+    }
 
     ck("the unit came from the DBC", strcmp(c.cell[0].unit, "km/h") == 0,
        c.cell[0].unit);

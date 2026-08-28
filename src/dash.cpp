@@ -260,6 +260,7 @@ static bool parseSend(DashConfig &c, char *p) {
     else if (!strcmp(key, "dec"))   t.dec    = (uint8_t)strtoul(val, nullptr, 10);
     else if (!strcmp(key, "cyclic")) t.cyclicMs = (uint16_t)strtoul(val, nullptr, 10);
     else if (!strcmp(key, "group"))  t.group = (uint8_t)strtoul(val, nullptr, 10);
+    else if (!strcmp(key, "mux"))    t.mux   = strtoul(val, nullptr, 10) ? 1 : 0;
     else if (!strcmp(key, "style")) {
       const int8_t st = dashInputId(val);
       t.style = (st < 0) ? (uint8_t)TXI_NUMBER : (uint8_t)st;
@@ -511,6 +512,7 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
     }
     if (t.group)    { n = appendStr(out, cap, n, " group=");
                       n = appendInt(out, cap, n, t.group); }
+    if (t.mux)        n = appendStr(out, cap, n, " mux=1");
     if (t.cyclicMs) { n = appendStr(out, cap, n, " cyclic=");
                       n = appendInt(out, cap, n, t.cyclicMs); }
 
@@ -579,4 +581,54 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
   }
 
   return missing;
+}
+
+uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db) {
+  uint16_t dropped = 0;
+
+  for (uint8_t i = 0; i < DASH_MAX_CELLS; i++) {
+    DashCell &d = c.cell[i];
+    if (!dashCellUsed(d)) continue;
+    if (dbcFindSignalRef(db, d.ref, nullptr) >= 0) continue;
+    memset(&d, 0, sizeof(d));
+    d.sig = -1;
+    d.dec = 255;
+    dropped++;
+  }
+
+  /* Compacted, because a hole in the middle of the grid is not what anyone
+   * means by "the cells that survived". The browser fills from slot 0 up and
+   * an operator reads the layout left to right; leaving gaps where the old
+   * map's signals used to be would look like the layout is still half there. */
+  uint8_t w = 0;
+  for (uint8_t i = 0; i < DASH_MAX_CELLS; i++) {
+    if (!dashCellUsed(c.cell[i])) continue;
+    if (w != i) { c.cell[w] = c.cell[i]; memset(&c.cell[i], 0, sizeof(DashCell));
+                  c.cell[i].sig = -1; c.cell[i].dec = 255; }
+    w++;
+  }
+
+  for (uint8_t i = 0; i < TX_MAX_COMMANDS; i++) {
+    TxCommand &t = c.tx[i];
+    if (!txCommandUsed(t)) continue;
+    /* A raw-identifier command names no signal, so no frame map can invalidate
+     * it. Those are the one thing that survives a map it was not written for. */
+    if (t.kind != TXK_SIGNAL) continue;
+    if (dbcFindSignalRef(db, t.ref, nullptr) >= 0) continue;
+    memset(&t, 0, sizeof(t));
+    t.sig = -1;
+    t.msg = -1;
+    t.dec = 255;
+    dropped++;
+  }
+
+  uint8_t tw = 0;
+  for (uint8_t i = 0; i < TX_MAX_COMMANDS; i++) {
+    if (!txCommandUsed(c.tx[i])) continue;
+    if (tw != i) { c.tx[tw] = c.tx[i]; memset(&c.tx[i], 0, sizeof(TxCommand));
+                   c.tx[i].sig = -1; c.tx[i].msg = -1; c.tx[i].dec = 255; }
+    tw++;
+  }
+
+  return dropped;
 }

@@ -1,5 +1,74 @@
 # Changelog
 
+## v1.1.1
+
+Five bugs in v1.1.0. The worst of them silently deleted work.
+
+### Remove deleted every value of a message except the one you pressed
+
+`renderTxEdit()` declared `var mates` twice in one function scope — once for the
+values that are **removed together** (a multiplexed set, *including* this card)
+and, two hundred lines later, once for the values that are **sent together** in
+one frame (*excluding* it). `var` is function-scoped, so the second declaration
+reached back and overwrote the first for the Remove button, which had already
+closed over it. The button's label was computed before the overwrite, so it went
+on reading *"Remove all 4"* while doing something else entirely.
+
+The result, on any message with more than one value set up:
+
+- **Remove** on a plain value deleted the message's *other* values and kept the
+  one you asked it to delete. Four sendable values, one press, three gone.
+- **Remove all N** on a multiplexed payload left that payload behind — the
+  half-described command the grouping exists to prevent.
+
+Legal JavaScript, no syntax error, no warning. `test/run_tests.sh` now walks
+every function in the page — including anonymous callbacks, which is where this
+one lived — and fails on a `var` declared twice in one scope. Verified by
+putting the bug back and watching the check catch it.
+
+### Multiplexed values stopped being a set when the frame map was away
+
+Whether a value belonged to a multiplexed message was looked up in the frame
+map. With no map loaded — the desk tool before a `.dbc` is chosen, which is now
+its normal starting state — the answer came back "not multiplexed", the set
+dissolved, and the payloads became deletable one at a time.
+
+The fact now travels with the value as `mux=1` in the setup file rather than
+being re-derived, so the grouping holds with no map at all. Values written by an
+earlier version carry no flag and regain their grouping the next time they are
+filled from a map.
+
+### Loading a frame map left the old setup behind
+
+A new `.dbc` replaced the map but not the dashboard or the sendable values
+built against the old one. Every cell then read as an unknown, the stale
+references were **saved back over the setup file**, and the next run loaded
+them again — so the mess persisted across restarts and looked like the tool had
+forgotten which frame map it was on.
+
+Loading a map now removes every cell and every sendable value the new map
+cannot account for, closes the gaps, and saves — on the logger and in the page,
+so the card and the screen agree. An unrelated file leaves an empty setup; a
+corrected version of the same file leaves the layout intact, because its
+signals are still there. One-off frames named by identifier are never touched.
+
+This is deliberately **not** what happens at boot, where an unresolvable cell is
+still kept and drawn as such: there the usual cause is a card with no DBC on it,
+and throwing away a layout over that would be far worse.
+
+### Values from a swapped-out map could be deleted one at a time
+
+A third route to the same broken set: a value whose message is no longer in the
+loaded map is not recognised as multiplexed either. The clearing above removes
+those values outright, so the case no longer arises.
+
+### `customize.py` asked which .dbc to use
+
+It should never have. With no argument it now opens the page with no frame map
+and lets the **Frame map** button load one — the same button the logger has.
+A path still works as an argument, `--browse` still opens the file dialog, and
+the interactive chooser is deleted rather than merely bypassed.
+
 ## v1.1.0
 
 ### Load a frame map from the web app
@@ -61,7 +130,7 @@ First tagged release.
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-v1.1.0-4mb-merged.bin
+python3 tools/flash.py --image can-logger-esp32-v1.1.1-4mb-merged.bin
 ```
 
 ### What it is

@@ -2336,17 +2336,10 @@ function renderSend(){
      is the arm button and the one-off frame, and nothing else. */
   q('savedcard').hidden = keys.length === 0;
 
-  /* Values that share a group belong to one frame and get one Send button.
-     Everything else is a row of its own, exactly as before. */
-  var units = [], at = {};
-  keys.forEach(function(i){
-    var t = CFG.tx[i];
-    if(!t || !t.label) return;
-    var g = t.group || 0;
-    if(g && at[g] !== undefined){ units[at[g]].ids.push(i); return; }
-    if(g) at[g] = units.length;
-    units.push({g:g, ids:[i]});
-  });
+  /* One frame, one Send button. Which values share a frame is txUnits()' answer
+     and nobody else's - the editor boxes them by exactly the same call, so the
+     two tabs cannot say different things about the same set of values. */
+  var units = txUnits(CFG.tx);
 
   function valueRow(i, withSend){
     var t = CFG.tx[i];
@@ -2384,8 +2377,7 @@ function renderSend(){
     wrap.dataset.ids = u.ids.join(',');
     var head = el('div', 'ghead');
     head.appendChild(el('b', null, msgOf(CFG.tx[u.ids[0]].sig)));
-    head.appendChild(el('span', null, 'these ' + u.ids.length
-                        + ' go out together, in one frame'));
+    head.appendChild(el('span', null, txUnitNote(CFG.tx, u)));
     wrap.appendChild(head);
     u.ids.forEach(function(i){ wrap.appendChild(valueRow(i, false)); });
 
@@ -2404,6 +2396,96 @@ function renderSend(){
 function msgOf(ref){
   var dot = String(ref || '').indexOf('.');
   return dot < 0 ? String(ref || '') : ref.slice(0, dot);
+}
+
+/* THE THREE KINDS OF SENDABLE VALUE - and the single rule behind all three.
+
+   What leaves the logger is a frame. A frame is one message and, when that
+   message is multiplexed, ONE CODE of it. Everything set up for that frame
+   goes out in it; nothing outside it can come along.
+
+     single       one value, alone in its frame
+     grouped      several values of a plain message that were CHOSEN to go out
+                  together - the choice is real, because the message carries
+                  them all at once whether they were set up or not
+     multiplexed  the payloads that share one selector code. There is no choice
+                  here: they are the same frame by definition, and sending one
+                  on its own writes zero over the others, because a multiplexed
+                  frame cannot start from what the bus last carried - those
+                  bytes belonged to a different code and mean something else.
+
+   Both tabs ask these two functions, so the boxes in the editor and the Send
+   buttons on the Send tab cannot disagree about what a frame is. They did:
+   the editor drew a multiplexed message as one indivisible box while the Send
+   tab gave every payload its own Send button. */
+function muxCodeOf(ref){
+  if(!ref || !DBC.m.length) return null;
+  var mn = msgOf(ref), code = null;
+  DBC.m.forEach(function(m){
+    if(m.n !== mn || !m.mux) return;
+    m.s.forEach(function(sg){
+      if(m.n + '.' + sg.n === ref && sg.mx >= 0) code = sg.mx;
+    });
+  });
+  return code;
+}
+
+function muxSelectorOf(name){
+  var out = '';
+  DBC.m.forEach(function(m){
+    if(m.n !== name) return;
+    m.s.forEach(function(sg){ if(sg.mx === -2) out = sg.n; });
+  });
+  return out;
+}
+
+/* Which frame this value leaves in. The mux code comes FIRST, on purpose: it
+   is the wire's own answer, so a setup written before this rule existed - one
+   group spanning two codes, which could never have gone out as one frame - is
+   split correctly the moment a frame map is there to ask. */
+function txUnitKey(map, i){
+  var t = map[i];
+  if(!t || !t.sig) return 'i' + i;
+  var code = muxCodeOf(t.sig);
+  if(code !== null)  return 'x' + msgOf(t.sig) + '#' + code;
+  if(t.group)        return 'g' + t.group;
+  /* Multiplexed by its own record, with no map loaded to say which code. Held
+     together rather than scattered: the desk tool starts with no frame map. */
+  if(t.mux)          return 'm' + msgOf(t.sig);
+  return 'i' + i;
+}
+
+/* [{key, ids, kind}], in the order the values were set up. */
+function txUnits(map){
+  var order = [], at = {};
+  Object.keys(map).map(Number).sort(function(a, b){ return a - b; })
+    .forEach(function(i){
+      var t = map[i];
+      if(!t || !t.label) return;
+      var k = txUnitKey(map, i);
+      if(at[k] === undefined){ at[k] = order.length; order.push({key:k, ids:[]}); }
+      order[at[k]].ids.push(i);
+    });
+  order.forEach(function(u){
+    u.kind = u.ids.length < 2 ? 'single'
+           : (u.key.charAt(0) === 'x' || u.key.charAt(0) === 'm') ? 'multiplexed'
+           : 'grouped';
+  });
+  return order;
+}
+
+/* What the box says about itself, in the terminology the README uses. */
+function txUnitNote(map, u){
+  var t = map[u.ids[0]];
+  var mn = msgOf(t.sig || '');
+  if(u.kind !== 'multiplexed'){
+    return 'grouped — these ' + u.ids.length + ' go out together, in one frame';
+  }
+  var sel  = muxSelectorOf(mn);
+  var code = muxCodeOf(t.sig);
+  return 'multiplexed — these ' + u.ids.length + ' are the payload of '
+       + (sel ? sel + ' = ' + code : 'one selector code')
+       + ', so they are one frame: sent together, removed together';
 }
 
 /* A signal that only exists under one multiplexor code cannot be written
@@ -2498,45 +2580,30 @@ function renderTxEdit(){
       'Nothing set up yet. Press "Add a value" below.'));
   }
 
-  /* Values of one message are boxed together, the same way the Send tab boxes
-     them, because that is what they are on the wire: one frame. Seeing four
-     cards in a row with four Remove buttons invites you to treat them as four
-     independent things, which for a multiplexed set they are not. */
-  var byMsg = {};
-  keys.forEach(function(k){
-    var mn = TXED[k].sig ? msgOf(TXED[k].sig) : '';
-    if(mn) (byMsg[mn] = byMsg[mn] || []).push(k);
+  /* Values that leave in one frame are boxed together, by exactly the call the
+     Send tab uses, because a box here and a Send button there have to mean the
+     same thing. They did not: this drew a multiplexed message as one
+     indivisible box while the Send tab handed every payload its own button. */
+  var wraps = {}, unitOf = {}, kindOf = {};
+  txUnits(TXED).forEach(function(u){
+    u.ids.forEach(function(k){ unitOf[k] = u; kindOf[k] = u.kind; });
   });
-  var wraps = {};
 
   keys.forEach(function(i){
     var t = TXED[i];
     var card = el('div', 'txcard');
 
-    var mates = muxSiblings(i);
-    var isMux = mates.length > 1;
+    var u     = unitOf[i];
+    var isMux = kindOf[i] === 'multiplexed';
     var mname = t.sig ? msgOf(t.sig) : '';
-    var unit  = (mname && byMsg[mname] && byMsg[mname].length > 1)
-                ? byMsg[mname] : null;
+    var unit  = (u && u.ids.length > 1) ? u.ids : null;
 
-    /* The box, built once for the first value of the message. */
-    if(unit && !wraps[mname]){
+    /* The box, built once for the first value in it. */
+    if(unit && !wraps[u.key]){
       var wrap = el('div', 'sendgroup txgroup');
       var gh = el('div', 'ghead');
       gh.appendChild(el('b', null, mname));
-
-      var sel = '';
-      if(isMux){
-        DBC.m.forEach(function(m){
-          if(m.n !== mname) return;
-          m.s.forEach(function(sg2){ if(sg2.mx === -2) sel = sg2.n; });
-        });
-      }
-      gh.appendChild(el('span', null, isMux
-        ? 'these ' + unit.length + ' are payloads of one multiplexed frame, '
-          + 'chosen by ' + (sel || 'a selector') + ' — they are added and '
-          + 'removed together'
-        : 'these ' + unit.length + ' go out together, in one frame'));
+      gh.appendChild(el('span', null, txUnitNote(TXED, u)));
 
       var gdel = el('button', null, 'Remove all ' + unit.length);
       gdel.onclick = function(){
@@ -2546,7 +2613,7 @@ function renderTxEdit(){
       gh.appendChild(gdel);
       wrap.appendChild(gh);
       box.appendChild(wrap);
-      wraps[mname] = wrap;
+      wraps[u.key] = wrap;
     }
 
     var head = el('div', 'head');
@@ -2737,8 +2804,10 @@ function renderTxEdit(){
     rd.appendChild(ri);
     f2.appendChild(rd);
 
-    /* Which other values this one leaves with. Offered only for signals of the
-       same message, because a group is one frame and a frame is one message.
+    /* Which other values this one leaves with - the difference between a
+       SINGLE and a GROUPED value. Offered for signals of the same plain
+       message only: a multiplexed payload has no choice to make, its frame is
+       decided by the selector code it carries, so no dropdown is drawn for it.
 
        NOT called `mates`. It was, and `var` is function-scoped, so this
        assignment reached back and overwrote the mux-sibling list the Remove
@@ -2748,9 +2817,13 @@ function renderTxEdit(){
        pressed, while its label, computed before the overwrite, still said the
        right number. On a plain four-signal message, pressing Remove threw away
        the other three and kept the one you asked it to delete. */
-    var groupMates = Object.keys(TXED).map(Number).filter(function(k){
-      return k !== i && TXED[k].sig && msgOf(TXED[k].sig) === msgOf(t.sig || '');
-    });
+    var groupMates = (kindOf[i] === 'multiplexed' || muxCodeOf(t.sig) !== null)
+      ? []
+      : Object.keys(TXED).map(Number).filter(function(k){
+          return k !== i && TXED[k].sig
+              && msgOf(TXED[k].sig) === msgOf(t.sig || '')
+              && muxCodeOf(TXED[k].sig) === null;
+        });
     if(groupMates.length){
       var gd = el('div');
       gd.style.gridColumn = 'span 2';
@@ -2760,11 +2833,12 @@ function renderTxEdit(){
       gd.appendChild(gl);
       var gs = el('select');
       gs.id = gid;
-      var o0 = el('option', null, 'on its own, in its own frame');
+      var o0 = el('option', null, 'single — on its own, in its own frame');
       o0.value = '0';
       if(!t.group) o0.selected = true;
       gs.appendChild(o0);
-      var o1 = el('option', null, 'the other ' + msgOf(t.sig) + ' values, in one frame');
+      var o1 = el('option', null, 'grouped — with the other ' + msgOf(t.sig)
+                                 + ' values, in one frame');
       o1.value = 'g';
       if(t.group) o1.selected = true;
       gs.appendChild(o1);
@@ -2788,7 +2862,7 @@ function renderTxEdit(){
 
     card.appendChild(f2);
 
-    (wraps[mname] || box).appendChild(card);
+    ((u && wraps[u.key]) || box).appendChild(card);
   });
 }
 
@@ -2841,45 +2915,49 @@ function isMuxMsg(name){
   return out;
 }
 
-/* Every value set up against the same multiplexed message.
-
-   A multiplexed frame's payloads are one thing wearing several faces: which
-   one the frame carries depends on the selector, and the selector is written
-   from whichever payload is being sent. Keeping two of five is keeping a
-   half-described command - the operator sees "wheel diameter" and "amplitude"
-   and no way to tell that three other opcodes exist. So they arrive together
-   and they leave together. */
-function muxSiblings(idx){
-  var t = TXED[idx];
-  var mn = (t && t.sig) ? msgOf(t.sig) : '';
-  /* The value's own record first, the frame map only as a fallback. Asking the
-     map alone made the set dissolve whenever the map was absent - which is the
-     normal state of the desk tool before a .dbc has been loaded, and of the
-     logger itself when the card has no frame map on it. */
-  if(!mn || !(t.mux || isMuxMsg(mn))) return [idx];
-  return Object.keys(TXED).map(Number).filter(function(k){
-    return TXED[k].sig && msgOf(TXED[k].sig) === mn;
-  });
-}
-
 /* Adds every signal of one message. Returns what it did, so the caller can
    report on one message or on all of them in one sentence. */
 function fillFromMessage(m){
   var taken = {};
   Object.keys(TXED).forEach(function(k){ taken[TXED[k].sig] = 1; });
 
-  /* Two shapes of message, and they need opposite treatment.
+  /* Two shapes of message, and the grouping follows the wire in both.
 
-     MULTIPLEXED - the selector picks which payload the frame carries, so the
-     payload signals are ALTERNATIVES. Each becomes a value of its own, and the
-     selector is not offered at all: the logger writes it from the frame map
-     whenever one of its payloads is sent, which is the only way it can be
-     right every time.
+     MULTIPLEXED - the selector picks which payload the frame carries, so
+     different CODES are alternatives: they can never share a frame. Signals
+     under the SAME code are the opposite - they are one payload, and sending
+     one of them alone writes zero over the others, because a multiplexed frame
+     cannot start from what the bus last carried (those bytes belonged to
+     another code and mean something else). So each code becomes a group of its
+     own, and a code with a single payload becomes a single value. The selector
+     is never offered: the logger writes it from the frame map whenever one of
+     its payloads is sent, which is the only way it can be right every time.
 
      PLAIN, with more than one signal - the signals are all in the frame at
      once, so writing one on its own means writing the others too, whatever
      they happen to contain. They are grouped: one Send, one frame. */
   var group = (!m.mux && m.s.length > 1) ? freeGroup() : 0;
+
+  /* How many payloads each code has, counted before anything is added: a code
+     carrying one signal needs no group, and a group of one is not a group. */
+  var perCode = {};
+  if(m.mux) m.s.forEach(function(s){
+    if(s.mx >= 0) perCode[s.mx] = (perCode[s.mx] || 0) + 1;
+  });
+  var codeGroup = {};
+  function groupForCode(code){
+    if(codeGroup[code]) return codeGroup[code];
+    /* Join whatever the payloads already set up for this code are using, so
+       filling the same message twice does not split one frame in two. */
+    var g = 0;
+    Object.keys(TXED).forEach(function(k){
+      var e = TXED[k];
+      if(e && e.sig && e.group && msgOf(e.sig) === m.n
+         && muxCodeOf(e.sig) === code) g = e.group;
+    });
+    codeGroup[code] = g || freeGroup();
+    return codeGroup[code];
+  }
 
   var r = {added:0, full:false, selector:''};
   m.s.forEach(function(s){
@@ -2890,7 +2968,8 @@ function fillFromMessage(m){
     while(TXED[i]) i++;
     if(i >= MAXSEND){ r.full = true; return; }
     var t = txFromSignal(ref, s);
-    t.group = group;
+    t.group = (m.mux && s.mx >= 0 && perCode[s.mx] > 1)
+              ? groupForCode(s.mx) : group;
     /* Carried on the value, not looked up later: the Remove button has to know
        these belong together even when no frame map is loaded to ask. */
     t.mux = m.mux ? 1 : 0;

@@ -225,6 +225,9 @@ def load_dbc(path):
             else:
                 mx = -1
             cur["s"].append({
+                # start and byte order are kept for check_dbc.py's overlap
+                # warning; nothing in the page needs them.
+                "st": int(start), "le": order == "1",
                 "i": len(cur["s"]), "n": name, "u": unit, "b": bits,
                 "r": 1 if ahi > alo else 0, "lo": alo, "hi": ahi,
                 "blo": round(blo, 6), "bhi": round(bhi, 6), "d": dec,

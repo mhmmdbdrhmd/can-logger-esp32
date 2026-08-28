@@ -913,10 +913,29 @@ send 0 label="Tyre size" sig=MachineConfig.TyreSize unit=mm lo=400 hi=1400 \
 
 On the machine, the Send tab is then just: arm, pick, press.
 
-### Frames that only mean anything whole
+### Single, grouped and multiplexed — the three kinds of sendable value
 
-A value is not always a frame. Two cases need the whole frame sent at once, and
-both are read out of the DBC rather than left to be remembered.
+A value is not always a frame. What leaves the logger is a frame, and a frame is
+**one message** and — if that message is multiplexed — **one code of it**.
+Everything set up for that frame goes out in it, and nothing else can come
+along. That gives three kinds, and the page uses these words for them:
+
+| | what it is | how it is sent |
+|---|---|---|
+| **single** | one value, alone in its frame | its own **Send** |
+| **grouped** | several signals of a plain message, *chosen* to go out together | one **Send all N** |
+| **multiplexed** | the payloads that share one selector code — no choice about it, they *are* one frame | one **Send all N** |
+
+The difference between grouped and multiplexed is whether you had a choice. A
+plain message carries all its signals at once whether or not you set them up, so
+grouping them is a decision you make and can undo. Multiplexed payloads under
+the same code are one payload: there is nothing to decide, and sending one of
+them alone would write zero over the others.
+
+The setup sheet and the Send tab draw the same boxes, from the same function, for
+exactly that reason — they once disagreed, the editor showing a multiplexed
+message as one indivisible box while the Send tab gave each of its payloads a
+button of its own.
 
 ![Values that leave together](docs/img/send-groups.png)
 
@@ -943,12 +962,18 @@ A multiplexed frame is also the one case where the payload is **not** seeded fro
 what the bus last said. The bytes mean different things on different pages, so
 carrying a previous page's bytes forward would send garbage under a new opcode.
 
-**The payloads of one multiplexed frame are kept as a set.** Filling adds all of
-them; removing any one removes all of them; and choosing one by hand brings the
-rest with it. Keeping two of five is keeping a half-described command — the
-operator sees *wheel diameter* and *amplitude* with no way to tell that three
-other opcodes exist. The setup sheet says so on each card, and the button reads
-**Remove all 6** rather than **Remove**.
+**The set is one selector code, not the whole message.** Two payloads under the
+same code are one frame and are boxed, sent and removed together. Two payloads
+under *different* codes are alternatives that can never share a frame, so they
+are separate values with a **Send** each — `Setpoint` under opcode 16 and
+`WheelDia_mm` under opcode 32 are two commands, not two halves of one.
+
+Filling adds a group per code. A code carrying a single payload is a *single*
+value; a code carrying several is a *multiplexed* group whose members have no
+individual **Remove**, because keeping one of them describes half a command. A
+group that spans two codes cannot be built from the page at all, and the logger
+refuses one that reaches it from an older setup file rather than sending one
+frame with the last member's opcode written over both payloads.
 
 **Signals that are read as a set.** A plain message with several signals is one
 frame whichever signal you meant to change, so *Fill from the frame map* groups
@@ -1515,6 +1540,16 @@ that cannot be changed later without invalidating every recording already made.
 
 ### The rest, roughly in order of value per unit of work
 
+- **One desk tool, not two.** `customize.py` and `tools/preview_dashboard.py`
+  started with different jobs — one set a logger up for a bus, the other showed
+  the page moving with invented data — and every release since has made them
+  more alike. They now share the frame-map reader, the setup file, the role, the
+  `/api/dbc` upload and the pruning rule, and the pruning rule has already had
+  to be fixed in both. Two programs that must agree about everything are one
+  program with a flag: fold the preview into `customize.py` (or leave a thin
+  `--preview` entry point) and the class of bug where the two drift apart stops
+  existing. The test that asserts the Python and the C prune identically is
+  there to catch that drift; not needing it at all is better.
 - **Surface `TEC`/`REC`/`EFLG`** on the status line and in `N.log`. The
   accessors already exist and are called by nothing (see §14); this is an hour's
   work and it turns "no frames, no idea why" into a diagnosis.

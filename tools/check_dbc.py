@@ -140,10 +140,48 @@ def check(path, show_list=False, quiet=False):
 
     muxed = [m for m in db["m"] if m["mux"]]
     if muxed:
-        print("\n  multiplexed messages (all of one must be sent together)")
+        print("\n  multiplexed messages (the payloads of one selector code are"
+              " one frame)")
         for m in muxed:
             sel = [s["n"] for s in m["s"] if s["mx"] == -2]
+            codes = {}
+            for s in m["s"]:
+                if s["mx"] >= 0:
+                    codes.setdefault(s["mx"], []).append(s["n"])
             print("    %s  selector %s" % (m["n"], sel[0] if sel else "?"))
+            for code in sorted(codes):
+                print("      %s = %-4d %s"
+                      % (sel[0] if sel else "code", code,
+                         ", ".join(codes[code])))
+
+    # Signals of a PLAIN message that sit on the same bits. Almost always a
+    # frame that is multiplexed in fact and does not say so: the file gives no
+    # `M`/`m0` markers, so every tool - this one, the logger, and anything else
+    # reading the file - has to treat the signals as coexisting, and sending
+    # one writes over the other. Nothing can infer the intent, and guessing it
+    # would refuse legitimate frames, so it is reported rather than assumed.
+    clashes = []
+    for m in db["m"]:
+        if m["mux"]:
+            continue
+        spans = [(s["n"], s["st"], s["st"] + s["b"] - 1)
+                 for s in m["s"] if s.get("le")]
+        for i in range(len(spans)):
+            for j in range(i + 1, len(spans)):
+                a, b = spans[i], spans[j]
+                if a[1] <= b[2] and b[1] <= a[2]:
+                    clashes.append((m["n"], a[0], b[0]))
+    if clashes:
+        print("\n  signals that share bits, in a message the file does NOT mark"
+              " as multiplexed:")
+        for msg, a, b in clashes[:8]:
+            print("    %s: %s and %s" % (msg, a, b))
+        if len(clashes) > 8:
+            print("    ... and %d more" % (len(clashes) - 8))
+        print("    If this frame really is multiplexed, say so in the .dbc -")
+        print("    mark the selector `M` and each payload `m<code>`. Until then")
+        print("    they are read as one frame carrying both, so setting one of")
+        print("    them sends the other along with it.")
 
     if show_list:
         print()

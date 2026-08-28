@@ -33,11 +33,12 @@ struct TxRequest {
  * buffer, and only the last one transmits. The queue is FIFO and drained by
  * one task, so the group cannot be split by anything else in between. */
 struct TxPending {
-  int16_t  msg;          /* index into g_dbc.msg, -1 = nothing in progress */
+  int16_t  msg;          /* index into g_dbc.msg, -1 = nothing in progress    */
+  int16_t  mux;          /* the selector code the frame carries, -1 = none    */
   uint8_t  len;
   uint8_t  data[8];
 };
-static TxPending s_pending = { -1, 0, {0, 0, 0, 0, 0, 0, 0, 0} };
+static TxPending s_pending = { -1, -1, 0, {0, 0, 0, 0, 0, 0, 0, 0} };
 
 static QueueHandle_t s_queue  = nullptr;
 static uint32_t      s_ticket = 0;
@@ -238,7 +239,19 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
   f.len = m.dlc ? m.dlc : 8;
 
   if (s_pending.msg == c.msg) {
-    /* Continuing a group: keep what the earlier members already wrote. */
+    /* Continuing a group: keep what the earlier members already wrote.
+     *
+     * Unless the group spans two selector codes, which is not a frame anyone
+     * can send: the payload bytes mean different things under each code, and
+     * the selector can only hold one of them. One frame would go out with the
+     * last member's code over both payloads - a command that looks sent and is
+     * not what anyone asked for. The page cannot build such a group any more;
+     * a setup file written before it could still can, so it is refused here as
+     * well as prevented there. */
+    if (sg.muxValue >= 0 && s_pending.mux >= 0 && sg.muxValue != s_pending.mux) {
+      status = TXS_BAD_FRAME;
+      return false;
+    }
     memcpy(f.data, s_pending.data, 8);
     if (s_pending.len > f.len) f.len = s_pending.len;
   } else if (m.muxSignal < 0) {
@@ -290,6 +303,7 @@ static void perform(MCP2515 &can, const TxRequest &r) {
     o.status = TXS_NOT_ARMED;
     o.ms     = millis();
     s_pending.msg = -1;      /* an abandoned group leaves nothing behind */
+    s_pending.mux = -1;
     record(o);
     return;
   }
@@ -319,6 +333,7 @@ static void perform(MCP2515 &can, const TxRequest &r) {
       o.status = status;
       o.ms     = millis();
       s_pending.msg = -1;
+      s_pending.mux = -1;
       record(o);
       g_tx.failed++;
       return;
@@ -328,6 +343,7 @@ static void perform(MCP2515 &can, const TxRequest &r) {
      * wire yet - a half-written command frame is worse than none. */
     if (r.hold && c.kind == TXK_SIGNAL) {
       s_pending.msg = c.msg;
+      s_pending.mux = g_dbc.sig[c.sig].muxValue;
       s_pending.len = f.len;
       memcpy(s_pending.data, f.data, 8);
       o.status  = TXS_PENDING;
@@ -344,6 +360,7 @@ static void perform(MCP2515 &can, const TxRequest &r) {
   }
 
   s_pending.msg = -1;          /* this frame is complete either way */
+  s_pending.mux = -1;
 
   int16_t tec = 0;
   const MCP2515::TxResult res = can.sendFrame(f, TX_ATTEMPTS, &tec);

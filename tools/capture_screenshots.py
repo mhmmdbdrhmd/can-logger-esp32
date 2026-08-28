@@ -49,14 +49,19 @@ SHOTS = [
     # obvious. Skip is first because on a working machine it is the answer.
     ("role",           "dash", None,      "example",  (1160,  900),
      "openRole()"),
-    # A multiplexed command frame and a frame whose signals only mean anything
-    # together - both against examples/example.dbc, which carries one of each.
-    ("send-groups",    "send", None,      "example",  (1240,  980),
+    # All three kinds of sendable value in one shot, against
+    # examples/example.dbc which carries one of each: HostCommand's two payloads
+    # are SINGLE (different selector codes - alternatives that can never share a
+    # frame), Diagnostics' pages are MULTIPLEXED (two payloads under one code -
+    # one frame), MotorFeedback is GROUPED (a plain message, chosen to go out
+    # together).
+    ("send-groups",    "send", None,      "example",  (1240, 1500),
      "postForm('/api/tx/arm',{on:1}).then(function(){return openTxEdit();})"
-     ".then(function(){TXED={};var h=-1,f=-1;"
+     ".then(function(){TXED={};var h=-1,d=-1,f=-1;"
      "DBC.m.forEach(function(m,i){if(m.n==='HostCommand')h=i;"
-     "if(m.n==='MotorFeedback')f=i;});"
+     "if(m.n==='Diagnostics')d=i;if(m.n==='MotorFeedback')f=i;});"
      "q('txfillmsg').value=h;txFillFromMap();"
+     "q('txfillmsg').value=d;txFillFromMap();"
      "q('txfillmsg').value=f;txFillFromMap();"
      "CFG.tx=TXED;q('txsheet').classList.remove('on');"
      "renderSend();q('toasts').innerHTML='';return pollDash();})"),

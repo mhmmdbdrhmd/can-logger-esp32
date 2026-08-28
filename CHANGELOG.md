@@ -2,7 +2,40 @@
 
 ## v1.1.1
 
-Six bugs in v1.1.0. The worst of them silently deleted work.
+Seven bugs in v1.1.0. The worst of them silently deleted work.
+
+### A multiplexed command could be sent half a frame at a time
+
+The editor drew a multiplexed message as one indivisible box — no Remove except
+the group's — while the Send tab gave every one of its payloads a Send button of
+its own. Both could not be right, and the Send tab was the wrong one: two
+payloads under the same selector code are one frame, and sending one of them
+alone writes **zero** over the other, because a multiplexed frame cannot be
+seeded from what the bus last carried (those bytes belonged to another code and
+mean something else).
+
+The rule now, in both tabs and from one function, is that a frame is one message
+and — if the message is multiplexed — one CODE of it:
+
+- **single** — one value, alone in its frame. Two payloads under *different*
+  codes are two singles, not two halves of one command: they are alternatives
+  and can never share a frame.
+- **grouped** — several signals of a plain message, chosen to go out together.
+  The choice is real and can be undone; the individual Remove stays.
+- **multiplexed** — the payloads that share one code. No choice, no individual
+  Remove, one **Send all N**.
+
+*Fill from the frame map* now makes a group per selector code rather than
+leaving multiplexed payloads ungrouped, and the "sent together with" list no
+longer offers to put two codes in one frame — a frame that could never have gone
+out as asked. A setup file written before this can still contain one, so
+`cantx.cpp` refuses it as well rather than transmitting a single frame with the
+last member's opcode written over both payloads.
+
+`tools/check_dbc.py` also warns when a message the file does **not** mark as
+multiplexed has signals sharing bits — the shape of a frame that is multiplexed
+in fact and does not say so. Nothing can infer that (guessing would refuse
+legitimate frames), so it is reported rather than assumed.
 
 ### Remove deleted every value of a message except the one you pressed
 
@@ -58,10 +91,9 @@ and throwing away a layout over that would be far worse.
 
 ### ...and the desk tool handed it straight back the next morning
 
-The fix above was the logger's half. `customize.py` still opened on a **single
-`desk-setup.cfg`**, written by whatever map was loaded last — so running it with
-no argument re-seeded a setup built for another bus, against no frame map at
-all, and the page came up on a screen of `unknown` cells with a role naming a
+The fix above was the logger's half. `customize.py` still opened on **one shared
+setup file**, written by whatever map was loaded last — so running it with no
+argument re-seeded a setup built for another bus, against no frame map at all, and the page came up on a screen of `unknown` cells with a role naming a
 node that was nowhere in sight. Exactly the symptom the fix above was meant to
 end, arriving by a different door.
 

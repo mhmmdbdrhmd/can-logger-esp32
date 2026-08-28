@@ -135,15 +135,14 @@ struct TxCommand {
   float    lo, hi, step, preset;
   uint8_t  dec;
 
-  /* Values sharing a non-zero group leave in ONE frame, with a single Send
-   * button. That is what a message whose signals are only meaningful together
-   * needs - and a multiplexed payload always needs it, though there the
-   * selector is written automatically and does not appear here. All members of
-   * a group must target the same message; the customizer only ever forms them
-   * that way. */
-  uint8_t  group;
-
   /* 1 if this value is one payload of a MULTIPLEXED message.
+   *
+   * There is no separate "group" any more, and `group=` on an old setup file is
+   * ignored: values of ONE MESSAGE are one frame because that is what a frame
+   * is, so the message name groups them and nothing else has to. A frame with
+   * more than one value set up is treated as multiplexed whatever the file
+   * says, because one press then has to write all of them.
+   *
    *
    * Recorded rather than looked up, because the thing that needs to know is the
    * customizer's Remove button, and it needs to know even when the frame map is

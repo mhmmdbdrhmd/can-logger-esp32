@@ -178,10 +178,12 @@ def check(path, show_list=False, quiet=False):
             print("    %s: %s and %s" % (msg, a, b))
         if len(clashes) > 8:
             print("    ... and %d more" % (len(clashes) - 8))
-        print("    If this frame really is multiplexed, say so in the .dbc -")
-        print("    mark the selector `M` and each payload `m<code>`. Until then")
-        print("    they are read as one frame carrying both, so setting one of")
-        print("    them sends the other along with it.")
+        print("    The logger treats any frame with more than one value set up")
+        print("    as multiplexed, so these are sent and removed together and")
+        print("    nothing is lost by the file not saying so. Marking it - the")
+        print("    selector `M`, each payload `m<code>` - is still worth doing:")
+        print("    only then can the logger write the selector for you, and")
+        print("    send one frame per code instead of one frame for all.")
 
     if show_list:
         print()

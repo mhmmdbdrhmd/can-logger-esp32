@@ -4,6 +4,28 @@
 
 Seven bugs in v1.1.0. The worst of them silently deleted work.
 
+### Multiplexed, or not - the three kinds are down to two
+
+`single`, `grouped` and `multiplexed` were three names for one question, and the
+answer was in the frame all along. A sendable frame is now either multiplexed or
+it is not, and it is multiplexed when the `.dbc` says so **or** when more than
+one of its signals has been set up.
+
+Everything set up against one message is that message's frame, so its signals
+are added, removed and sent **together, under one button**. There is no
+`group=` on the `send` lines any more (one on an older file is ignored), no
+"sent together with" dropdown, and no manual grouped/multiplexed picker: nothing
+is left to decide, because a frame is a frame.
+
+The half of the rule that does not come from the file is what makes a `.dbc`
+which is multiplexed *in fact* and does not say so - overlapping signals, no
+`M`/`m` marker, common on bench command frames - work without a guess or a
+switch.
+
+One press still means one frame per **selector code**: payloads under different
+codes are alternatives, so a frame multiplexed into six opcodes goes out as six
+frames from one press, while a message with one code, or none, is one frame.
+
 ### A multiplexed command could be sent half a frame at a time
 
 The editor drew a multiplexed message as one indivisible box — no Remove except

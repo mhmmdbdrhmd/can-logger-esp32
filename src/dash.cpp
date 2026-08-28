@@ -259,7 +259,6 @@ static bool parseSend(DashConfig &c, char *p) {
     else if (!strcmp(key, "preset")) t.preset = (float)atof(val);
     else if (!strcmp(key, "dec"))   t.dec    = (uint8_t)strtoul(val, nullptr, 10);
     else if (!strcmp(key, "cyclic")) t.cyclicMs = (uint16_t)strtoul(val, nullptr, 10);
-    else if (!strcmp(key, "group"))  t.group = (uint8_t)strtoul(val, nullptr, 10);
     else if (!strcmp(key, "mux"))    t.mux   = strtoul(val, nullptr, 10) ? 1 : 0;
     else if (!strcmp(key, "style")) {
       const int8_t st = dashInputId(val);
@@ -421,7 +420,7 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       "#   role \"<Name>\"               which BU_ node this logger IS, if any\n"
       "#   cell <slot> widget=.. sig=Message.Signal lo=.. hi=..\n"
       "#   send <n> label=\"..\" sig=Message.Signal lo=.. hi=..\n"
-      "#              group=<n>        values sharing a group leave in ONE frame\n"
+      "#              mux=1            one payload of a multiplexed frame\n"
       "#\n"
       "# widget is one of: gauge arc angle compass bar level thermo number\n"
       "#                   spark state\n"
@@ -510,8 +509,6 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       if (t.choices[0]) { n = appendStr(out, cap, n, " choices=");
                           n = appendValue(out, cap, n, t.choices); }
     }
-    if (t.group)    { n = appendStr(out, cap, n, " group=");
-                      n = appendInt(out, cap, n, t.group); }
     if (t.mux)        n = appendStr(out, cap, n, " mux=1");
     if (t.cyclicMs) { n = appendStr(out, cap, n, " cyclic=");
                       n = appendInt(out, cap, n, t.cyclicMs); }

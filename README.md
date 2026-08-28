@@ -913,34 +913,32 @@ send 0 label="Tyre size" sig=MachineConfig.TyreSize unit=mm lo=400 hi=1400 \
 
 On the machine, the Send tab is then just: arm, pick, press.
 
-### Single, grouped and multiplexed — the three kinds of sendable value
+### Multiplexed, or not — there is nothing else
 
-A value is not always a frame. What leaves the logger is a frame, and a frame is
-**one message** and — if that message is multiplexed — **one code of it**.
-Everything set up for that frame goes out in it, and nothing else can come
-along. That gives three kinds, and the page uses these words for them:
+A sendable frame is either **multiplexed** or it is not, and the rule has two
+halves:
 
-| | what it is | how it is sent |
-|---|---|---|
-| **single** | one value, alone in its frame | its own **Send** |
-| **grouped** | several signals of a plain message, *chosen* to go out together | one **Send all N** |
-| **multiplexed** | the payloads that share one selector code — no choice about it, they *are* one frame | one **Send all N** |
+> A frame is multiplexed when the `.dbc` says so with an `M` / `m<code>` marker,
+> **or** when more than one of its signals has been set up.
 
-The difference between grouped and multiplexed is whether you had a choice. A
-plain message carries all its signals at once whether or not you set them up, so
-grouping them is a decision you make and can undo. Multiplexed payloads under
-the same code are one payload: there is nothing to decide, and sending one of
-them alone would write zero over the others.
+Everything set up against one message is that message's frame. So its signals
+are **added together, removed together and sent together, under one button** —
+there is no way to put half a frame on the wire, and no switch to set.
 
-The setup sheet and the Send tab draw the same boxes, from the same function, for
-exactly that reason — they once disagreed, the editor showing a multiplexed
-message as one indivisible box while the Send tab gave each of its payloads a
-button of its own.
+The second half of the rule exists because a `.dbc` that is multiplexed in fact
+and does not say so is ordinary: overlapping signals, no marker, nothing in the
+file to infer it from. Once any frame with more than one value in it is treated
+as one indivisible thing, that file needs no special handling and no guess.
+
+The setup sheet and the Send tab draw the same boxes from the same function, so
+a box in one and a button in the other cannot mean different things. They once
+did: the editor showed a multiplexed message as one indivisible box while the
+Send tab gave each of its payloads a button of its own.
 
 ![Values that leave together](docs/img/send-groups.png)
 
-**Multiplexed commands.** A command frame often carries an opcode and a payload
-whose meaning depends on it:
+**The selector is written for you.** A command frame usually carries an opcode
+and a payload whose meaning depends on it:
 
 ```
 BO_ 288 HostCommand: 8 Host
@@ -948,51 +946,34 @@ BO_ 288 HostCommand: 8 Host
  SG_ WheelDia_mm m32   : 8|16@1+ ...     only means "wheel diameter" under op 32
 ```
 
-Writing `WheelDia_mm` on its own arrives as opcode 0 and is thrown away.
-So the logger **writes the selector automatically**, with the code the frame map
-says belongs to the signal being sent — inserted as raw bits, because a mux code
-is a bit pattern by definition and has no scaling of its own. The selector is not
-offered as a value to set up, because it is not a decision anybody should have to
-get right twice; the row that needs it just says *sent with Command = 32*.
+Writing `WheelDia_mm` on its own would arrive as opcode 0 and be thrown away, so
+the logger writes the selector itself, with the code the frame map says belongs
+to the signal being sent — inserted as raw bits, because a mux code is a bit
+pattern by definition and has no scaling of its own. It is never offered as a
+value to set up: it is not a decision anybody should have to get right twice.
+The row that needs it says *sent with Command = 32*.
 
 That example is in [`examples/example.dbc`](examples/example.dbc), and
 `test_encode.cpp` builds the frame from it and reads it back.
 
-A multiplexed frame is also the one case where the payload is **not** seeded from
-what the bus last said. The bytes mean different things on different pages, so
-carrying a previous page's bytes forward would send garbage under a new opcode.
+A multiplexed frame is also the one case where the payload is **not** seeded
+from what the bus last said: the bytes mean different things under different
+codes, so carrying a previous code's bytes forward would send garbage.
 
-**The set is one selector code, not the whole message.** Two payloads under the
-same code are one frame and are boxed, sent and removed together. Two payloads
-under *different* codes are alternatives that can never share a frame, so they
-are separate values with a **Send** each — `Setpoint` under opcode 16 and
-`WheelDia_mm` under opcode 32 are two commands, not two halves of one.
+**One press, one frame per selector code.** Payloads under different codes are
+alternatives — the selector can hold only one value at a time — so a frame
+multiplexed into several codes goes out as several frames, in order, from the
+one press. `ABS_Cmd` with six opcodes is one box and one **Send all 6**, and
+that press puts six frames on the bus. A message with one code, or none, is
+exactly one frame. Within a code the values are queued back to back with every
+one but the last held: each writes into the frame under construction and only
+the last transmits, and the queue is drained by a single task, so nothing can
+slip in and split it.
 
-Filling adds a group per code. A code carrying a single payload is a *single*
-value; a code carrying several is a *multiplexed* group whose members have no
-individual **Remove**, because keeping one of them describes half a command. A
-group that spans two codes cannot be built from the page at all, and the logger
-refuses one that reaches it from an older setup file rather than sending one
-frame with the last member's opcode written over both payloads.
-
-**When the `.dbc` does not say it is multiplexed.** Overlapping signals with no
-`M`/`m` marker are common — a bench command frame whose second byte means one
-thing under one opcode and something else under another. Nothing can infer that
-(guessing would refuse frames that are legitimately one message's signals side
-by side), so the box header carries a **grouped / multiplexed** picker: the
-file's answer is the default, and changing it sticks, in the setup file, with or
-without a frame map loaded. Marking a group *multiplexed* takes away the
-individual **Remove** — it becomes a frame that only means anything whole.
-
-**Signals that are read as a set.** A plain message with several signals is one
-frame whichever signal you meant to change, so *Fill from the frame map* groups
-them: one box, one **Send all**, one frame. Behind it, the members are queued
-back to back with every one but the last held — each writes into the frame under
-construction and only the last transmits. The queue is drained by a single task,
-so nothing can slip in and split the group.
-
-Grouping is a `group=<n>` on the `send` lines, and any value can be pulled out of
-its group or put back in the setup sheet.
+There is no `group=` on the `send` lines any more, and one on an older setup
+file is ignored: the message name is what groups values, because that is what a
+frame is. `mux=1` still records what the frame map said, so a set stays a set
+when no frame map is loaded.
 
 ### Arming
 

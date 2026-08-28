@@ -160,9 +160,17 @@ int main() {
          out.find("\nrole Tester") != std::string::npos &&
          out.find("\nnode ") == std::string::npos, "role, not node");
     }
-    ck("values that leave together keep their group",
-       a.tx[1].group == 2 && a.tx[2].group == 2 && a.tx[0].group == 0,
-       std::to_string(a.tx[1].group) + "/" + std::to_string(a.tx[2].group));
+    /* `group=` is gone. Values of one message are one frame because that is
+       what a frame is, so the message name groups them and nothing else has
+       to. An old setup file still carries the key; it has to be read without
+       complaint and written back out without it, rather than rejected. */
+    {
+      const std::string out = dump(a);
+      ck("an old file's group= is ignored, not echoed back",
+         out.find(" group=") == std::string::npos &&
+         out.find("WheelInfo.Mode") != std::string::npos &&
+         out.find("WheelInfo.Load") != std::string::npos, "dropped, values kept");
+    }
 
     const std::string first = dump(a);
 

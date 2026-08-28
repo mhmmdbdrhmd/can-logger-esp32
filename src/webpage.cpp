@@ -860,7 +860,7 @@ function parseCfg(text){
           dec: p.dec === undefined ? null : parseInt(p.dec, 10),
           style: p.style || 'number', choices: p.choices || '',
           id: p.id || '', data: p.data || '', ext: p.ext === '1' ? 1 : 0,
-          cyclic: numOr(p.cyclic, 0), group: numOr(p.group, 0),
+          cyclic: numOr(p.cyclic, 0),
           mux: p.mux === '1' ? 1 : 0,
           raw: p.id !== undefined || p.data !== undefined
         };
@@ -913,7 +913,6 @@ function dumpCfg(){
       s += ' style=' + (t.style || 'number');
       if(t.choices) s += ' choices=' + quote(t.choices);
     }
-    if(t.group)  s += ' group=' + Math.round(t.group);
     if(t.mux)    s += ' mux=1';
     if(t.cyclic) s += ' cyclic=' + Math.round(t.cyclic);
     out.push(s);
@@ -2401,26 +2400,25 @@ function msgOf(ref){
   return dot < 0 ? String(ref || '') : ref.slice(0, dot);
 }
 
-/* THE THREE KINDS OF SENDABLE VALUE - and the single rule behind all three.
+/* MULTIPLEXED, OR NOT. There is nothing else.
 
-   What leaves the logger is a frame. A frame is one message and, when that
-   message is multiplexed, ONE CODE of it. Everything set up for that frame
-   goes out in it; nothing outside it can come along.
+   What leaves the logger is a frame, and a frame is one message. Every value
+   set up against that message is part of it, so they are one thing: added
+   together, removed together, sent together, under one button.
 
-     single       one value, alone in its frame
-     grouped      several values of a plain message that were CHOSEN to go out
-                  together - the choice is real, because the message carries
-                  them all at once whether they were set up or not
-     multiplexed  the payloads that share one selector code. There is no choice
-                  here: they are the same frame by definition, and sending one
-                  on its own writes zero over the others, because a multiplexed
-                  frame cannot start from what the bus last carried - those
-                  bytes belonged to a different code and mean something else.
+   A sendable frame is MULTIPLEXED when either
+     - the .dbc says so, with an M / m<code> marker, or
+     - more than one signal of it has been set up - because then one press has
+       to write all of them, and writing one on its own would send the others
+       as whatever happened to be in the frame.
 
-   Both tabs ask these two functions, so the boxes in the editor and the Send
-   buttons on the Send tab cannot disagree about what a frame is. They did:
-   the editor drew a multiplexed message as one indivisible box while the Send
-   tab gave every payload its own Send button. */
+   The second half of that rule is there because a .dbc that is multiplexed in
+   fact and does not say so is ordinary: overlapping signals, no marker, and
+   nothing in the file to infer it from. Treating any frame with more than one
+   value in it as one indivisible thing needs no guess and no switch to set.
+
+   Both tabs ask these functions and nobody else, so a box in the editor and a
+   Send button on the Send tab cannot mean different things. */
 function muxCodeOf(ref){
   if(!ref || !DBC.m.length) return null;
   var mn = msgOf(ref), code = null;
@@ -2442,28 +2440,14 @@ function muxSelectorOf(name){
   return out;
 }
 
-/* Which frame this value leaves in. The mux code comes FIRST, on purpose: it
-   is the wire's own answer, so a setup written before this rule existed - one
-   group spanning two codes, which could never have gone out as one frame - is
-   split correctly the moment a frame map is there to ask. */
+/* One frame, one unit: the message. A one-off raw frame names no message and
+   is only ever itself. */
 function txUnitKey(map, i){
   var t = map[i];
-  if(!t || !t.sig) return 'i' + i;
-  /* The value's own `mux` flag decides, not the frame map. Filling sets it from
-     the map, so the file's answer is still the default - but a .dbc that is
-     multiplexed IN FACT and does not say so is common enough that the answer
-     has to be changeable, and once changed it has to stick. */
-  if(t.mux){
-    var code = muxCodeOf(t.sig);
-    /* Per selector code when the map says which; otherwise per group, which is
-       what a hand-marked frame has instead. */
-    return 'x' + msgOf(t.sig) + '#' + (code === null ? (t.group || 0) : code);
-  }
-  if(t.group) return 'g' + t.group;
-  return 'i' + i;
+  return (t && t.sig) ? 'm' + msgOf(t.sig) : 'i' + i;
 }
 
-/* [{key, ids, kind}], in the order the values were set up. */
+/* [{key, ids, mux}], in the order the values were set up. */
 function txUnits(map){
   var order = [], at = {};
   Object.keys(map).map(Number).sort(function(a, b){ return a - b; })
@@ -2475,36 +2459,25 @@ function txUnits(map){
       order[at[k]].ids.push(i);
     });
   order.forEach(function(u){
-    u.kind = u.ids.length < 2 ? 'single'
-           : u.key.charAt(0) === 'x' ? 'multiplexed'
-           : 'grouped';
+    var t = map[u.ids[0]];
+    var mn = (t && t.sig) ? msgOf(t.sig) : '';
+    /* Declared by the file, recorded on the value when the file was there, or
+       simply more than one signal in the frame. */
+    u.mux = u.ids.length > 1 || !!(t && t.mux) || (!!mn && isMuxMsg(mn));
   });
   return order;
 }
 
-/* What the box says about itself, in the terminology the README uses. */
+/* What the box says about itself. */
 function txUnitNote(map, u){
-  var t = map[u.ids[0]];
+  var t  = map[u.ids[0]];
   var mn = msgOf(t.sig || '');
-  if(u.kind !== 'multiplexed'){
-    return 'grouped — these ' + u.ids.length + ' go out together, in one frame'
-         + (isMuxMsg(mn) ? ', and you have said they may be removed one at a '
-                           + 'time even though the frame map multiplexes them'
-                         : '');
-  }
-  var sel  = muxSelectorOf(mn);
-  var code = muxCodeOf(t.sig);
-  if(code === null){
-    return DBC.m.length
-      ? 'multiplexed — you marked these ' + u.ids.length + ' as one frame. The '
-        + 'frame map does not say so, which is usual for a .dbc whose signals '
-        + 'overlap without an M/m marker'
-      : 'multiplexed — these ' + u.ids.length + ' are one frame, from the setup '
-        + 'file. No frame map is loaded to say which selector code';
-  }
-  return 'multiplexed — these ' + u.ids.length + ' are the payload of '
-       + (sel ? sel + ' = ' + code : 'one selector code')
-       + ', so they are one frame: sent together, removed together';
+  var sel = muxSelectorOf(mn);
+  return 'multiplexed — these ' + u.ids.length + ' signals are one frame: '
+       + 'added, sent and removed together'
+       + (sel ? '. The frame map multiplexes it with ' + sel
+                + ', so each selector code goes out as its own frame'
+              : '');
 }
 
 /* A signal that only exists under one multiplexor code cannot be written
@@ -2558,13 +2531,33 @@ q('sendlist').addEventListener('click', function(e){
   if(b.dataset.role === 'sendgroup'){
     var wrap = b.closest('.sendgroup');
     var ids = wrap.dataset.ids.split(',');
-    var vals = ids.map(function(i){
-      return rowValue(wrap.querySelector('.sendrow[data-cmd="' + i + '"]'));
+
+    /* One request per SELECTOR CODE. Everything in one code is one frame, and
+       the logger queues those back to back so nothing can slip between them
+       and split it. Two codes are two frames by definition - the selector can
+       only hold one value and the payload bytes mean something different under
+       each - so a message multiplexed into several codes goes out as several
+       frames, in order, from the one press. A plain message has one code (none)
+       and is therefore exactly one request, as before. */
+    var byCode = {}, order = [];
+    ids.forEach(function(i){
+      var c = 'c' + muxCodeOf((CFG.tx[+i] || {}).sig);
+      if(!byCode[c]){ byCode[c] = []; order.push(c); }
+      byCode[c].push(i);
     });
-    /* One request, so the logger queues the members back to back and nothing
-       can slip between them and split the frame. */
-    postForm('/api/tx/send', {cmds:ids.join(','), values:vals.join(',')})
-      .then(pollDash);
+
+    var chain = Promise.resolve();
+    order.forEach(function(c){
+      chain = chain.then(function(){
+        var part = byCode[c];
+        var vals = part.map(function(i){
+          return rowValue(wrap.querySelector('.sendrow[data-cmd="' + i + '"]'));
+        });
+        return postForm('/api/tx/send',
+                        {cmds:part.join(','), values:vals.join(',')});
+      });
+    });
+    chain.then(pollDash);
     return;
   }
 
@@ -2603,9 +2596,9 @@ function renderTxEdit(){
      Send tab uses, because a box here and a Send button there have to mean the
      same thing. They did not: this drew a multiplexed message as one
      indivisible box while the Send tab handed every payload its own button. */
-  var wraps = {}, unitOf = {}, kindOf = {};
+  var wraps = {}, unitOf = {};
   txUnits(TXED).forEach(function(u){
-    u.ids.forEach(function(k){ unitOf[k] = u; kindOf[k] = u.kind; });
+    u.ids.forEach(function(k){ unitOf[k] = u; });
   });
 
   keys.forEach(function(i){
@@ -2613,7 +2606,6 @@ function renderTxEdit(){
     var card = el('div', 'txcard');
 
     var u     = unitOf[i];
-    var isMux = kindOf[i] === 'multiplexed';
     var mname = t.sig ? msgOf(t.sig) : '';
     var unit  = (u && u.ids.length > 1) ? u.ids : null;
 
@@ -2623,42 +2615,6 @@ function renderTxEdit(){
       var gh = el('div', 'ghead');
       gh.appendChild(el('b', null, mname));
       gh.appendChild(el('span', null, txUnitNote(TXED, u)));
-
-      /* Which kind this frame is, and the one place it can be corrected.
-         A .dbc that is multiplexed in fact and does not say so - overlapping
-         signals with no M/m marker - is common, and nothing can infer it:
-         guessing would refuse frames that are legitimately one message's
-         signals side by side. So the file's answer is the default and this is
-         the override, on the box rather than on a card, because it is a fact
-         about the frame and not about any one value in it. */
-      var kind = el('select', 'gkind');
-      var kg = el('option', null, 'grouped');
-      kg.value = 'g';
-      var km = el('option', null, 'multiplexed');
-      km.value = 'x';
-      kind.appendChild(kg);
-      kind.appendChild(km);
-      kind.value = isMux ? 'x' : 'g';
-      kind.title = 'grouped: one frame, and you may remove its values one at a '
-                 + 'time.\nmultiplexed: one frame that only means anything '
-                 + 'whole - no value of it can be removed on its own.';
-      (function(ids, want){
-        kind.onchange = function(){
-          var toMux = kind.value === 'x';
-          /* A shared group id as well as the flag: with no frame map loaded
-             there is nothing else holding the set together, and the desk tool
-             starts with no frame map. */
-          var g = 0;
-          ids.forEach(function(k){ if(TXED[k].group) g = TXED[k].group; });
-          if(!g) g = freeGroup();
-          ids.forEach(function(k){
-            TXED[k].mux   = toMux ? 1 : 0;
-            TXED[k].group = g;
-          });
-          renderTxEdit();
-        };
-      })(unit.slice(), isMux);
-      gh.appendChild(kind);
 
       var gdel = el('button', null, 'Remove all ' + unit.length);
       gdel.onclick = function(){
@@ -2674,11 +2630,11 @@ function renderTxEdit(){
     var head = el('div', 'head');
     head.appendChild(el('b', null, t.label || 'Untitled value'));
 
-    /* One Remove per value, EXCEPT in a multiplexed set: there the only honest
-       button is the group's, because keeping some payloads of a multiplexed
-       command describes only part of it. A plain group may be split - you may
-       genuinely want three of its four signals - so those keep theirs. */
-    if(!isMux){
+    /* A Remove of its own only when the value IS the frame. Two values of one
+       message are one frame, and removing one of them leaves a frame that
+       still goes out - with the removed signal as whatever the bytes happen to
+       contain - which is the half-described command this exists to prevent. */
+    if(!unit){
       var del = el('button', null, 'Remove');
       del.onclick = function(){
         delete TXED[i];
@@ -2859,67 +2815,6 @@ function renderTxEdit(){
     rd.appendChild(ri);
     f2.appendChild(rd);
 
-    /* Which other values this one leaves with - the difference between a
-       SINGLE and a GROUPED value. Offered for signals of the same plain
-       message only: a multiplexed payload has no choice to make, its frame is
-       decided by the selector code it carries, so no dropdown is drawn for it.
-
-       NOT called `mates`. It was, and `var` is function-scoped, so this
-       assignment reached back and overwrote the mux-sibling list the Remove
-       button above had already closed over - a list that deliberately INCLUDES
-       this card, where this one deliberately excludes it. Remove therefore
-       deleted every value of the message except the one whose button was
-       pressed, while its label, computed before the overwrite, still said the
-       right number. On a plain four-signal message, pressing Remove threw away
-       the other three and kept the one you asked it to delete. */
-    var groupMates = (kindOf[i] === 'multiplexed' || muxCodeOf(t.sig) !== null)
-      ? []
-      : Object.keys(TXED).map(Number).filter(function(k){
-          return k !== i && TXED[k].sig
-              && msgOf(TXED[k].sig) === msgOf(t.sig || '')
-              && muxCodeOf(TXED[k].sig) === null;
-        });
-    if(groupMates.length){
-      var gd = el('div');
-      gd.style.gridColumn = 'span 2';
-      var gid = 'txgrp' + i;
-      var gl = el('label', null, 'Sent together with');
-      gl.setAttribute('for', gid);
-      gd.appendChild(gl);
-      var gs = el('select');
-      gs.id = gid;
-      var o0 = el('option', null, 'single — on its own, in its own frame');
-      o0.value = '0';
-      if(!t.group) o0.selected = true;
-      gs.appendChild(o0);
-      var o1 = el('option', null, 'grouped — with the other ' + msgOf(t.sig)
-                                 + ' values, in one frame');
-      o1.value = 'g';
-      if(t.group) o1.selected = true;
-      gs.appendChild(o1);
-      gs.onchange = function(){
-        if(gs.value === '0'){ t.group = 0; }
-        else {
-          /* Join whatever group the others already form, or start one. */
-          var g = 0;
-          groupMates.forEach(function(k){ if(TXED[k].group) g = TXED[k].group; });
-          if(!g) g = freeGroup();
-          t.group = g;
-          groupMates.forEach(function(k){ TXED[k].group = g; });
-        }
-        renderTxEdit();
-      };
-      gd.appendChild(gs);
-      f2.appendChild(gd);
-    } else if(t.group && (!u || u.ids.length < 2)){
-      /* A group of one is not a group. Only a group of one, though: a
-         multiplexed unit is offered no dropdown at all, and clearing its group
-         here threw away the one thing that holds it together when no frame map
-         is loaded - so a hand-marked frame came back from the file as loose
-         values, and a real one merged its two selector codes into a single box
-         that would have gone out as one impossible frame. */
-      t.group = 0;
-    }
 
     card.appendChild(f2);
 
@@ -2956,17 +2851,7 @@ function txFromSignal(ref, s){
   if(span > 0 && span / step > 2000) step = niceStep(span / 200);
   return {label:prettyName(ref), sig:ref, unit:s.u || '', lo:lo, hi:hi,
           step:step, preset:(lo <= 0 && hi >= 0) ? 0 : lo, dec:dec,
-          cyclic:0, group:0, raw:false, style:txStyleFor(s, span), choices:''};
-}
-
-/* The lowest group number nothing is using yet. */
-function freeGroup(){
-  var used = {};
-  Object.keys(TXED).forEach(function(k){
-    if(TXED[k].group) used[TXED[k].group] = 1;
-  });
-  for(var g = 1; g < 200; g++) if(!used[g]) return g;
-  return 0;
+          cyclic:0, raw:false, style:txStyleFor(s, span), choices:''};
 }
 
 /* Is this message one whose payload depends on a selector? */
@@ -2982,43 +2867,11 @@ function fillFromMessage(m){
   var taken = {};
   Object.keys(TXED).forEach(function(k){ taken[TXED[k].sig] = 1; });
 
-  /* Two shapes of message, and the grouping follows the wire in both.
-
-     MULTIPLEXED - the selector picks which payload the frame carries, so
-     different CODES are alternatives: they can never share a frame. Signals
-     under the SAME code are the opposite - they are one payload, and sending
-     one of them alone writes zero over the others, because a multiplexed frame
-     cannot start from what the bus last carried (those bytes belonged to
-     another code and mean something else). So each code becomes a group of its
-     own, and a code with a single payload becomes a single value. The selector
-     is never offered: the logger writes it from the frame map whenever one of
-     its payloads is sent, which is the only way it can be right every time.
-
-     PLAIN, with more than one signal - the signals are all in the frame at
-     once, so writing one on its own means writing the others too, whatever
-     they happen to contain. They are grouped: one Send, one frame. */
-  var group = (!m.mux && m.s.length > 1) ? freeGroup() : 0;
-
-  /* How many payloads each code has, counted before anything is added: a code
-     carrying one signal needs no group, and a group of one is not a group. */
-  var perCode = {};
-  if(m.mux) m.s.forEach(function(s){
-    if(s.mx >= 0) perCode[s.mx] = (perCode[s.mx] || 0) + 1;
-  });
-  var codeGroup = {};
-  function groupForCode(code){
-    if(codeGroup[code]) return codeGroup[code];
-    /* Join whatever the payloads already set up for this code are using, so
-       filling the same message twice does not split one frame in two. */
-    var g = 0;
-    Object.keys(TXED).forEach(function(k){
-      var e = TXED[k];
-      if(e && e.sig && e.group && msgOf(e.sig) === m.n
-         && muxCodeOf(e.sig) === code) g = e.group;
-    });
-    codeGroup[code] = g || freeGroup();
-    return codeGroup[code];
-  }
+  /* Every signal of the message becomes a value, and they are one frame by
+     virtue of being one message - there is nothing to group and nothing to
+     decide. The selector of a multiplexed message is never offered: the logger
+     writes it from the frame map whenever one of its payloads is sent, which
+     is the only way it can be right every time. */
 
   var r = {added:0, full:false, selector:''};
   m.s.forEach(function(s){
@@ -3029,21 +2882,12 @@ function fillFromMessage(m){
     while(TXED[i]) i++;
     if(i >= MAXSEND){ r.full = true; return; }
     var t = txFromSignal(ref, s);
-    t.group = (m.mux && s.mx >= 0 && perCode[s.mx] > 1)
-              ? groupForCode(s.mx) : group;
     /* Carried on the value, not looked up later: the Remove button has to know
        these belong together even when no frame map is loaded to ask. */
     t.mux = m.mux ? 1 : 0;
     TXED[i] = t;
     r.added++;
   });
-  /* A group of one is not a group - it happens when everything but one signal
-     of a plain message was already set up. */
-  if(group && r.added < 2){
-    Object.keys(TXED).forEach(function(k){
-      if(TXED[k].group === group) TXED[k].group = 0;
-    });
-  }
   return r;
 }
 
@@ -3431,7 +3275,7 @@ q('tx_add').onclick = function(){
     return;
   }
   TXED[i] = {label:'New value', sig:'', unit:'', lo:0, hi:100, step:1,
-             preset:0, dec:null, cyclic:0, group:0, raw:false, style:'number',
+             preset:0, dec:null, cyclic:0, raw:false, style:'number',
              choices:''};
   renderTxEdit();
 };

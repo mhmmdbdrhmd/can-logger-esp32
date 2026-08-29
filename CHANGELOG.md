@@ -62,6 +62,21 @@ than added in part, and a setup file written before this rule - or carried
 across to a map where the message has gained a signal - is completed on load and
 told to you.
 
+### Dashboard and Send tab, visually
+
+- **Every dashboard row is the same height**, the height of the tallest widget
+  in the grid, instead of each row shrinking to its own contents. Done with
+  `grid-auto-rows:1fr` rather than a fixed number, so nothing here has to be
+  kept in step with the widgets.
+- **A plain number cell centres its number.** The empty widget area above it was
+  pushing the value onto the floor of the cell; it now sits where a gauge's
+  needle would be.
+- **A number you can send has a `-` and a `+` beside it** instead of the
+  browser's own spinner, whose arrows are a few pixels tall and are missing
+  altogether on a phone. Stepping is by the value's own step, rounded so ten
+  presses of 0.1 read 1 and not 0.9999999999999999. The buttons write nothing to
+  the bus, so they stay live when the logger is not armed.
+
 ### The desk tools write no files; the logger still saves by itself
 
 `customize.py` and `tools/preview_dashboard.py` **no longer write anything at

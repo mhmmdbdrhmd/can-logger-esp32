@@ -1524,9 +1524,18 @@ result above matters.
 <br>
 
 
-Five things are known to be wrong or unfinished. Everything here is either
+Six things are known to be wrong or unfinished. Everything here is either
 visible in the source or came out of the field recordings; nothing is
 speculative, and nothing known is being left out.
+
+**Export can be up to 1.2 s out of date.** `exportSetup()` downloads what the
+LOGGER holds — it fetches `/api/dash/cfg` rather than serialising the page —
+which is right almost always, and is what makes an export exactly the file that
+is on the card. But an edit only reaches the logger about 1.2 s after you stop
+making it, so pressing Export inside that window downloads the *previous*
+version, with no sign that it did. Wait a moment after your last change, or
+press *Done* in Customize first, which writes immediately. The fix is for Export
+to flush the pending save before it fetches.
 
 **A plain signal in a multiplexed message cannot be sent.** A `.dbc` may give a
 multiplexed message a signal with no `m<code>` on it — no marker at all — which

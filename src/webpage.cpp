@@ -82,7 +82,12 @@ button.reboot:hover{border-color:var(--bad);color:var(--bad)}
    would make every cell unreadable. A four-across layout designed at a desk is
    four illegible slivers on the phone that is actually in the cab, so below
    820px it collapses to two and below 420px to one.                        */
-.dgrid{display:grid;gap:10px;grid-template-columns:repeat(var(--cols,4),minmax(0,1fr))}
+/* grid-auto-rows:1fr rather than a number: with the grid's own height left
+   to the content, every 1fr row resolves to the tallest row's content, so a
+   row of gauges and a row of numbers come out the same height without any
+   figure here having to be kept in step with the widgets. */
+.dgrid{display:grid;gap:10px;grid-auto-rows:1fr;
+  grid-template-columns:repeat(var(--cols,4),minmax(0,1fr))}
 @media(max-width:820px){.dgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:420px){.dgrid{grid-template-columns:1fr}}
 
@@ -99,6 +104,10 @@ button.reboot:hover{border-color:var(--bad);color:var(--bad)}
   line-height:1.05;letter-spacing:-.01em}
 .cell .cval.big{font-size:34px}
 .cell .cunit{font-size:11.5px;color:var(--dim);margin-top:2px}
+/* A cell with no drawing is only a number, and the empty .gfx above it was
+   pushing that number onto the floor of the cell. A matching space below
+   puts it in the middle, where the needle of a gauge would be. */
+.cell.plain::after{content:'';flex:1;min-height:0}
 .cell.stale{opacity:.42}
 .cell.stale .cval{color:var(--dim)}
 .v-ok{color:var(--txt)} .v-warn{color:var(--warn)} .v-bad{color:var(--bad)}
@@ -298,6 +307,25 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}
   padding:0;background:transparent;border:0}
 .sendrow select{flex:1;min-width:120px}
 .sendrow .u{font-size:12px;color:var(--dim);min-width:30px}
+/* The browser's own number spinner is two arrows a few pixels tall, and on a
+   phone it is not there at all. This is a value somebody may be nudging while
+   standing next to a machine, so it gets buttons that can be hit. */
+.stepper{display:flex;align-items:stretch;gap:0;flex:none}
+.stepper input[type=number]{width:96px;text-align:center;border-radius:0;
+  border-left:0;border-right:0;position:relative;z-index:1}
+.stepper input[type=number]::-webkit-outer-spin-button,
+.stepper input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;
+  margin:0}
+.stepper input[type=number]{-moz-appearance:textfield}
+/* Quiet, like the box between them: these change what is in the input, they do
+   not send it, and a blue button next to Send would read as a second Send. */
+.stepper button, .sendrow .stepper button{width:40px;flex:none;margin:0;
+  padding:0;font-size:18px;font-weight:600;line-height:1;color:var(--dim);
+  background:var(--sunk);border:1px solid var(--line)}
+.stepper button:first-child{border-radius:10px 0 0 10px}
+.stepper button:last-child{border-radius:0 10px 10px 0}
+.stepper button:hover:not(:disabled){color:var(--txt);border-color:var(--acc);
+  z-index:2}
 .sendrow .rv{font-variant-numeric:tabular-nums;font-weight:650;min-width:64px;
   text-align:right;font-size:15px}
 .sendrow button{width:auto;margin:0;padding:11px 20px;font-size:13.5px;
@@ -1436,6 +1464,7 @@ function buildCell(slot){
   var w = makeWidget(c);
   var gfx = el('div', 'gfx');
   if(w.node) gfx.appendChild(w.node);
+  else       e.classList.add('plain');   /* nothing drawn: the number IS the cell */
   e.appendChild(gfx);
 
   var val = el('div', 'cval' + (w.node && c.w !== 'state' ? '' : ' big'),
@@ -2391,7 +2420,32 @@ function buildInput(t, i){
   inp.value = cur;
   inp.dataset.role = 'value';
   inp.oninput = function(){ keep(inp.value); };
-  wrap.appendChild(inp);
+
+  function nudge(by){
+    var st = parseFloat(t.step);
+    if(!isFinite(st) || st <= 0) st = 1;
+    var v = parseFloat(inp.value);
+    if(!isFinite(v)) v = t.lo;
+    v += by * st;
+    if(v < t.lo) v = t.lo;
+    if(v > t.hi) v = t.hi;
+    /* Adding 0.1 ten times is 0.9999999999999999. Rounded, so the box shows the
+       number that was asked for rather than the one binary floats reached. */
+    inp.value = parseFloat(v.toFixed(6));
+    keep(inp.value);
+  }
+
+  var stepper = el('div', 'stepper');
+  ['\u2212', '+'].forEach(function(glyph, k){
+    var b = el('button', null, glyph);
+    b.dataset.nudge = k ? '1' : '-1';   /* not a Send: see paintSendState() */
+    b.title = (k ? 'Up' : 'Down') + ' one step of '
+            + trimNum(parseFloat(t.step) || 1) + (t.unit ? ' ' + t.unit : '');
+    b.onclick = function(){ nudge(k ? 1 : -1); };
+    if(k) stepper.appendChild(b); else { stepper.appendChild(b);
+                                         stepper.appendChild(inp); }
+  });
+  wrap.appendChild(stepper);
   wrap.appendChild(el('div', 'u', t.unit || ''));
   return wrap;
 }
@@ -2648,7 +2702,8 @@ function paintSendState(){
       if(b.dataset.opt !== undefined) return;      /* a two-state choice */
       /* Reset only puts the inputs back to what they were set up with. It
          writes nothing to the bus, so arming has no say over it. */
-      b.disabled = (b.dataset.role === 'reset') ? false : !live;
+      b.disabled = (b.dataset.role === 'reset' ||
+                    b.dataset.nudge !== undefined) ? false : !live;
       if(b.dataset.role === 'cyc' || b.dataset.role === 'cycunit'){
         var host = b.closest('.sendrow');
         var idx  = host ? +host.dataset.cmd
@@ -2671,6 +2726,7 @@ function rowValue(row){
 q('sendlist').addEventListener('click', function(e){
   var b = e.target.closest('button');
   if(!b || b.disabled || b.dataset.opt !== undefined) return;
+  if(b.dataset.nudge !== undefined) return;   /* a stepper, handled on itself */
 
   /* A frame's own box. Everything in it is one frame - one message under one
      selector code - so it is one request, and the logger writes every one of

@@ -247,6 +247,7 @@ static bool parseSend(DashConfig &c, char *p) {
   t.dec  = 255;
   t.step = 1.0f;
   t.kind = TXK_SIGNAL;
+  t.muxCode = -1;               /* no override until msel names one */
 
   char key[24], val[DASH_LINE_MAX];
   while (nextPair(&p, key, sizeof(key), val, sizeof(val))) {
@@ -259,7 +260,11 @@ static bool parseSend(DashConfig &c, char *p) {
     else if (!strcmp(key, "preset")) t.preset = (float)atof(val);
     else if (!strcmp(key, "dec"))   t.dec    = (uint8_t)strtoul(val, nullptr, 10);
     else if (!strcmp(key, "cyclic")) t.cyclicMs = (uint16_t)strtoul(val, nullptr, 10);
-    else if (!strcmp(key, "mux"))    t.mux   = strtoul(val, nullptr, 10) ? 1 : 0;
+    else if (!strcmp(key, "msel")) copyBounded(t.muxSel, sizeof(t.muxSel), val);
+    else if (!strcmp(key, "mxc"))  t.muxCode = (int16_t)strtol(val, nullptr, 10);
+    /* "mux=1" is what an earlier version wrote to mark a value as one
+     * payload of a multiplexed message. The message name and the frame map
+     * carry that now, so it is accepted here and not echoed back. */
     else if (!strcmp(key, "style")) {
       const int8_t st = dashInputId(val);
       t.style = (st < 0) ? (uint8_t)TXI_NUMBER : (uint8_t)st;
@@ -509,7 +514,11 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       if (t.choices[0]) { n = appendStr(out, cap, n, " choices=");
                           n = appendValue(out, cap, n, t.choices); }
     }
-    if (t.mux)        n = appendStr(out, cap, n, " mux=1");
+    if (t.muxSel[0]) { n = appendStr(out, cap, n, " msel=");
+                       n = appendValue(out, cap, n, t.muxSel);
+                       n = appendStr(out, cap, n, " mxc=");
+                       n = appendInt(out, cap, n,
+                                     t.muxCode < 0 ? 0 : t.muxCode); }
     if (t.cyclicMs) { n = appendStr(out, cap, n, " cyclic=");
                       n = appendInt(out, cap, n, t.cyclicMs); }
 
@@ -522,6 +531,21 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
 /* ==========================================================================
  *  Binding names to the frame map
  * ======================================================================== */
+int16_t txOverrideSelector(const TxCommand &t, const DbcDb &db) {
+  if (!t.muxSel[0] || t.muxCode < 0) return -1;
+  if (t.msg < 0 || (uint16_t)t.msg >= db.msgCount) return -1;
+
+  const DbcMessage &m = db.msg[t.msg];
+  if (m.muxSignal >= 0) return -1;            /* the file already said so */
+
+  for (uint16_t k = 0; k < m.signalCount; k++) {
+    const uint16_t idx = (uint16_t)(m.firstSignal + k);
+    if (idx >= db.sigCount) break;
+    if (strcmp(db.sig[idx].name, t.muxSel) == 0) return (int16_t)idx;
+  }
+  return -1;
+}
+
 uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
   uint16_t missing = 0;
 
@@ -575,6 +599,15 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
     }
     if (t.lo < (float)lo) t.lo = (float)lo;
     if (t.hi > (float)hi) t.hi = (float)hi;
+
+    /* An override this map cannot honour is forgotten rather than half-obeyed.
+     * Left in place it would put a code into bits that are not the selector's,
+     * or into a message the file already multiplexes its own way - either of
+     * which is a frame that looks sent and is not the one asked for. */
+    if (t.muxSel[0] && txOverrideSelector(t, db) < 0) {
+      t.muxSel[0] = 0;
+      t.muxCode   = -1;
+    }
   }
 
   return missing;
@@ -623,7 +656,21 @@ uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db) {
     /* A raw-identifier command names no signal, so no frame map can invalidate
      * it. Those are the one thing that survives a map it was not written for. */
     if (t.kind != TXK_SIGNAL) continue;
-    if (dbcFindSignalRef(db, t.ref, nullptr) >= 0) continue;
+    int16_t msgIdx = -1;
+    if (dbcFindSignalRef(db, t.ref, &msgIdx) >= 0) {
+      /* The value survives, but an override written against the old map may
+       * not: its selector has to be a signal of THIS message under THIS file.
+       * Counted, so the page can say what stopped being true. */
+      if (t.muxSel[0]) {
+        t.msg = msgIdx;
+        if (txOverrideSelector(t, db) < 0) {
+          t.muxSel[0] = 0;
+          t.muxCode   = -1;
+          dropped++;
+        }
+      }
+      continue;
+    }
     memset(&t, 0, sizeof(t));
     t.sig = -1;
     t.msg = -1;

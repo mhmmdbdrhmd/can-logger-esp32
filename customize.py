@@ -19,14 +19,16 @@ It never asks a question in the terminal. With no argument it opens the page
 empty and the Frame map button loads a .dbc from wherever you keep it, which
 is the same button the logger itself has.
 
-It opens the logger's real web page in your browser, fed with simulated data,
-and writes everything you build into a .cfg file named after your .dbc and
-sitting beside it. Copy the two onto the SD card as /frames.dbc and /dash.cfg
-and the logger starts up with your dashboard already on it.
+It opens the logger's real web page in your browser, fed with simulated data.
+Press Export in the page to save the setup you have built, then copy it onto
+the SD card as /dash.cfg alongside your .dbc as /frames.dbc, and the logger
+starts up with your dashboard already on it.
 
-One setup per frame map, always. Start with no frame map and the page starts
-empty; load one and its own .cfg is what opens - and what a second frame map
-cannot account for is dropped rather than left reading "unknown".
+NOTHING IS WRITTEN UNTIL YOU ASK FOR IT. This tool used to pair a .cfg with
+every .dbc it was shown, which left files in whatever directory you had pointed
+it at and opened the page on a setup you had not asked for. Now a frame map you
+merely looked at leaves nothing behind, and the setup is yours to export when it
+is worth keeping.
 
 No hardware, no wiring, no CAN traffic, and nothing to install - just Python,
 which is why this is a .py and not a shell script: it runs the same way on
@@ -135,18 +137,14 @@ def main():
             print("\nCarrying on anyway - you can still lay out whatever it did "
                   "read.\n")
 
-    # The setup lands next to the frame map, named after it, so the pair stays
-    # together and it is obvious which .cfg belongs to which .dbc.
-    #
-    # With no frame map there is nothing to name it after YET, and there is no
-    # single catch-all file either. There was, and it was the bug: a setup
+    # A setup file BESIDE the frame map is read if it is already there, and is
+    # never created. Two bugs came out of pairing them automatically: a setup
     # built for one bus was read back the next day beside no frame map at all,
-    # and the page opened on eighteen cells that every one read "unknown". A
-    # setup means nothing without the map it was written against, so with no
-    # map this starts empty and the file is chosen the moment one is loaded -
-    # <that map>.cfg, in this directory, which is also what comes BACK if you
-    # load the same map again tomorrow.
+    # and the page opened on eighteen cells that all read "unknown"; and a .dbc
+    # opened out of curiosity acquired a .cfg next to it that nobody wanted.
+    # Reading an existing one is useful, writing one uninvited is not.
     cfg = dbc.with_suffix(".cfg") if dbc is not None else None
+    have_cfg = cfg is not None and cfg.exists()
     port = free_port()
     url = "http://127.0.0.1:%d/" % port
 
@@ -155,8 +153,9 @@ def main():
           % (dbc if dbc is not None
              else "none yet - load one with Frame map, top right"))
     print("  your setup  %s"
-          % ("%s   (written as you go)" % cfg if cfg is not None
-             else "named after the frame map, in %s, once you load one" % ROOT))
+          % ("%s   (opened from there; Export to write it back)" % cfg
+             if have_cfg else "starts empty - Export in the page when you "
+                              "want to keep it"))
     print("  open        %s" % url)
     print("  role        %s"
           % (role if role else "not set - both Fill buttons offer everything "
@@ -171,34 +170,30 @@ def main():
     for n, line in enumerate(steps, 1):
         print("  %d. %s" % (n, line))
     print("""
-  Then copy onto the SD card:
-      your .dbc   ->  /frames.dbc
-      %s   ->  /dash.cfg
+  Then press Export, and copy onto the SD card:
+      your .dbc          ->  /frames.dbc
+      the exported file  ->  /dash.cfg
 
   Close this window (or press Ctrl-C) when you are done.
-""" % (cfg.name if cfg is not None else "the .cfg named after it"))
+""")
 
     threading.Thread(target=lambda: (time.sleep(1.2), webbrowser.open(url)),
                      daemon=True).start()
 
     import preview_dashboard
-    # --cfg-dir is where a setup goes for a map loaded from the PAGE. Beside
-    # the .dbc when there is one, otherwise beside this script - either way one
-    # setup per frame map, never a shared file that outlives the map it was
-    # built for.
-    sys.argv = ["preview_dashboard.py", "--port", str(port),
-                "--cfg-dir", str(dbc.parent if dbc is not None else ROOT)]
-    sys.argv += ["--cfg", str(cfg)] if cfg is not None else []
+    # --cfg only when there is already a file to read. Passing one that does not
+    # exist would create it on the first Save, which is the uninvited file this
+    # tool no longer leaves behind.
+    sys.argv = ["preview_dashboard.py", "--port", str(port)]
+    sys.argv += ["--cfg", str(cfg)] if have_cfg else ["--empty"]
     sys.argv += ["--dbc", str(dbc)] if dbc is not None else ["--no-dbc"]
     if role:
         sys.argv += ["--role", role]
     try:
         return preview_dashboard.main()
     except KeyboardInterrupt:
-        print("\n\nStopped. Your setup is in %s"
-              % (cfg if cfg is not None
-                 else "the .cfg named after the frame map you loaded, in %s"
-                      % ROOT))
+        print("\n\nStopped. Anything you did not Export is gone - "
+              "nothing was written.")
         return 0
 
 

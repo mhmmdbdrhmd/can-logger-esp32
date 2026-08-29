@@ -492,7 +492,7 @@ route to the internet. What the logger sends is one small JSON document of
 pre-formatted values and health counters; it never touches a pixel. Customizing
 costs it even less: laying out a dashboard is browser work on a copy of the
 config, and the logger sees a request only when the frame map is first read and
-when the finished layout is saved.
+when **Save to device** is pressed on the finished layout.
 
 ![The dashboard](docs/img/dashboard-dbc.png)
 
@@ -651,6 +651,25 @@ logger's own memory.
 
 That is the whole sheet: what is on the logger now, Export, Import.
 
+### Nothing is written until you say so
+
+Editing happens **in the page**. Moving a cell, changing a range, adding a
+sendable value, setting the role — none of it touches the card. **Save to
+device** writes it, once, and the button carries a dot while there is something
+unsaved. Leaving the page with unsaved changes asks first; reloading without
+saving throws them away, which is also how you abandon an experiment.
+
+This used to write on a timer after every edit, which meant laying out a
+dashboard wrote the file a dozen times and a half-finished setup was the one on
+the card. It also meant there was no way to try something without keeping it.
+
+`tools/customize.py` and `tools/preview_dashboard.py` follow the same rule and
+one more: **they never pair a `.cfg` with a `.dbc` by themselves.** Loading a
+frame map at the desk leaves nothing behind — no file appears next to the map
+you opened, and the page does not come up on a setup you did not ask for.
+`--cfg` names a file to *start from*, and it is written only when you press
+Save; otherwise Export gives you the text and you decide where it goes.
+
 Two copies, one rule — because this is set up **at a desk, before you go out**,
 and has to be there when you arrive.
 
@@ -674,7 +693,7 @@ agreed with:
 - **nothing anywhere** → an empty grid, and the page says so
 
 The effect is the one people expect: *whichever you edited last is the one you
-get.* Saving in the browser writes the card immediately, through the task that
+get.* Pressing Save to device writes the card immediately, through the task that
 owns it; the flash copy is written when no recording is running, because writing
 NVS stops the flash cache and the CAN interrupt is reached through a dispatcher
 that may not be resident in IRAM. Losing power in between costs nothing — the
@@ -706,11 +725,13 @@ when you swap buses — only that file does.
 
 ```bash
 # the real page, against simulated data - opens on http://127.0.0.1:8080.
-# Starts from examples/machine.dbc and a COPY of examples/dash.cfg, so there is
-# a dashboard and a set of sendable values to look at from the first second.
+# Starts from examples/machine.dbc and the text of examples/dash.cfg, so there
+# is a dashboard and a set of sendable values to look at from the first second.
+# It writes no file at all.
 python3 tools/preview_dashboard.py
 
-# keep the changes: write them back to the example itself
+# keep the changes: --cfg names the file, and Save to device in the page is
+# what writes it. Loading a frame map still writes nothing.
 python3 tools/preview_dashboard.py --cfg examples/dash.cfg
 
 # a logger with nothing on its card, which is a different page
@@ -745,15 +766,15 @@ That one command:
 - checks the file against the limits this firmware was built with, and says what
   it could not read
 - picks a free port, starts the page and opens your browser at it
-- writes everything you build into `mine.cfg`, next to your `.dbc`, as you go
+- reads `mine.cfg` if one is already sitting beside your `.dbc`
 
-**One setup per frame map, always.** The `.cfg` is named after the `.dbc` and
-sits beside it — and when the map came from the page rather than the command
-line, beside `customize.py`. So starting with no frame map starts *empty*, and
-loading a map opens that map's own setup: yesterday's work on another bus can
-neither appear as a screen of `unknown` cells nor be written over. Load a second
-map in the same session and the same rule applies — the first map's file is left
-exactly as it was.
+**It writes nothing you did not ask for.** No file appears next to the `.dbc`
+you opened, and loading a second frame map in the same session leaves the first
+one's work alone rather than pairing a new file with it. When the setup is worth
+keeping, press **Export** in the page and put the downloaded file where you want
+it. This tool used to pair a `.cfg` with every map it was shown, which left files
+in the directories it was pointed at and opened the page on setups nobody had
+asked for.
 
 Then, in the page:
 
@@ -776,11 +797,12 @@ the frame map**, and pick the message your controller takes its settings from.
 Then fix the inputs: the one that should be a list of four tyre sizes becomes
 *Pick from a list I write*.
 
-**5. Take it with you.** Copy two files to the root of the SD card:
+**5. Take it with you.** Press **Export** — in the header, behind *Setup file* —
+and copy two files to the root of the SD card:
 
 ```
-mine.dbc   ->  /frames.dbc
-mine.cfg   ->  /dash.cfg
+mine.dbc        ->  /frames.dbc
+the export      ->  /dash.cfg
 ```
 
 Power the logger up and it opens on your dashboard, with your sendable values,
@@ -796,7 +818,14 @@ python3 tools/check_dbc.py path/to/mine.dbc --list   # every message and signal
 It names the lines it could not read, warns if the file overruns
 `DBC_MAX_MESSAGES` / `DBC_MAX_SIGNALS` / `DBC_MAX_VALDESC`, flags definition
 lines longer than `DBC_LINE_MAX` (which lose everything past the cut), and prints
-**who sends what** and which messages are multiplexed.
+**who sends what** and which messages are multiplexed, payload by payload.
+
+Two things it warns about are worth acting on before you go out. Signals of a
+*plain* message that share bits — almost always a frame that multiplexes in fact
+and does not say so, which the logger would otherwise send as one frame with the
+payloads written over each other. And a signal of a *multiplexed* message with
+no code on it, which this build cannot send at all — see [known
+issues](#14-known-issues).
 
 It is pure Python — no compiler, no shell — which means it is a *second*
 implementation of `src/dbc.cpp` and would normally be a reason to distrust it.
@@ -913,29 +942,48 @@ send 0 label="Tyre size" sig=MachineConfig.TyreSize unit=mm lo=400 hi=1400 \
 
 On the machine, the Send tab is then just: arm, pick, press.
 
-### Multiplexed, or not — there is nothing else
+### The unit is the frame
 
-A sendable frame is either **multiplexed** or it is not, and the rule has two
-halves:
+> A frame is one message, and — when the message is multiplexed — one selector
+> code. The values of a frame are **added together, removed together and sent
+> together, under one button.**
 
-> A frame is multiplexed when the `.dbc` says so with an `M` / `m<code>` marker,
-> **or** when more than one of its signals has been set up.
+That is the whole rule. It is not a policy; it is what a CAN frame is. Eight
+bytes leave the logger whether or not somebody typed all of them, so the page
+refuses to pretend one signal of a frame can be sent by itself.
 
-Everything set up against one message is that message's frame. So its signals
-are **added together, removed together and sent together, under one button** —
-there is no way to put half a frame on the wire, and no switch to set.
+A message is **multiplexed** when the `.dbc` marks it with an `M` selector and
+`m<code>` payloads, or when you say so by hand (below). Nothing is inferred from
+the bit layout — overlapping signals are a hint a person can read, not a
+declaration, and a guess here writes a real command to a real ECU.
 
-The second half of the rule exists because a `.dbc` that is multiplexed in fact
-and does not say so is ordinary: overlapping signals, no marker, nothing in the
-file to infer it from. Once any frame with more than one value in it is treated
-as one indivisible thing, that file needs no special handling and no guess.
+So one message can hold several frames. Four shapes, and the boxes follow:
 
-The setup sheet and the Send tab draw the same boxes from the same function, so
-a box in one and a button in the other cannot mean different things. They once
-did: the editor showed a multiplexed message as one indivisible box while the
-Send tab gave each of its payloads a button of its own.
+| | frames | what you get |
+|---|---|---|
+| plain, one signal set up | 1 | one row, one **Send** |
+| plain, several signals set up | 1 | one box, **Send all *N*** and **Remove all *N*** |
+| multiplexed, one signal per code | one per code | an outer box for the message, one sub-box per code, each with its own Send and Remove |
+| multiplexed, several signals under a code | one per code | the same, and the sub-box holding two signals sends and removes both |
+
+On [`examples/example.dbc`](examples/example.dbc) as `NodeA`: `NodeStatus` is
+one box with **Send all 4**; `Diagnostics` is an outer box holding **Page = 0**
+(`SupplyVoltage` + `BoardTemp`) and **Page = 1** (`RunHours` + `ErrorCount`),
+each with its own button. You cannot have `SupplyVoltage` without `BoardTemp`,
+because one frame under `Page 0` carries both fields and sending one alone would
+assert a value for the other that nobody chose.
+
+The setup sheet and the Send tab draw their boxes from the same function, so a
+box in one and a button in the other cannot mean different things.
 
 ![Values that leave together](docs/img/send-groups.png)
+
+**Whole frames only.** Half a frame set up is a frame that still goes out, with
+the signals nobody configured as zeros — a command that looks complete and is
+not. So choosing one signal by hand brings its whole frame with it; a frame that
+will not fit in the remaining room is not added at all rather than added in
+part; and a setup file written before this rule, or carried across to a frame
+map where the message has gained a signal, is completed on load and told to you.
 
 **The selector is written for you.** A command frame usually carries an opcode
 and a payload whose meaning depends on it:
@@ -960,20 +1008,45 @@ A multiplexed frame is also the one case where the payload is **not** seeded
 from what the bus last said: the bytes mean different things under different
 codes, so carrying a previous code's bytes forward would send garbage.
 
-**One press, one frame per selector code.** Payloads under different codes are
-alternatives — the selector can hold only one value at a time — so a frame
-multiplexed into several codes goes out as several frames, in order, from the
-one press. `ABS_Cmd` with six opcodes is one box and one **Send all 6**, and
-that press puts six frames on the bus. A message with one code, or none, is
-exactly one frame. Within a code the values are queued back to back with every
-one but the last held: each writes into the frame under construction and only
-the last transmits, and the queue is drained by a single task, so nothing can
-slip in and split it.
+### Saying a message is multiplexed when the file will not
 
-There is no `group=` on the `send` lines any more, and one on an older setup
-file is ignored: the message name is what groups values, because that is what a
-frame is. `mux=1` still records what the frame map said, so a set stays a set
-when no frame map is loaded.
+Some `.dbc` files multiplex in fact and do not admit it: payload signals sitting
+on the same bits, an opcode byte in front of them, and no marker anywhere. Left
+alone, the logger sends all of them in one frame, writing them over each other.
+
+In the setup sheet the message header offers a picker: **which signal selects**.
+Choose it and the selector drops out of the value list — it is written for you
+from then on — and each remaining value gains a **selector code** field. Both
+halves are needed and neither can be skipped: knowing that `Cmd_Op` selects does
+not say that `Cmd_Amp` means opcode 16.
+
+It is recorded on the `send` lines as `msel=` and `mxc=`:
+
+```
+send 0 label="Cmd val" sig=ABS_Cmd.Cmd_Val ... msel=Cmd_Op mxc=1
+send 1 label="Cmd amp" sig=ABS_Cmd.Cmd_Amp ... msel=Cmd_Op mxc=16
+```
+
+An override is dropped rather than half-obeyed if a later frame map has no
+signal of that name in the message, or declares its own `M` — the file wins,
+because the file is the better place to say it. `tools/check_dbc.py` reports the
+overlapping signals that suggest you need this, and **fixing the `.dbc` is still
+the better answer**; this is for the file you have rather than the file you want.
+
+**One press, one frame.** Everything in a box is one message under one selector
+code, so it is one request and one frame. Within it the values are queued back
+to back with every one but the last held: each writes into the frame under
+construction and only the last transmits, and the queue is drained by a single
+task, so nothing can slip in and split it. `ABS_Cmd` with six opcodes is six
+boxes and six buttons, and each press puts one frame on the bus.
+
+**What you type stays typed.** The Send tab redraws whenever anything changes —
+arming, a poll, a frame arriving — and each box keeps the values in it across
+those redraws and after sending, which for a multiplexed frame is the part worth
+keeping: the whole frame is written every time, so the values you did not touch
+are as much a part of the command as the one you did. **Reset** on each box puts
+it back to the values it was set up with, and so does reloading the page.
+Nothing about this is stored on the logger.
 
 ### Arming
 
@@ -1445,9 +1518,31 @@ result above matters.
 <br>
 
 
-Four things are known to be wrong or unfinished. Everything here is either
+Five things are known to be wrong or unfinished. Everything here is either
 visible in the source or came out of the field recordings; nothing is
 speculative, and nothing known is being left out.
+
+**A plain signal in a multiplexed message cannot be sent.** A `.dbc` may give a
+multiplexed message a signal with no `m<code>` on it — no marker at all — which
+means it rides in *every* frame that message sends, whatever the selector says.
+An alive-counter or a CRC normally sits there. This build has nowhere to put it:
+the unit it writes is one message under one selector code, and a signal that
+belongs to every code belongs to no one frame. So it is left out of the sendable
+list and goes out as **zero** in every frame. Decoding and logging are
+unaffected — `decode.cpp` shows it on every frame, correctly.
+
+The consequence is bounded but sharp: if that signal is a counter or a checksum
+the ECU validates, every command this logger sends is rejected, and the reason
+is not visible from the Send tab. `tools/check_dbc.py` reports the shape by name
+so you find out at the desk instead of on the bus, and the setup sheet leaves the
+signal out of the picker rather than offering a value it cannot honour.
+
+None of the 15 `.dbc` files this was developed against has one — 234 messages,
+14 of them multiplexed, none with a plain signal — but the shape is normal in
+OEM and AUTOSAR-derived files, where end-to-end protection puts a counter and a
+CRC outside the multiplexed payload. Supporting it means letting one value
+belong to every code of its message and writing it into each frame; the guard is
+in place so that until then the failure is announced rather than silent.
 
 **Extended multiplexing decodes silently wrong.** `SG_MUL_VAL_` is not parsed,
 and a signal that depends on it is treated as an ordinary signal — so it is

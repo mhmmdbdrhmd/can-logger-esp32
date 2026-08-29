@@ -32,6 +32,7 @@
  *      poll <ms>
  *      cell <slot> widget=gauge sig=Drive.Speed lo=0 hi=50 label="Ground speed"
  *      send <index> label="Tyre size" sig=WheelInfo.TireSize lo=400 hi=1200
+ *      send <index> label="Cmd amp"   sig=ABS_Cmd.Cmd_Amp msel=Cmd_Op mxc=16
  *      send <index> label="Reset trip" id=0x600 data=2F10200001000000
  *
  *  Key=value, order-independent, values quoted when they contain spaces, and
@@ -135,24 +136,30 @@ struct TxCommand {
   float    lo, hi, step, preset;
   uint8_t  dec;
 
-  /* 1 if this value is one payload of a MULTIPLEXED message.
+  /* THE MANUAL MULTIPLEX OVERRIDE, for a .dbc that multiplexes in fact and does
+   * not say so: payload signals sharing bits, an opcode byte in front of them,
+   * and no M or m<code> marker anywhere in the file.
    *
-   * There is no separate "group" any more, and `group=` on an old setup file is
-   * ignored: values of ONE MESSAGE are one frame because that is what a frame
-   * is, so the message name groups them and nothing else has to. A frame with
-   * more than one value set up is treated as multiplexed whatever the file
-   * says, because one press then has to write all of them.
+   * `muxSel` names the signal OF THIS MESSAGE that selects the payload, and
+   * `muxCode` is the code THIS value travels under. Both or neither: knowing
+   * that Cmd_Op selects does not say that Cmd_Amp means opcode 16, so a
+   * selector without a code cannot build a frame and is refused.
    *
+   * A frame map that declares the multiplexing wins - the file is the better
+   * place to say it, and these two exist for the file you have rather than the
+   * file you want. Nothing is ever inferred from the bit layout: overlapping
+   * signals are a hint a person can read, and guessing writes a real command to
+   * a real ECU.
    *
-   * Recorded rather than looked up, because the thing that needs to know is the
-   * customizer's Remove button, and it needs to know even when the frame map is
-   * not loaded - opening the page before a .dbc reaches the card, or after the
-   * map has been swapped for another one. Ask the map and the answer becomes
-   * "not multiplexed" the moment the map is absent: the set stops being
-   * recognised as a set and its payloads become deletable one at a time, which
-   * is exactly the half-described command the grouping exists to prevent. So
-   * the fact travels with the value instead of being re-derived. */
-  uint8_t  mux;
+   * Carried on the value rather than looked up, because the page needs it with
+   * no frame map loaded at all - opening the browser before a .dbc reaches the
+   * card, or after the map has been swapped for another one.
+   *
+   * `mux=1` was written by an earlier version to mark a value as one payload of
+   * a multiplexed message. The message name and the frame map say that now, so
+   * it is read from an old file and not written back. */
+  char     muxSel[DBC_NAME_MAX];
+  int16_t  muxCode;                /* -1 when muxSel is empty                */
 
   /* TXK_RAW */
   uint32_t id;
@@ -233,6 +240,15 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap);
  * how many references could not be found, which the dashboard shows rather
  * than hiding - a cell pointing at a signal this DBC does not have is the
  * normal result of swapping cards, and the user needs to see it. */
+/* The signal this value's manual override names as its message's selector.
+ *
+ * -1 when there is no override, when the value names no message, or when the
+ * map has no signal of that name in it - the last of which is how an override
+ * written against one frame map stops being obeyed under another. A message the
+ * map ALREADY declares multiplexed also returns -1: the file wins, because the
+ * file is the better place to say it and two answers would be one too many. */
+int16_t txOverrideSelector(const TxCommand &t, const DbcDb &db);
+
 uint16_t dashResolve(DashConfig &c, const DbcDb &db);
 
 /* Throw away every cell and every setpoint the frame map cannot account for,

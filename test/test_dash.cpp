@@ -123,22 +123,30 @@ int main() {
       "send 1 label=\"Axle mode\" sig=WheelInfo.Mode lo=0 hi=3 step=1 preset=0 group=2\n"
       "send 2 label=\"Axle load\" sig=WheelInfo.Load lo=0 hi=9000 step=10 preset=0 group=2\n"
       "send 3 label=\"Wake node\" id=0x700 data=00 cyclic=500\n"
-      "send 4 label=\"Wheel dia\" sig=Cmd.WheelDia lo=300 hi=3000 mux=1\n");
+      "send 4 label=\"Wheel dia\" sig=Cmd.WheelDia lo=300 hi=3000 mux=1\n"
+      "send 5 label=\"Opcode arg\" sig=Cmd.Arg lo=0 hi=255 msel=Cmd_Op mxc=16\n");
 
     ck("the node this logger is survives a round trip",
        strcmp(a.role, "Tester") == 0, a.role);
 
-    /* Whether a value is one payload of a multiplexed message is carried BY the
-       value, not looked up in the frame map, because the customizer's Remove
-       button has to group the set even when no map is loaded - the desk tool
+    /* The manual override is carried BY the value, not looked up in the frame
+       map, because the page needs it with no map loaded at all - the desk tool
        before a .dbc is chosen, or a logger whose card has none. Looked up, the
-       answer becomes "not multiplexed" the moment the map is away, the set
-       stops being a set, and the payloads can be deleted one at a time. So it
-       has to survive the round trip through the file. */
-    ck("a multiplexed payload is remembered as one", a.tx[4].mux == 1,
-       std::to_string(a.tx[4].mux));
-    ck("and an ordinary value is not", a.tx[0].mux == 0,
-       std::to_string(a.tx[0].mux));
+       answer becomes "not multiplexed" the moment the map is away, the frame
+       stops being a frame, and its payloads become deletable one at a time. So
+       both halves have to survive the round trip through the file. */
+    ck("the selector named by hand survives a round trip",
+       strcmp(a.tx[5].muxSel, "Cmd_Op") == 0, a.tx[5].muxSel);
+    ck("and so does the code it travels under", a.tx[5].muxCode == 16,
+       std::to_string(a.tx[5].muxCode));
+    ck("a value with no override has neither",
+       a.tx[0].muxSel[0] == 0 && a.tx[0].muxCode == -1,
+       std::to_string(a.tx[0].muxCode));
+    /* An older file's mux=1 said "this is one payload of a multiplexed
+       message". The message name and the frame map answer that now, so the key
+       is read without complaint and never written back. */
+    ck("an old file's mux=1 is ignored, not echoed back",
+       a.tx[4].muxSel[0] == 0, a.tx[4].muxSel);
 
     /* This setting was called `node` in an earlier version, and was briefly
        removed altogether. A setup file written by any of those has to keep its
@@ -403,6 +411,84 @@ int main() {
     ck("neither is written back out",
        out.find("cell 0") == std::string::npos &&
        out.find("send 0") == std::string::npos);
+  }
+
+  /* ------------------------------------------------------------------------
+   *  The manual multiplex override
+   *
+   *  For a frame map that multiplexes in fact and does not say so: payloads on
+   *  the same bits, an opcode in front of them, and no M or m<code> anywhere.
+   *  The override says which signal selects and which code each value travels
+   *  under, and BOTH are needed - a selector alone does not say that Cmd_Amp
+   *  means opcode 16.
+   * ---------------------------------------------------------------------- */
+  printf("\n== a message multiplexed by hand ==\n");
+  {
+    static const char kMap[] =
+      "BU_: ABS_ECU Tester\n"
+      "BO_ 800 ABS_Cmd: 8 Tester\n"
+      " SG_ Cmd_Op : 0|8@1+ (1,0) [0|255] \"\" ABS_ECU\n"
+      " SG_ Cmd_Val : 8|8@1+ (1,0) [0|255] \"\" ABS_ECU\n"
+      " SG_ Cmd_Amp : 8|32@1- (1e-06,0) [-2147|2147] \"\" ABS_ECU\n"
+      "BO_ 288 Declared: 8 Tester\n"
+      " SG_ Sel M : 0|8@1+ (1,0) [0|255] \"\" ABS_ECU\n"
+      " SG_ Pay m16 : 8|8@1+ (1,0) [0|255] \"\" ABS_ECU\n";
+
+    DbcDb db = {};
+    dbcLoadText(db, kMap, sizeof(kMap) - 1);
+    ck("the hand-written map parses", db.msgCount == 2, std::to_string(db.msgCount));
+
+    DashConfig c;
+    dashReset(c);
+    feed(c,
+      "send 0 label=Val sig=ABS_Cmd.Cmd_Val lo=0 hi=255 msel=Cmd_Op mxc=1\n"
+      "send 1 label=Amp sig=ABS_Cmd.Cmd_Amp lo=-2000 hi=2000 msel=Cmd_Op mxc=16\n"
+      "send 2 label=Pay sig=Declared.Pay lo=0 hi=255 msel=Sel mxc=3\n"
+      "send 3 label=Gone sig=ABS_Cmd.Cmd_Val lo=0 hi=255 msel=NoSuchSignal mxc=1\n");
+    dashResolve(c, db);
+
+    ck("the selector named by hand resolves to a signal of its own message",
+       txOverrideSelector(c.tx[0], db) >= 0 &&
+       strcmp(db.sig[txOverrideSelector(c.tx[0], db)].name, "Cmd_Op") == 0);
+    ck("two payloads under different codes stay under different codes",
+       c.tx[0].muxCode == 1 && c.tx[1].muxCode == 16);
+
+    /* A file that declares its own M wins: it is the better place to say it,
+       and two answers would be one too many. */
+    ck("an override on a message the file already multiplexes is dropped",
+       c.tx[2].muxSel[0] == '\0' && c.tx[2].muxCode == -1, c.tx[2].muxSel);
+    /* And an override written against some other frame map stops being obeyed
+       rather than putting a code into bits that are not the selector's. */
+    ck("an override naming a signal this map does not have is dropped",
+       c.tx[3].muxSel[0] == '\0' && c.tx[3].muxCode == -1, c.tx[3].muxSel);
+
+    /* The mechanism buildSignalFrame() uses, end to end: the selector as raw
+       bits, then the payload through its own scaling, then read both back the
+       way the ECU would. */
+    const int16_t selIdx = txOverrideSelector(c.tx[1], db);
+    if (selIdx >= 0 && c.tx[1].sig >= 0) {
+      const DbcSignal &sel = db.sig[selIdx];
+      const DbcSignal &pay = db.sig[c.tx[1].sig];
+      uint8_t data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+      ck("the selector is written from the override's code",
+         dbcInsertBits(data, 8, sel.startBit, sel.bits, sel.intel != 0,
+                       (uint64_t)c.tx[1].muxCode));
+      DbcEncoded e = dbcEncodeSignal(pay, 1.5, data, 8);
+      ck("the payload is written", e.ok);
+      ck("the ECU would read opcode 16",
+         dbcExtractBits(data, 8, sel.startBit, sel.bits, sel.intel != 0,
+                        nullptr) == 16,
+         std::to_string((unsigned long long)dbcExtractBits(
+           data, 8, sel.startBit, sel.bits, sel.intel != 0, nullptr)));
+    }
+
+    /* A selector with no code cannot build a frame, so it is not an override. */
+    DashConfig h;
+    dashReset(h);
+    feed(h, "send 0 label=Val sig=ABS_Cmd.Cmd_Val lo=0 hi=255 msel=Cmd_Op\n");
+    dashResolve(h, db);
+    ck("a selector with no code is not an override",
+       txOverrideSelector(h.tx[0], db) < 0);
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);

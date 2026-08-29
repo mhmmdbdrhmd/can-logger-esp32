@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased
+
+### The unit is the frame
+
+The rule that survived every rewrite of this section: **a frame is one message,
+and - when the message is multiplexed - one selector code.** Its values are
+added, removed and sent together, under one button.
+
+That is not a policy, it is what a CAN frame is. Eight bytes leave the logger
+whether or not somebody typed all of them, so the page no longer pretends one
+signal of a frame can be sent by itself.
+
+The correction from the last release is that a multiplexed message holds
+*several* frames, and they are separate things. `ABS_Cmd` with six opcodes is
+now six boxes and six buttons, not one box and one press that emitted six
+frames. And `Diagnostics`, whose `Page 0` carries `SupplyVoltage` **and**
+`BoardTemp`, is two boxes of two: you cannot have one of those without the
+other, because one frame carries both fields and sending one alone asserts a
+value for the other that nobody chose.
+
+### Multiplexing you can declare yourself
+
+For a `.dbc` that multiplexes in fact and does not admit it - payloads on the
+same bits, an opcode in front of them, no marker anywhere - the setup sheet now
+offers a picker on the message: **which signal selects**. Choosing it drops the
+selector out of the value list (it is written for you from then on) and gives
+every remaining value a **selector code** field.
+
+Both halves are required. The previous release inferred multiplexing from "more
+than one signal is set up", which was a guess dressed up as a rule: it grouped
+the signals but could not say what code each belonged to, so the frame went out
+under opcode 0 whatever the payload. Knowing that `Cmd_Op` selects does not say
+that `Cmd_Amp` means opcode 16, and nothing in the file can be read to find out.
+
+Stored as `msel=` and `mxc=` on the `send` lines. An override is dropped rather
+than half-obeyed when a later frame map has no signal of that name in the
+message, or declares its own `M` - the file wins.
+
+`group=` and `mux=1` are gone from what is written; both are still read from an
+older file and ignored.
+
+### A plain signal in a multiplexed message is refused, and says so
+
+A signal with no `m<code>` in a multiplexed message rides in *every* frame that
+message sends, so it belongs to no one selector code and this build has nowhere
+to put it. It is now left out of the sendable list and named, in the page and in
+`tools/check_dbc.py`, instead of quietly going out as zero under a code it does
+not belong to. Decoding is unaffected. Recorded in **Known issues** with what it
+costs and when it will bite - a counter or CRC the ECU checks.
+
+None of the 15 `.dbc` files this was developed against has one; the shape is
+normal in OEM and AUTOSAR-derived files.
+
+### Whole frames only
+
+Half a frame set up is a frame that still goes out, with the signals nobody
+configured as zeros. So choosing one signal by hand brings its whole frame with
+it, a frame that will not fit in the remaining room is not added at all rather
+than added in part, and a setup file written before this rule - or carried
+across to a map where the message has gained a signal - is completed on load and
+told to you.
+
+### Nothing is written until you ask
+
+The page used to write `/dash.cfg` on a timer after every edit, so laying out a
+dashboard wrote the file a dozen times and a half-finished setup was the one on
+the card. Editing now happens in the page; **Save to device** writes it once, the
+button carries a dot while there is something unsaved, and leaving the page with
+unsaved changes asks first.
+
+`customize.py` and `tools/preview_dashboard.py` follow the same rule and one
+more: **they no longer pair a `.cfg` with a `.dbc` by themselves.** Loading a
+frame map at a desk leaves nothing behind - no file appears beside the map you
+opened, and the page does not come up on a setup you did not ask for. `--cfg`
+names a file to start from and is written only on Save; `--cfg-dir` is gone.
+
+### What you type stays typed
+
+The Send tab redraws whenever anything changes - arming, a poll, a frame
+arriving - and every redraw used to put the inputs back to their configured
+defaults, throwing away what had been typed. Each box now keeps its values
+across redraws and after sending, with a **Reset** to put them back. Kept in the
+page only; reloading clears it and nothing reaches the logger.
+
 ## v1.1.1
 
 Seven bugs in v1.1.0. The worst of them silently deleted work.

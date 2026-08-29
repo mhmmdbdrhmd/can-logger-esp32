@@ -266,9 +266,25 @@ input[type=checkbox]{width:auto;accent-color:var(--acc)}
    stays on the first line with the name, instead of being pushed to a third. */
 .txgroup .ghead{align-items:center}
 .txgroup .ghead span{flex:1 1 240px}
-.txgroup .ghead select.gkind{width:auto;margin:0 0 0 auto;padding:6px 10px;
-  font-size:12px}
-.txgroup .ghead select.gkind + button{margin-left:8px}
+/* A message that holds several frames. The outer box is only a container, so it
+   is drawn flatter than the frames inside it - otherwise two nested boxes of
+   equal weight read as two separate things to press. */
+.msgbox{background:transparent;border-style:dashed}
+.msgbox > .sendgroup{margin:8px 0;background:var(--sunk);border-style:solid}
+.msgbox > .ghead b{color:var(--acc)}
+/* Naming the selector by hand: a control on the message, not on a frame. */
+.muxctl{display:flex;align-items:center;gap:8px;margin:0 0 0 auto}
+.muxctl select{width:auto;padding:6px 10px;font-size:12px}
+.muxctl .sub{font-size:12px;color:var(--dim)}
+.muxctl button{width:auto;margin:0;padding:7px 12px;font-size:12px}
+/* Send takes the room; Reset only undoes typing, so it sits beside it at the
+   width of its own label rather than claiming a row of its own. */
+.gacts{display:flex;gap:10px;align-items:stretch;margin-top:12px}
+.gacts > button{margin:0}
+.gacts > button.pri{flex:1 1 auto}
+.gacts > button.quiet{flex:0 0 auto;width:auto;padding:0 18px;font-size:13px;
+  color:var(--dim);background:transparent}
+.gacts > button.quiet:hover{color:var(--fg);border-color:var(--dim)}
 .sendgroup .sendrow{border-bottom:1px dashed #1b212b}
 .sendgroup .sendrow:last-of-type{border-bottom:0}
 .sendrow .lbl em{font-style:normal;color:var(--acc)}
@@ -444,6 +460,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
   <!-- then whatever this operator decided matters -->
   <div class="bar" id="viewbar" style="margin-top:16px">
     <button id="customize">Customize dashboard</button>
+    <button id="savecfg" class="savebtn">Save to device</button>
     <div class="spacer"></div>
     <span class="sub" id="dashnote">&nbsp;</span>
   </div>
@@ -461,6 +478,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <button id="fillbus">Fill from bus</button>
     <button id="clearcfg" class="warn">Clear all</button>
     <div class="spacer"></div>
+    <button id="savecfg2" class="savebtn">Save to device</button>
     <button id="donedit" class="pri">Done</button>
   </div>
 
@@ -861,9 +879,16 @@ function parseCfg(text){
           style: p.style || 'number', choices: p.choices || '',
           id: p.id || '', data: p.data || '', ext: p.ext === '1' ? 1 : 0,
           cyclic: numOr(p.cyclic, 0),
-          mux: p.mux === '1' ? 1 : 0,
+          /* The manual override: which signal of this message selects the
+             payload, and which code this value travels under. Both or
+             neither - a selector with no code cannot build a frame. */
+          msel: p.msel || '',
+          mxc: p.mxc === undefined ? null : (parseInt(p.mxc, 10) || 0),
           raw: p.id !== undefined || p.data !== undefined
         };
+        /* 'mux=1' is what an earlier version wrote to mark a value as one
+           payload of a multiplexed message. The message name and the frame map
+           say that now, so it is read and not written back. */
       }
     }
   });
@@ -913,7 +938,10 @@ function dumpCfg(){
       s += ' style=' + (t.style || 'number');
       if(t.choices) s += ' choices=' + quote(t.choices);
     }
-    if(t.mux)    s += ' mux=1';
+    if(t.msel){
+      s += ' msel=' + quote(t.msel) + ' mxc='
+         + ((t.mxc === null || t.mxc === undefined) ? 0 : Math.round(t.mxc));
+    }
     if(t.cyclic) s += ' cyclic=' + Math.round(t.cyclic);
     out.push(s);
   });
@@ -1684,20 +1712,43 @@ function pollLog(){
 }
 
 /* ---- saving ------------------------------------------------------------ */
-var saveTimer = null;
+/* Nothing is written to the card until somebody asks for it.
+ *
+ * Every edit used to schedule a write, so laying out a dashboard wrote the file
+ * a dozen times and a half-finished setup was the one on the card. Editing now
+ * happens in the page and the card is written by Save to device, once. What is
+ * not saved is lost by reloading, which is the point: it is also how you throw
+ * an experiment away. */
+var UNSAVED = false;
 function markDirty(){
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveCfg, 1200);
+  UNSAVED = true;
+  paintSaveState();
+}
+function paintSaveState(){
+  Array.prototype.forEach.call(document.querySelectorAll('.savebtn'),
+    function(b){
+      b.classList.toggle('pri', UNSAVED);
+      b.textContent = UNSAVED ? 'Save to device •' : 'Save to device';
+      b.title = UNSAVED
+        ? 'Changes are in this page only — write them to the logger'
+        : 'Nothing has changed since the last save';
+    });
 }
 function saveCfg(){
-  clearTimeout(saveTimer);
   return fetch('/api/dash/cfg', {method:'POST', body:dumpCfg()})
     .then(function(r){ return r.json(); })
     .then(function(d){
       GEN = d.gen;
-      if(!d.ok) toast('Not saved', 'The logger could not store the layout', 'bad');
-      else if(d.missing) toast('Saved',
+      if(!d.ok){
+        toast('Not saved', 'The logger could not store the layout', 'bad');
+        return;
+      }
+      UNSAVED = false;
+      paintSaveState();
+      if(d.missing) toast('Saved',
         d.missing + ' cell(s) name a signal this frame map does not have', 'bad');
+      else toast('Saved', 'The logger will come up with this after a restart',
+                 'ok');
     })
     .catch(function(){ toast('Not saved', 'The logger did not answer', 'bad'); });
 }
@@ -1726,7 +1777,7 @@ function setEdit(on){
   if(on) loadDbc();
   renderGrid();
   startPolls();
-  if(!on) saveCfg();
+  if(!on) markDirty();
 }
 function step(which, by){
   var lim = which === 'cols' ? 6 : 8;
@@ -2250,8 +2301,33 @@ function txRange(t){
 /* The input a value is picked with. This is the part worth getting right: a
    tyre size is not a number somebody should be typing next to a running
    machine, it is one of the four sizes the fleet uses. */
-function buildInput(t){
+/* What is currently in each Send input, kept across re-draws.
+ *
+ * The Send tab is rebuilt whenever anything about the logger changes - arming,
+ * a poll, a frame arriving - and every rebuild used to put the inputs back to
+ * the values they were set up with, throwing away whatever had been typed. It
+ * also meant that after sending a frame the boxes forgot what had just gone
+ * out, which for a multiplexed frame is the one thing worth remembering: the
+ * whole frame is written every time, so the values you did not touch are as
+ * much a part of the command as the one you did.
+ *
+ * So a value that has been typed or sent stays put. It is kept in the page and
+ * nowhere else: reloading gives a clean slate, and so does the Reset on each
+ * frame. Nothing is written to the logger by remembering it. */
+var TXVAL = {};
+
+function txCur(t, i){
+  var v = TXVAL[i];
+  return (v === undefined || !isFinite(v)) ? t.preset : v;
+}
+
+/* The input a value is picked with. This is the part worth getting right: a
+   tyre size is not a number somebody should be typing next to a running
+   machine, it is one of the four sizes the fleet uses. */
+function buildInput(t, i){
   var wrap = el('div', 'inp');
+  var cur = txCur(t, i);
+  function keep(v){ var n = parseFloat(v); if(isFinite(n)) TXVAL[i] = n; }
 
   function options(list){
     var sel = el('select');
@@ -2259,9 +2335,10 @@ function buildInput(t){
     list.forEach(function(o){
       var e2 = el('option', null, o.l);
       e2.value = o.v;
-      if(Math.abs(o.v - t.preset) < 1e-9) e2.selected = true;
+      if(Math.abs(o.v - cur) < 1e-9) e2.selected = true;
       sel.appendChild(e2);
     });
+    sel.onchange = function(){ keep(sel.value); };
     wrap.appendChild(sel);
     return wrap;
   }
@@ -2270,7 +2347,7 @@ function buildInput(t){
     var s = findSig(t.sig);
     var labels = (s && s.v && s.v.length) ? s.v : null;
     if(labels){
-      return options(labels.map(function(l, i){ return {v:i, l:l}; }));
+      return options(labels.map(function(l, k){ return {v:k, l:l}; }));
     }
     /* The frame map has no labels for this signal after all - fall through to
        a plain number rather than showing an empty list. */
@@ -2284,12 +2361,13 @@ function buildInput(t){
     var hidden = el('input');
     hidden.type = 'hidden';
     hidden.dataset.role = 'value';
-    hidden.value = t.preset;
+    hidden.value = cur;
     two.slice(0, 2).forEach(function(o){
-      var b = el('button', Math.abs(o.v - t.preset) < 1e-9 ? 'on' : '', o.l);
+      var b = el('button', Math.abs(o.v - cur) < 1e-9 ? 'on' : '', o.l);
       b.dataset.opt = o.v;
       b.onclick = function(){
         hidden.value = o.v;
+        keep(o.v);
         Array.prototype.forEach.call(seg.children, function(x){
           x.classList.toggle('on', x === b);
         });
@@ -2304,11 +2382,12 @@ function buildInput(t){
     rng.type = 'range';
     rng.min = t.lo; rng.max = t.hi;
     rng.step = t.step || 'any';
-    rng.value = t.preset;
+    rng.value = cur;
     rng.dataset.role = 'value';
-    var out = el('div', 'rv', fmtVal(t.preset, t.dec === null ? 2 : t.dec) +
+    var out = el('div', 'rv', fmtVal(cur, t.dec === null ? 2 : t.dec) +
                               (t.unit ? ' ' + t.unit : ''));
     rng.oninput = function(){
+      keep(rng.value);
       out.textContent = fmtVal(parseFloat(rng.value),
                                t.dec === null ? 2 : t.dec) +
                         (t.unit ? ' ' + t.unit : '');
@@ -2322,8 +2401,9 @@ function buildInput(t){
   inp.type = 'number';
   inp.step = t.step || 'any';
   inp.min = t.lo; inp.max = t.hi;
-  inp.value = t.preset;
+  inp.value = cur;
   inp.dataset.role = 'value';
+  inp.oninput = function(){ keep(inp.value); };
   wrap.appendChild(inp);
   wrap.appendChild(el('div', 'u', t.unit || ''));
   return wrap;
@@ -2341,8 +2421,6 @@ function renderSend(){
   /* One frame, one Send button. Which values share a frame is txUnits()' answer
      and nobody else's - the editor boxes them by exactly the same call, so the
      two tabs cannot say different things about the same set of values. */
-  var units = txUnits(CFG.tx);
-
   function valueRow(i, withSend){
     var t = CFG.tx[i];
     var row = el('div', 'sendrow');
@@ -2350,12 +2428,14 @@ function renderSend(){
 
     var lbl = el('div', 'lbl', t.label);
     var sub = el('small', null, txRange(t));
-    var mn = muxNote(t.sig);
+    /* Only on a row that stands alone. Inside a frame's box the header has
+       already said which code the whole box goes out under. */
+    var mn = withSend ? muxNote(t.sig) : '';
     if(mn) sub.appendChild(el('em', null, ' · ' + mn));
     lbl.appendChild(sub);
     row.appendChild(lbl);
 
-    if(!t.raw) row.appendChild(buildInput(t));
+    if(!t.raw) row.appendChild(buildInput(t, i));
 
     if(withSend){
       var send = el('button', null, 'Send');
@@ -2372,21 +2452,55 @@ function renderSend(){
     return row;
   }
 
-  units.forEach(function(u){
-    if(u.ids.length < 2){ box.appendChild(valueRow(u.ids[0], true)); return; }
+  /* One frame's box: its rows, one Send, and a Reset for what has been typed
+     into it. A single-signal frame standing on its own is a bare row - a box
+     around one thing says nothing. */
+  function unitBox(u, titled){
+    if(u.ids.length < 2 && !titled) return valueRow(u.ids[0], true);
 
     var wrap = el('div', 'sendgroup');
     wrap.dataset.ids = u.ids.join(',');
     var head = el('div', 'ghead');
-    head.appendChild(el('b', null, msgOf(CFG.tx[u.ids[0]].sig)));
+    head.appendChild(el('b', null, titled ? txUnitTitle(CFG.tx, u) : u.msg));
     head.appendChild(el('span', null, txUnitNote(CFG.tx, u)));
     wrap.appendChild(head);
     u.ids.forEach(function(i){ wrap.appendChild(valueRow(i, false)); });
 
-    var send = el('button', 'pri', 'Send all ' + u.ids.length);
-    send.dataset.role = 'sendgroup';
-    wrap.appendChild(send);
-    box.appendChild(wrap);
+    var acts = el('div', 'gacts');
+    var send = el('button', 'pri',
+                  u.ids.length > 1 ? 'Send all ' + u.ids.length : 'Send');
+    send.dataset.role = 'sendunit';
+    acts.appendChild(send);
+
+    if(u.ids.length === 1 && CFG.tx[u.ids[0]].cyclic){
+      var cyc = el('button', 'cyc', 'Repeat');
+      cyc.dataset.role = 'cycunit';
+      acts.appendChild(cyc);
+    }
+
+    var rst = el('button', 'quiet', 'Reset');
+    rst.dataset.role = 'reset';
+    rst.title = 'Put these inputs back to the values they were set up with';
+    acts.appendChild(rst);
+
+    wrap.appendChild(acts);
+    return wrap;
+  }
+
+  /* A message that holds several frames is drawn as one outer box with its
+     frames inside it, so ABS_Cmd reads as one message carrying six commands
+     rather than six unrelated things that share a name by accident. */
+  txFrames(CFG.tx).forEach(function(fr){
+    if(fr.units.length < 2){ box.appendChild(unitBox(fr.units[0], false)); return; }
+
+    var outer = el('div', 'sendgroup msgbox');
+    var oh = el('div', 'ghead');
+    oh.appendChild(el('b', null, fr.msg));
+    oh.appendChild(el('span', null, 'multiplexed — ' + fr.units.length
+      + ' frames on one identifier, each sent and removed on its own'));
+    outer.appendChild(oh);
+    fr.units.forEach(function(u){ outer.appendChild(unitBox(u, true)); });
+    box.appendChild(outer);
   });
 
   q('sendnote').textContent = 'Values are written to the bus and appear in the '
@@ -2400,54 +2514,74 @@ function msgOf(ref){
   return dot < 0 ? String(ref || '') : ref.slice(0, dot);
 }
 
-/* MULTIPLEXED, OR NOT. There is nothing else.
+/* THE UNIT IS THE FRAME.
 
-   What leaves the logger is a frame, and a frame is one message. Every value
-   set up against that message is part of it, so they are one thing: added
-   together, removed together, sent together, under one button.
+   What leaves the logger is a frame. For a multiplexed message a frame is the
+   message AND one selector code; for anything else it is the message. The
+   values of a frame are added, removed and sent together, under one button,
+   because a frame's bytes all go out whether or not somebody typed them.
 
-   A sendable frame is MULTIPLEXED when either
-     - the .dbc says so, with an M / m<code> marker, or
-     - more than one signal of it has been set up - because then one press has
-       to write all of them, and writing one on its own would send the others
-       as whatever happened to be in the frame.
+   A message is MULTIPLEXED when the .dbc marks it - an M selector and m<code>
+   payloads - or when the setup file says so, which is the manual override for
+   a file that multiplexes in fact and does not admit it. Nothing is inferred
+   from the bit layout: a guess here writes a real command to a real ECU.
 
-   The second half of that rule is there because a .dbc that is multiplexed in
-   fact and does not say so is ordinary: overlapping signals, no marker, and
-   nothing in the file to infer it from. Treating any frame with more than one
-   value in it as one indivisible thing needs no guess and no switch to set.
+   So one message can hold several frames. ABS_Cmd holds six, one per opcode,
+   and they are six separate things to send and to delete. Diagnostics holds
+   two, each with two signals in it.
 
    Both tabs ask these functions and nobody else, so a box in the editor and a
    Send button on the Send tab cannot mean different things. */
-function muxCodeOf(ref){
-  if(!ref || !DBC.m.length) return null;
-  var mn = msgOf(ref), code = null;
+
+/* The selector of a message: the file's own M signal, else the one the setup
+   named by hand. '' when the message is not multiplexed at all. */
+function muxSelectorOf(name, map){
+  var out = '';
+  DBC.m.forEach(function(m){
+    if(m.n !== name) return;
+    m.s.forEach(function(sg){ if(sg.mx === -2) out = sg.n; });
+  });
+  if(out || !map) return out;
+  Object.keys(map).forEach(function(k){
+    var t = map[k];
+    if(t && t.sig && t.msel && msgOf(t.sig) === name) out = t.msel;
+  });
+  return out;
+}
+
+/* The selector code this value travels under: the file's own m<code>, else the
+   code the override gave it. null when its message is not multiplexed, which
+   is what makes the whole message one frame. */
+function muxCodeOf(t){
+  if(!t || !t.sig) return null;
+  var ref = t.sig, mn = msgOf(ref), code = null;
   DBC.m.forEach(function(m){
     if(m.n !== mn || !m.mux) return;
     m.s.forEach(function(sg){
       if(m.n + '.' + sg.n === ref && sg.mx >= 0) code = sg.mx;
     });
   });
-  return code;
+  if(code !== null) return code;
+  /* The override. Read even with no frame map loaded, which is the case the
+     values carry it for: opening the page before a .dbc reaches the card. */
+  if(t.msel && t.mxc !== null && t.mxc !== undefined && isFinite(t.mxc)) {
+    return +t.mxc;
+  }
+  return null;
 }
 
-function muxSelectorOf(name){
-  var out = '';
-  DBC.m.forEach(function(m){
-    if(m.n !== name) return;
-    m.s.forEach(function(sg){ if(sg.mx === -2) out = sg.n; });
-  });
-  return out;
-}
-
-/* One frame, one unit: the message. A one-off raw frame names no message and
-   is only ever itself. */
+/* One frame, one unit. A one-off raw frame names no message and is only ever
+   itself. */
 function txUnitKey(map, i){
   var t = map[i];
-  return (t && t.sig) ? 'm' + msgOf(t.sig) : 'i' + i;
+  if(!t || !t.sig) return 'i' + i;
+  var c = muxCodeOf(t);
+  /* '#' cannot occur in a DBC name, so one message's code can never
+     collide with another message that happens to be named after it. */
+  return 'm' + msgOf(t.sig) + (c === null ? '' : '#' + c);
 }
 
-/* [{key, ids, mux}], in the order the values were set up. */
+/* [{key, ids, msg, code, mux}], in the order the values were set up. */
 function txUnits(map){
   var order = [], at = {};
   Object.keys(map).map(Number).sort(function(a, b){ return a - b; })
@@ -2460,24 +2594,43 @@ function txUnits(map){
     });
   order.forEach(function(u){
     var t = map[u.ids[0]];
-    var mn = (t && t.sig) ? msgOf(t.sig) : '';
-    /* Declared by the file, recorded on the value when the file was there, or
-       simply more than one signal in the frame. */
-    u.mux = u.ids.length > 1 || !!(t && t.mux) || (!!mn && isMuxMsg(mn));
+    u.msg  = (t && t.sig) ? msgOf(t.sig) : '';
+    u.code = muxCodeOf(t);
+    u.mux  = u.code !== null;
   });
   return order;
 }
 
+/* The same units, gathered under the message they came from. A multiplexed
+   message holding several codes is drawn as one outer box with a frame inside
+   it per code, so the page never suggests that ABS_Cmd is one thing to send
+   when it is six. */
+function txFrames(map){
+  var out = [], at = {};
+  txUnits(map).forEach(function(u){
+    var k = u.msg || u.key;
+    if(at[k] === undefined){ at[k] = out.length; out.push({msg:u.msg, units:[]}); }
+    out[at[k]].units.push(u);
+  });
+  return out;
+}
+
+/* What one frame calls itself: the message, and the selector code when the
+   message holds more than one. */
+function txUnitTitle(map, u){
+  if(u.code === null) return u.msg;
+  var sel = muxSelectorOf(u.msg, map);
+  return (sel ? sel : 'code') + ' = ' + u.code;
+}
+
 /* What the box says about itself. */
 function txUnitNote(map, u){
-  var t  = map[u.ids[0]];
-  var mn = msgOf(t.sig || '');
-  var sel = muxSelectorOf(mn);
-  return 'multiplexed — these ' + u.ids.length + ' signals are one frame: '
-       + 'added, sent and removed together'
-       + (sel ? '. The frame map multiplexes it with ' + sel
-                + ', so each selector code goes out as its own frame'
-              : '');
+  var n = u.ids.length;
+  if(n > 1) return n + ' signals are one frame: added, sent and removed together';
+  /* With one signal in it there is nothing to explain that the title has not
+     already said - and a box captioned "sent with Command = 16" under a title
+     reading "Command = 16" is noise. */
+  return u.code === null ? 'one signal, one frame' : '';
 }
 
 /* A signal that only exists under one multiplexor code cannot be written
@@ -2506,10 +2659,14 @@ function paintSendState(){
   Array.prototype.forEach.call(q('sendlist').querySelectorAll('button'),
     function(b){
       if(b.dataset.opt !== undefined) return;      /* a two-state choice */
-      b.disabled = !live;
-      if(b.dataset.role === 'cyc'){
-        var row = b.closest('.sendrow');
-        var on = !!(CYC & (1 << (+row.dataset.cmd)));
+      /* Reset only puts the inputs back to what they were set up with. It
+         writes nothing to the bus, so arming has no say over it. */
+      b.disabled = (b.dataset.role === 'reset') ? false : !live;
+      if(b.dataset.role === 'cyc' || b.dataset.role === 'cycunit'){
+        var host = b.closest('.sendrow');
+        var idx  = host ? +host.dataset.cmd
+                        : +b.closest('.sendgroup').dataset.ids.split(',')[0];
+        var on = !!(CYC & (1 << idx));
         b.classList.toggle('on', on);
         b.textContent = on ? 'Repeating' : 'Repeat';
       }
@@ -2528,36 +2685,55 @@ q('sendlist').addEventListener('click', function(e){
   var b = e.target.closest('button');
   if(!b || b.disabled || b.dataset.opt !== undefined) return;
 
-  if(b.dataset.role === 'sendgroup'){
+  /* A frame's own box. Everything in it is one frame - one message under one
+     selector code - so it is one request, and the logger writes every one of
+     those signals into the eight bytes that go out. That is the whole reason
+     they share a button: the bytes leave together whether or not somebody
+     typed them, so the page refuses to pretend one of them can be sent by
+     itself. */
+  if(b.dataset.role === 'sendunit' || b.dataset.role === 'reset'){
     var wrap = b.closest('.sendgroup');
     var ids = wrap.dataset.ids.split(',');
 
-    /* One request per SELECTOR CODE. Everything in one code is one frame, and
-       the logger queues those back to back so nothing can slip between them
-       and split it. Two codes are two frames by definition - the selector can
-       only hold one value and the payload bytes mean something different under
-       each - so a message multiplexed into several codes goes out as several
-       frames, in order, from the one press. A plain message has one code (none)
-       and is therefore exactly one request, as before. */
-    var byCode = {}, order = [];
-    ids.forEach(function(i){
-      var c = 'c' + muxCodeOf((CFG.tx[+i] || {}).sig);
-      if(!byCode[c]){ byCode[c] = []; order.push(c); }
-      byCode[c].push(i);
+    if(b.dataset.role === 'reset'){
+      ids.forEach(function(i){ delete TXVAL[+i]; });
+      renderSend();
+      return;
+    }
+
+    var vals = ids.map(function(i){
+      var v = rowValue(wrap.querySelector('.sendrow[data-cmd="' + i + '"]'));
+      TXVAL[+i] = v;
+      return v;
     });
 
-    var chain = Promise.resolve();
-    order.forEach(function(c){
-      chain = chain.then(function(){
-        var part = byCode[c];
-        var vals = part.map(function(i){
-          return rowValue(wrap.querySelector('.sendrow[data-cmd="' + i + '"]'));
-        });
-        return postForm('/api/tx/send',
-                        {cmds:part.join(','), values:vals.join(',')});
-      });
+    /* Out of range is refused here rather than clamped on the logger, because
+       a command silently changed on the way out is worse than one refused. */
+    var bad = null;
+    ids.forEach(function(i, k){
+      var t2 = CFG.tx[+i];
+      if(bad || !t2 || t2.raw) return;
+      if(t2.style === 'choice' || t2.style === 'enum' || t2.style === 'toggle') return;
+      if(!isFinite(vals[k]) || vals[k] < t2.lo || vals[k] > t2.hi) bad = t2;
     });
-    chain.then(pollDash);
+    if(bad){
+      toast('Not sent', bad.label + ' must be between ' + bad.lo + ' and '
+            + bad.hi, 'bad');
+      return;
+    }
+
+    postForm('/api/tx/send', {cmds:ids.join(','), values:vals.join(',')})
+      .then(pollDash);
+    return;
+  }
+
+  if(b.dataset.role === 'cycunit'){
+    var w2 = b.closest('.sendgroup');
+    var only = +w2.dataset.ids.split(',')[0];
+    var cv = rowValue(w2.querySelector('.sendrow[data-cmd="' + only + '"]'));
+    TXVAL[only] = cv;
+    postForm('/api/tx/cyclic', {cmd:only, on:(CYC & (1 << only)) ? 0 : 1,
+                                value:cv}).then(pollDash);
     return;
   }
 
@@ -2565,6 +2741,7 @@ q('sendlist').addEventListener('click', function(e){
   var i = +row.dataset.cmd, t = CFG.tx[i];
   var inp = row.querySelector('[data-role=value]');
   var v = inp ? parseFloat(inp.value) : 0;
+  if(isFinite(v)) TXVAL[i] = v;
 
   if(b.dataset.role === 'send'){
     if(!t.raw && t.style !== 'choice' && t.style !== 'enum' &&
@@ -2582,6 +2759,123 @@ q('sendlist').addEventListener('click', function(e){
 /* ---- setting the sendable values up ------------------------------------ */
 var TXED = {};
 
+/* THE MANUAL OVERRIDE.
+ *
+ * A .dbc can be multiplexed in fact and not say so: payload signals sitting on
+ * the same bits, an opcode byte in front of them, and no M or m<code> marker
+ * anywhere in the file. The old ABS map is exactly that. Nothing in the file
+ * can be read to infer it - overlapping bits are a hint a person can follow,
+ * not a declaration - and guessing here writes a real command to a real ECU,
+ * so the page asks instead.
+ *
+ * Two things are needed and neither can be skipped: WHICH signal is the
+ * selector, and WHICH CODE each of the others travels under. A selector on its
+ * own is useless - knowing that Cmd_Op selects does not say that Cmd_Amp means
+ * opcode 16 - so the codes are asked for one signal at a time.
+ *
+ * The right fix is still to put the markers in the .dbc. This is for the file
+ * you have rather than the file you want. */
+function overrideOffered(map, fr){
+  if(!fr.msg || isMuxMsg(fr.msg)) return false;      /* the file already said */
+  var n = 0;
+  Object.keys(map).forEach(function(k){
+    var t = map[k];
+    if(t && t.sig && msgOf(t.sig) === fr.msg) n++;
+  });
+  return n > 1 || overrideSelector(map, fr.msg) !== '';
+}
+
+function overrideSelector(map, msg){
+  var out = '';
+  Object.keys(map).forEach(function(k){
+    var t = map[k];
+    if(t && t.sig && t.msel && msgOf(t.sig) === msg) out = t.msel;
+  });
+  return out;
+}
+
+/* Turning it on removes the selector's own value: the logger writes it from
+   the code of whatever payload is being sent, which is the only way it can be
+   right every time - exactly as it does for a declared M. */
+function overrideOn(msg, sel){
+  Object.keys(TXED).forEach(function(k){
+    var t = TXED[k];
+    if(!t || !t.sig || msgOf(t.sig) !== msg) return;
+    if(sigName(t.sig) === sel){ delete TXED[k]; return; }
+    t.msel = sel;
+    if(t.mxc === null || t.mxc === undefined || !isFinite(t.mxc)) t.mxc = 0;
+  });
+}
+
+function overrideOff(msg){
+  Object.keys(TXED).forEach(function(k){
+    var t = TXED[k];
+    if(!t || !t.sig || msgOf(t.sig) !== msg) return;
+    t.msel = ''; t.mxc = null;
+  });
+  /* The frame is a plain message again, so it has to be whole again - the
+     signal that was acting as the selector comes back as a value. */
+  DBC.m.forEach(function(m){ if(m.n === msg) fillFromMessage(m); });
+}
+
+/* The control on the message's own header. */
+function muxOverrideControl(map, fr){
+  if(!overrideOffered(map, fr)) return null;
+  var cur = overrideSelector(map, fr.msg);
+
+  var wrap = el('div', 'muxctl');
+  if(!cur){
+    /* A picker rather than a switch, because there is no sensible default: the
+       selector is a fact about the ECU that only the person in front of it
+       knows. Choosing one is what turns the override on. */
+    var sel = el('select');
+    sel.title = 'Say the message is multiplexed when the frame map does not, '
+              + 'by naming the signal that selects the payload';
+    var none = el('option', null, 'not multiplexed');
+    none.value = '';
+    sel.appendChild(none);
+    frameSignalNames(map, fr.msg).forEach(function(n){
+      var o = el('option', null, n + ' selects');
+      o.value = n;
+      sel.appendChild(o);
+    });
+    sel.onchange = function(){
+      if(!sel.value) return;
+      overrideOn(fr.msg, sel.value);
+      renderTxEdit();
+      toast('Multiplexed by hand', fr.msg + ' now sends ' + sel.value
+            + ' with every frame — give each value the code it belongs to',
+            'ok');
+    };
+    wrap.appendChild(sel);
+    return wrap;
+  }
+
+  wrap.appendChild(el('span', 'sub', 'selector ' + cur + ' — set by hand'));
+  var off = el('button', null, 'Not multiplexed');
+  off.onclick = function(){ overrideOff(fr.msg); renderTxEdit(); };
+  wrap.appendChild(off);
+  return wrap;
+}
+
+/* Every signal the message could offer as a selector: what is set up, plus
+   what the frame map knows, so a signal that is only ever the selector can be
+   chosen without first being added as a value. */
+function frameSignalNames(map, msg){
+  var seen = {}, out = [];
+  Object.keys(map).forEach(function(k){
+    var t = map[k];
+    if(t && t.sig && msgOf(t.sig) === msg && !seen[sigName(t.sig)]){
+      seen[sigName(t.sig)] = 1; out.push(sigName(t.sig));
+    }
+  });
+  DBC.m.forEach(function(m){
+    if(m.n !== msg) return;
+    m.s.forEach(function(s){ if(!seen[s.n]){ seen[s.n] = 1; out.push(s.n); } });
+  });
+  return out;
+}
+
 function renderTxEdit(){
   var box = q('txeditlist');
   box.innerHTML = '';
@@ -2592,48 +2886,83 @@ function renderTxEdit(){
       'Nothing set up yet. Press "Add a value" below.'));
   }
 
-  /* Values that leave in one frame are boxed together, by exactly the call the
-     Send tab uses, because a box here and a Send button there have to mean the
-     same thing. They did not: this drew a multiplexed message as one
-     indivisible box while the Send tab handed every payload its own button. */
+  /* Boxed by exactly the call the Send tab uses, because a box here and a Send
+     button there have to mean the same thing. The unit is the frame: one
+     message, and one selector code when the message is multiplexed. A message
+     holding several codes gets an outer box around its frames. */
   var wraps = {}, unitOf = {};
-  txUnits(TXED).forEach(function(u){
-    u.ids.forEach(function(k){ unitOf[k] = u; });
+  var frames = txFrames(TXED);
+  frames.forEach(function(fr){
+    fr.units.forEach(function(u){
+      u.frame = fr;
+      u.ids.forEach(function(k){ unitOf[k] = u; });
+    });
   });
+
+  /* The outer box for a message that holds more than one frame, and the
+     manual-override control, which belongs to the message rather than to any
+     one frame inside it. */
+  /* An outer box only where there is genuinely something to contain: a message
+     holding more than one frame. With one frame the message and the frame are
+     the same thing, and drawing both would print the name twice - so the
+     override control goes on that frame's own header instead. */
+  var outers = {};
+  function outerFor(fr){
+    if(outers[fr.msg] !== undefined) return outers[fr.msg];
+    if(fr.units.length < 2) return (outers[fr.msg] = null);
+    var o = el('div', 'sendgroup msgbox');
+    var oh = el('div', 'ghead');
+    oh.appendChild(el('b', null, fr.msg));
+    oh.appendChild(el('span', null, 'multiplexed — ' + fr.units.length
+      + ' frames on one identifier'));
+    var ctl = muxOverrideControl(TXED, fr);
+    if(ctl) oh.appendChild(ctl);
+    o.appendChild(oh);
+    box.appendChild(o);
+    return (outers[fr.msg] = o);
+  }
 
   keys.forEach(function(i){
     var t = TXED[i];
     var card = el('div', 'txcard');
 
     var u     = unitOf[i];
-    var mname = t.sig ? msgOf(t.sig) : '';
-    var unit  = (u && u.ids.length > 1) ? u.ids : null;
+    var unit  = u ? u.ids : null;
+    var host  = u ? (outerFor(u.frame) || box) : box;
 
-    /* The box, built once for the first value in it. */
+    /* The frame's own box, built once for the first value in it. Everything in
+       it goes out in the same eight bytes, so it is removed as one thing: take
+       one signal out and the frame still goes out, carrying that signal as
+       whatever happens to be in those bits. */
     if(unit && !wraps[u.key]){
       var wrap = el('div', 'sendgroup txgroup');
       var gh = el('div', 'ghead');
-      gh.appendChild(el('b', null, mname));
+      gh.appendChild(el('b', null, u.frame.units.length > 1
+        ? txUnitTitle(TXED, u) : u.msg));
       gh.appendChild(el('span', null, txUnitNote(TXED, u)));
 
-      var gdel = el('button', null, 'Remove all ' + unit.length);
+      var gdel = el('button', null, unit.length > 1
+        ? 'Remove all ' + unit.length : 'Remove');
       gdel.onclick = function(){
         unit.forEach(function(k){ delete TXED[k]; });
         renderTxEdit();
       };
       gh.appendChild(gdel);
+      /* With no outer box there is nowhere else for it to live. */
+      if(u.frame.units.length < 2){
+        var ctl2 = muxOverrideControl(TXED, u.frame);
+        if(ctl2) gh.appendChild(ctl2);
+      }
       wrap.appendChild(gh);
-      box.appendChild(wrap);
+      host.appendChild(wrap);
       wraps[u.key] = wrap;
     }
 
     var head = el('div', 'head');
     head.appendChild(el('b', null, t.label || 'Untitled value'));
 
-    /* A Remove of its own only when the value IS the frame. Two values of one
-       message are one frame, and removing one of them leaves a frame that
-       still goes out - with the removed signal as whatever the bytes happen to
-       contain - which is the half-described command this exists to prevent. */
+    /* A Remove of its own only for a raw frame, which is only ever itself.
+       Everything else is removed with its frame, on the box above. */
     if(!unit){
       var del = el('button', null, 'Remove');
       del.onclick = function(){
@@ -2643,9 +2972,6 @@ function renderTxEdit(){
       head.appendChild(del);
     }
     card.appendChild(head);
-
-    /* What the set is gets said once, on the box's header, rather than being
-       repeated on every card inside it. */
 
     var f = el('div', 'fields');
     function field(lbl, key, type, span, attrs){
@@ -2688,9 +3014,16 @@ function renderTxEdit(){
 
     field('Name', 'label', 'text', 2);
 
+    /* Only what this logger can actually write. The selector of a multiplexed
+       message is not offered - it is written from the code of whatever payload
+       is being sent - and neither is a plain signal of a multiplexed message,
+       which this build cannot place because it belongs to every code at once
+       rather than to any one frame. */
     var sigs = [{v:'', l:'— choose a signal —'}];
     DBC.m.forEach(function(m){
       m.s.forEach(function(s){
+        if(m.mux && s.mx === -2) return;
+        if(m.mux && s.mx === -1) return;
         sigs.push({v:m.n + '.' + s.n,
                    l:m.n + '.' + s.n + (s.u ? '  (' + s.u + ')' : '')});
       });
@@ -2698,6 +3031,7 @@ function renderTxEdit(){
     select('Signal', 'txsig' + i, sigs, t.sig, function(v){
       t.sig = v;
       t.raw = false;
+      t.msel = ''; t.mxc = null;         /* an override belongs to the old one */
       var s = findSig(v);
       if(s){
         /* The input must stop where the signal does, so the bit limits win
@@ -2711,19 +3045,35 @@ function renderTxEdit(){
         if(s.v && s.v.length) t.style = 'enum';
         else if(s.b === 1)    t.style = 'toggle';
       }
-      /* Choosing one payload of a multiplexed frame by hand brings the rest
-         with it, for the same reason removing one takes the rest away. */
+      /* Choosing a signal by hand brings its whole frame with it, for the same
+         reason removing one takes the rest away: the frame's eight bytes go
+         out together, so half of it is not a thing anyone can set up. */
       var mn = msgOf(v);
-      /* On the card being edited too - fillFromMessage below skips refs that
-         are already set up, so this one would otherwise never be marked. */
-      t.mux = isMuxMsg(mn) ? 1 : 0;
-      if(isMuxMsg(mn)){
-        DBC.m.forEach(function(m2){
-          if(m2.n === mn) fillFromMessage(m2);
-        });
-      }
+      DBC.m.forEach(function(m2){ if(m2.n === mn) fillFromMessage(m2); });
       renderTxEdit();
     }, 2);
+
+    /* The code this value travels under, when the message was multiplexed by
+       hand. Without it the frame would go out under opcode 0 whatever the
+       payload, which is a command that looks sent and is not the one asked
+       for. Declared multiplexing needs no field - the map already says it. */
+    if(t.msel){
+      var codes = el('div');
+      codes.style.gridColumn = 'span 2';
+      var cid = 'txmxc' + i;
+      var cl = el('label', null, t.msel + ' is set to');
+      cl.setAttribute('for', cid);
+      codes.appendChild(cl);
+      var ci = el('input');
+      ci.id = cid; ci.type = 'number'; ci.min = 0; ci.step = 1;
+      ci.value = (t.mxc === null || t.mxc === undefined) ? 0 : t.mxc;
+      ci.oninput = function(){ t.mxc = parseInt(ci.value, 10) || 0; };
+      ci.onchange = function(){ renderTxEdit(); };
+      codes.appendChild(ci);
+      codes.appendChild(el('div', 'sub', 'the selector code this value is sent '
+        + 'under — values sharing a code share a frame'));
+      f.appendChild(codes);
+    }
 
     var sg = findSig(t.sig);
     var styles = [
@@ -2851,7 +3201,8 @@ function txFromSignal(ref, s){
   if(span > 0 && span / step > 2000) step = niceStep(span / 200);
   return {label:prettyName(ref), sig:ref, unit:s.u || '', lo:lo, hi:hi,
           step:step, preset:(lo <= 0 && hi >= 0) ? 0 : lo, dec:dec,
-          cyclic:0, raw:false, style:txStyleFor(s, span), choices:''};
+          cyclic:0, raw:false, style:txStyleFor(s, span), choices:'',
+          msel:'', mxc:null};
 }
 
 /* Is this message one whose payload depends on a selector? */
@@ -2863,30 +3214,84 @@ function isMuxMsg(name){
 
 /* Adds every signal of one message. Returns what it did, so the caller can
    report on one message or on all of them in one sentence. */
-function fillFromMessage(m){
-  var taken = {};
-  Object.keys(TXED).forEach(function(k){ taken[TXED[k].sig] = 1; });
+function fillFromMessage(m, map){
+  map = map || TXED;
+  var taken = {}, sel = overrideSelector(map, m.n);
+  Object.keys(map).forEach(function(k){ taken[map[k].sig] = 1; });
 
-  /* Every signal of the message becomes a value, and they are one frame by
-     virtue of being one message - there is nothing to group and nothing to
-     decide. The selector of a multiplexed message is never offered: the logger
-     writes it from the frame map whenever one of its payloads is sent, which
-     is the only way it can be right every time. */
-
-  var r = {added:0, full:false, selector:''};
+  /* Two signals of the message are never offered as values.
+     - The SELECTOR, declared or named by hand: the logger writes it from the
+       code of whatever payload is being sent, which is the only way it can be
+       right every time.
+     - A PLAIN signal of a multiplexed message: it rides in every frame the
+       message sends, so it belongs to no one selector code and this build has
+       nowhere to put it. Decoding still shows it; only writing is refused, and
+       the caller is told rather than left to find out on the bus. */
+  var r = {added:0, full:false, selector:'', plain:[]};
+  var want = [];
   m.s.forEach(function(s){
-    var ref = m.n + '.' + s.n;
-    if(s.mx === -2){ r.selector = s.n; return; }    /* the selector itself */
-    if(taken[ref]) return;
-    var i = 0;
-    while(TXED[i]) i++;
-    if(i >= MAXSEND){ r.full = true; return; }
-    var t = txFromSignal(ref, s);
-    /* Carried on the value, not looked up later: the Remove button has to know
-       these belong together even when no frame map is loaded to ask. */
-    t.mux = m.mux ? 1 : 0;
-    TXED[i] = t;
+    if(m.mux && s.mx === -2){ r.selector = s.n; return; }
+    if(sel && s.n === sel)   { r.selector = s.n; return; }
+    if(m.mux && s.mx === -1) { r.plain.push(s.n); return; }
+    if(taken[m.n + '.' + s.n]) return;
+    want.push(s);
+  });
+  if(!want.length) return r;
+
+  /* All of it or none of it. Half a frame set up is a frame that still goes
+     out, carrying the signals nobody configured as zeros - a command that
+     looks complete and is not. Better to add nothing and say why. */
+  var free = [];
+  for(var i = 0; i < MAXSEND && free.length < want.length; i++){
+    if(!map[i]) free.push(i);
+  }
+  if(free.length < want.length){ r.full = true; return r; }
+
+  want.forEach(function(s, k){
+    var t = txFromSignal(m.n + '.' + s.n, s);
+    if(sel){ t.msel = sel; t.mxc = 0; }
+    map[free[k]] = t;
     r.added++;
+  });
+  return r;
+}
+
+/* Every frame in a setup made whole again.
+ *
+ * The invariant is that a setup holds whole frames and never parts of one, and
+ * the page enforces it wherever it can. It cannot enforce it on a setup file
+ * written before the rule, nor on one carried across to a frame map where the
+ * message has since gained a signal. So on load the missing values are added
+ * at their own defaults, and a frame that cannot be completed in the room this
+ * build has is dropped whole rather than left half-described. */
+function completeFrames(map){
+  var r = {added:0, dropped:0, names:[]};
+  if(!DBC.m.length) return r;
+
+  var msgs = {};
+  Object.keys(map).forEach(function(k){
+    var t = map[k];
+    if(t && t.sig && !t.raw) msgs[msgOf(t.sig)] = 1;
+  });
+
+  Object.keys(msgs).forEach(function(name){
+    DBC.m.forEach(function(m){
+      if(m.n !== name) return;
+      var got = fillFromMessage(m, map);
+      if(got.added){
+        r.added += got.added;
+        if(r.names.indexOf(name) < 0) r.names.push(name);
+      }
+      if(got.full){
+        Object.keys(map).forEach(function(k){
+          if(map[k] && map[k].sig && msgOf(map[k].sig) === name){
+            delete map[k];
+            r.dropped++;
+          }
+        });
+        if(r.names.indexOf(name) < 0) r.names.push(name);
+      }
+    });
   });
   return r;
 }
@@ -2913,22 +3318,35 @@ function txFillFromMap(){
     list = [m];
   }
 
-  var added = 0, full = false, sel = '', names = [];
+  var added = 0, sel = '', names = [], short = [], plain = [];
   list.forEach(function(m){
     var r = fillFromMessage(m);
     added += r.added;
-    full = full || r.full;
     if(r.selector) sel = r.selector;
+    if(r.full) short.push(m.n);
     if(r.added) names.push(m.n);
+    r.plain.forEach(function(n){ plain.push(m.n + '.' + n); });
   });
 
   renderTxEdit();
-  if(full){
-    toast('Room ran out', added + ' added — this build stores ' + MAXSEND
-          + ' values in total', 'bad');
+  if(short.length){
+    toast('Room ran out', added + ' added. ' + short.join(', ') + ' would not '
+          + 'fit whole, and half a frame is not a command — this build stores '
+          + MAXSEND + ' values in total', 'bad');
+  } else if(plain.length && !added){
+    toast('Nothing to add', plain.join(', ') + ' ' + (plain.length > 1
+          ? 'are in every frame their message sends, under no selector code, '
+          : 'is in every frame its message sends, under no selector code, ')
+          + 'so this build cannot write ' + (plain.length > 1 ? 'them' : 'it')
+          + '. Decoding is unaffected', 'bad');
   } else if(!added){
     toast('Nothing to add', 'Everything those messages carry is already here',
           'ok');
+  } else if(plain.length){
+    toast('Filled, with one exception', added + ' value(s) added from '
+          + names.join(', ') + '. ' + plain.join(', ') + ' left out — in every '
+          + 'frame its message sends, under no selector code, so this build '
+          + 'cannot write it', 'bad');
   } else if(sel){
     toast('Filled from the frame map', added + ' value(s) added from '
           + names.join(', ') + '. ' + sel + ' is not in the list — it is '
@@ -2944,6 +3362,19 @@ function txFillFromMap(){
 function openTxEdit(){
   return loadDbc().then(function(){
     TXED = JSON.parse(JSON.stringify(CFG.tx));
+
+    /* A setup written before the whole-frame rule, or against a frame map that
+       has since changed, is made whole here rather than left to send frames
+       with unconfigured signals in them. */
+    var fix = completeFrames(TXED);
+    if(fix.added || fix.dropped){
+      toast('Frames completed', [
+        fix.added   ? fix.added + ' value(s) added' : '',
+        fix.dropped ? fix.dropped + ' dropped for want of room' : ''
+      ].filter(Boolean).join(', ') + ' — ' + fix.names.join(', ')
+        + ': a frame goes out whole, so it is set up whole',
+        fix.dropped ? 'bad' : 'ok');
+    }
 
     var sel = q('txfillmsg');
     sel.innerHTML = '';
@@ -3012,6 +3443,17 @@ q('tabs').addEventListener('click', function(e){
 
 q('customize').onclick = function(){ setEdit(true); };
 q('donedit').onclick   = function(){ setEdit(false); };
+q('savecfg').onclick   = saveCfg;
+q('savecfg2').onclick  = saveCfg;
+
+/* Editing lives in the page now, so leaving the page throws it away. Said once,
+   by the browser, rather than by writing the card behind somebody's back. */
+window.addEventListener('beforeunload', function(e){
+  if(!UNSAVED) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
 q('colplus').onclick   = function(){ step('cols', 1); };
 q('colminus').onclick  = function(){ step('cols', -1); };
 q('rowplus').onclick   = function(){ step('rows', 1); };
@@ -3065,7 +3507,7 @@ function setRole(v){
   renderRoleBtn();
   renderRoleSheet();
   renderSend();          /* the Send tab's Fill list depends on it */
-  saveCfg();
+  markDirty();
 }
 
 function renderRoleSheet(){
@@ -3287,7 +3729,7 @@ q('tx_ok').onclick = function(){
   });
   q('txsheet').classList.remove('on');
   renderSend();
-  saveCfg();
+  markDirty();
 };
 
 q('btn').onclick = function(){
@@ -3305,7 +3747,10 @@ q('rebootbtn').onclick = function(){
 window.addEventListener('hashchange', function(){
   showTab(location.hash.slice(1));
 });
-loadCfg().then(function(){ showTab(location.hash.slice(1) || 'dash'); });
+loadCfg().then(function(){
+  paintSaveState();
+  showTab(location.hash.slice(1) || 'dash');
+});
 </script>
 </body></html>
 )HTML";

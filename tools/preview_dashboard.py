@@ -16,8 +16,10 @@ thing: customize the dashboard, drag cells around, arm the Send tab.
 
 THE DATA IS INVENTED. The point of this tool is the interface and the
 interaction; the numbers are made up here in Python and prove nothing about the
-firmware. Layout changes are kept in memory, and written back to --cfg if one
-was given, so a layout worked out here can be copied to the SD card.
+firmware. Layout changes are kept in memory. NOTHING is written to disk until
+you press Save to device in the page, and then only if --cfg named a file to
+write - so a layout worked out here can be copied to the SD card, and a frame
+map you merely looked at leaves nothing behind.
 
 Only the standard library is used.
 """
@@ -27,7 +29,6 @@ import json
 import math
 import random
 import re
-import shutil
 from decimal import Decimal, InvalidOperation
 import socketserver
 import sys
@@ -130,6 +131,34 @@ def _sig_of(line):
     return (m.group(2) or m.group(3)) if m else None
 
 
+def _override_ok(line, ref, by_ref):
+    """Is the selector this line names by hand a signal of its own message?
+
+    The same test txOverrideSelector() applies in src/dash.cpp. An override
+    written against one frame map must stop being obeyed under another: left in
+    place it would put a selector code into bits that are not the selector's, or
+    into a message the new file already multiplexes its own way. Either is a
+    frame that looks sent and is not the one that was asked for.
+    """
+    m = re.search(r'msel=("([^"]*)"|(\S+))', line)
+    if not m:
+        return True                       # no override to invalidate
+    sel = m.group(2) or m.group(3)
+    if not ref or "." not in ref:
+        return False
+    msg = ref.split(".", 1)[0]
+    if (msg + "." + sel) not in by_ref:
+        return False                      # no such signal in this message
+    # A file that declares its own M wins: it is the better place to say it,
+    # and two answers would be one too many.
+    return not any(sg["mx"] == -2 for r, sg in by_ref.items()
+                   if sg["_msg"] == msg)
+
+
+def _strip_override(line):
+    return re.sub(r"\s+(?:msel=(?:\"[^\"]*\"|\S+)|mxc=\S+)", "", line)
+
+
 def prune_cfg(text, by_ref, nodes):
     """Everything in a setup that this frame map cannot account for, removed.
 
@@ -158,6 +187,12 @@ def prune_cfg(text, by_ref, nodes):
             if ref and ref not in by_ref:
                 dropped += 1
                 continue
+            # The value survives; an override written against the old map may
+            # not. Counted, because the page has to be able to say what stopped
+            # being true.
+            if not _override_ok(line, ref, by_ref):
+                line = _strip_override(line)
+                dropped += 1
             out.append(re.sub(r"^(\s*send)\s+\d+", r"\g<1> %d" % sends, line))
             sends += 1
         elif s.startswith(("role ", "node ")):
@@ -379,16 +414,10 @@ def main():
     ap.add_argument("--no-dbc", action="store_true",
                     help="show the page as it looks with no frame map at all")
     ap.add_argument("--cfg",
-                    help="setup file to start from, and write back to. Default: a "
-                         "COPY of examples/dash.cfg in the temp directory, so the "
-                         "preview always opens with something to look at and never "
-                         "edits the file in the repo")
-    ap.add_argument("--cfg-dir",
-                    help="where a setup goes when the frame map is loaded from "
-                         "the PAGE rather than named here: <that map>.cfg in "
-                         "this directory. One setup per frame map, so loading a "
-                         "second map can never open on the first one's layout "
-                         "or write over its file")
+                    help="setup file to start from. It is written back only when "
+                         "you press Save to device in the page - nothing is "
+                         "written by loading a frame map or by editing. Leave it "
+                         "out and the preview writes no file at all")
     ap.add_argument("--empty", action="store_true",
                     help="start with no setup at all - the page as it looks on a "
                          "logger with nothing on its card")
@@ -421,18 +450,22 @@ def main():
     # open on.
     example_dbc = ROOT / "examples" / "machine.dbc"
     own_dbc = bool(args.dbc) and Path(args.dbc).resolve() != example_dbc.resolve()
+    seed_text = None
     if not args.cfg and not args.empty and args.dbc and not own_dbc:
         seed = ROOT / "examples" / "dash.cfg"
         if seed.exists():
-            args.cfg = str(Path(tempfile.gettempdir()) / "preview-dash.cfg")
-            shutil.copyfile(seed, args.cfg)
+            seed_text = seed.read_text()
 
     dbc = load_dbc(args.dbc)
     flat = [s for m in dbc["m"] for s in m["s"]]
     by_ref = {s["_msg"] + "." + s["n"]: s for s in flat}
 
-    start_cfg = (Path(args.cfg).read_text() if args.cfg and Path(args.cfg).exists()
-                 else DEFAULT_CFG)
+    if args.cfg and Path(args.cfg).exists():
+        start_cfg = Path(args.cfg).read_text()
+    elif seed_text is not None:
+        start_cfg = seed_text
+    else:
+        start_cfg = DEFAULT_CFG
     if args.role:
         known = [n for n in dbc.get("nodes", [])]
         if known and args.role not in known:
@@ -667,29 +700,20 @@ def main():
                       "%d messages, %d signals" % (len(dbc["m"]), len(flat)),
                       flush=True)
 
-                # The setup follows the map. The logger has one card and one
-                # /dash.cfg; a desk has a drawer of .dbc files and one window
-                # open all afternoon, so the setup for the map being loaded is
-                # picked up here and the one for the map being left behind is
-                # left alone rather than written over.
-                if args.cfg_dir and name:
-                    args.cfg = str(Path(args.cfg_dir)
-                                   / (Path(name).stem + ".cfg"))
-                    state["cfg"] = (Path(args.cfg).read_text()
-                                    if Path(args.cfg).exists() else DEFAULT_CFG)
-
-                # And whatever is now in hand is held to this map, by the same
-                # rule the firmware applies in dashDropUnresolved().
+                # Whatever setup is in hand is held to the new map, by the same
+                # rule the firmware applies in dashDropUnresolved(). Nothing is
+                # WRITTEN: loading a frame map is not a decision to keep the
+                # result, and a tool that pairs a .cfg with every .dbc it is
+                # shown leaves files in the directories it was pointed at and
+                # opens on a setup nobody asked for. Save from the page when
+                # the result is worth keeping.
                 state["cfg"], gone = prune_cfg(state["cfg"], by_ref,
                                                dbc.get("nodes", []))
                 state["gen"] += 1
                 state["over"] = {}       # overrides named the old map's signals
-                if args.cfg:
-                    Path(args.cfg).write_text(state["cfg"])
-                    print("setup for this map: %s%s"
-                          % (args.cfg,
-                             " (%d item(s) the map does not describe removed)"
-                             % gone if gone else ""), flush=True)
+                if gone:
+                    print("held to the new map: %d item(s) it does not describe "
+                          "removed - nothing written" % gone, flush=True)
 
                 self._json({"ok": 1, "bytes": len(data),
                             "messages": len(dbc["m"]), "signals": len(flat),
@@ -699,10 +723,13 @@ def main():
                 return
 
             if p == "/api/dash/cfg":
+                # Save to device. The one thing that writes a file, and only
+                # when --cfg named one to write.
                 state["cfg"] = body
                 state["gen"] += 1
                 if args.cfg:
                     Path(args.cfg).write_text(body)
+                    print("saved: %s" % args.cfg, flush=True)
                 self._json({"ok": 1, "errors": 0, "missing": 0, "gen": state["gen"]})
 
             elif p == "/api/tx/arm":

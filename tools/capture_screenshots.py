@@ -49,13 +49,12 @@ SHOTS = [
     # obvious. Skip is first because on a working machine it is the answer.
     ("role",           "dash", None,      "example",  (1160,  900),
      "openRole()"),
-    # All three kinds of sendable value in one shot, against
-    # examples/example.dbc which carries one of each: HostCommand's two payloads
-    # are SINGLE (different selector codes - alternatives that can never share a
-    # frame), Diagnostics' pages are MULTIPLEXED (two payloads under one code -
-    # one frame), MotorFeedback is GROUPED (a plain message, chosen to go out
-    # together).
-    ("send-groups",    "send", None,      "example",  (1240, 1500),
+    # The three shapes a frame comes in, in one shot, against
+    # examples/example.dbc which carries one of each. HostCommand: multiplexed,
+    # one signal per code - two frames, a button each. Diagnostics: multiplexed,
+    # two signals under each code - two frames, each sending both. MotorFeedback:
+    # plain - one frame, one Send all 4.
+    ("send-groups",    "send", None,      "example",  (1240, 1760),
      "postForm('/api/tx/arm',{on:1}).then(function(){return openTxEdit();})"
      ".then(function(){TXED={};var h=-1,d=-1,f=-1;"
      "DBC.m.forEach(function(m,i){if(m.n==='HostCommand')h=i;"

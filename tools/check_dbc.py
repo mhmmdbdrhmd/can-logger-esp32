@@ -154,6 +154,28 @@ def check(path, show_list=False, quiet=False):
                       % (sel[0] if sel else "code", code,
                          ", ".join(codes[code])))
 
+    # A signal of a MULTIPLEXED message that carries no code at all. It is in
+    # every frame that message sends, whatever the selector says, so it belongs
+    # to no one selector code - which is where this build has to put a value it
+    # is going to write. Decoding is unaffected; only sending is refused, and
+    # saying so here is the difference between knowing that and finding out on
+    # the bus. Counters and checksums are what normally sit here.
+    riders = [(m["n"], s["n"]) for m in db["m"] if m["mux"]
+              for s in m["s"] if s["mx"] == -1]
+    if riders:
+        print("\n  signals in a multiplexed message that carry NO selector"
+              " code:")
+        for msg, name in riders[:8]:
+            print("    %s.%s" % (msg, name))
+        if len(riders) > 8:
+            print("    ... and %d more" % (len(riders) - 8))
+        print("    Each of these rides in every frame its message sends, under")
+        print("    no code, so this build cannot write it: it is decoded and")
+        print("    logged as normal, and left out of the sendable list. If one")
+        print("    of them is a counter or a CRC the ECU checks, commands from")
+        print("    this logger will be rejected until the firmware learns to")
+        print("    carry it - see the known limitations in README.md.")
+
     # Signals of a PLAIN message that sit on the same bits. Almost always a
     # frame that is multiplexed in fact and does not say so: the file gives no
     # `M`/`m0` markers, so every tool - this one, the logger, and anything else
@@ -178,12 +200,17 @@ def check(path, show_list=False, quiet=False):
             print("    %s: %s and %s" % (msg, a, b))
         if len(clashes) > 8:
             print("    ... and %d more" % (len(clashes) - 8))
-        print("    The logger treats any frame with more than one value set up")
-        print("    as multiplexed, so these are sent and removed together and")
-        print("    nothing is lost by the file not saying so. Marking it - the")
-        print("    selector `M`, each payload `m<code>` - is still worth doing:")
-        print("    only then can the logger write the selector for you, and")
-        print("    send one frame per code instead of one frame for all.")
+        print("    Nothing here is inferred: overlapping bits are a hint a")
+        print("    person can read, not a declaration, and guessing would write")
+        print("    a real command to a real ECU. Left as it is, the logger sends")
+        print("    all of these in ONE frame, writing them over each other.")
+        print("    Two ways out, in order of preference:")
+        print("      1. Mark it in the file - the selector `M`, each payload")
+        print("         `m<code>`. Then the logger writes the selector for you")
+        print("         and sends one frame per code.")
+        print("      2. Say so in the page - Multiplexed?, on the message, then")
+        print("         a code on each value. Same result, kept in the setup")
+        print("         file rather than in the frame map.")
 
     if show_list:
         print()

@@ -238,44 +238,55 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
   f.tx  = 1;
   f.len = m.dlc ? m.dlc : 8;
 
+  /* Which selector code this value travels under, and which signal carries it.
+   * The frame map's own M / m<code> first; failing that, the manual override on
+   * the value, for a file that multiplexes in fact and does not say so. Nothing
+   * is inferred from the bit layout - a guess here writes a real command to a
+   * real ECU. */
+  int16_t selSig  = m.muxSignal;
+  int16_t selCode = sg.muxValue;
+  if (selSig < 0) {
+    const int16_t ov = txOverrideSelector(c, g_dbc);
+    if (ov >= 0) { selSig = ov; selCode = c.muxCode; }
+  }
+
   if (s_pending.msg == c.msg) {
-    /* Continuing a group: keep what the earlier members already wrote.
+    /* Continuing a frame: keep what the earlier members already wrote.
      *
-     * Unless the group spans two selector codes, which is not a frame anyone
-     * can send: the payload bytes mean different things under each code, and
-     * the selector can only hold one of them. One frame would go out with the
-     * last member's code over both payloads - a command that looks sent and is
-     * not what anyone asked for. The page cannot build such a group any more;
-     * a setup file written before it could still can, so it is refused here as
-     * well as prevented there. */
-    if (sg.muxValue >= 0 && s_pending.mux >= 0 && sg.muxValue != s_pending.mux) {
+     * Unless the two are under different selector codes, which is not a frame
+     * anyone can send: the payload bytes mean different things under each code,
+     * and the selector can only hold one of them. One frame would go out with
+     * the last member's code over both payloads - a command that looks sent and
+     * is not what anyone asked for. The page cannot build such a request any
+     * more; a setup file written before it could still can, so it is refused
+     * here as well as prevented there. */
+    if (selCode >= 0 && s_pending.mux >= 0 && selCode != s_pending.mux) {
       status = TXS_BAD_FRAME;
       return false;
     }
     memcpy(f.data, s_pending.data, 8);
     if (s_pending.len > f.len) f.len = s_pending.len;
-  } else if (m.muxSignal < 0) {
-    /* Start from what the bus last said, so the other signals in the message
-     * keep the values they already had rather than being zeroed. A MULTIPLEXED
-     * message is the exception: its bytes mean different things on different
-     * pages, so carrying a previous page's bytes forward would send garbage
-     * under a new opcode. */
+  } else if (selSig < 0) {
+    /* Start from what the bus last said, so any signal of the message that was
+     * not set up keeps the value it already had rather than being zeroed. A
+     * MULTIPLEXED message is the exception: its bytes mean different things
+     * under different codes, so carrying a previous code's bytes forward would
+     * send garbage under a new opcode. */
     uint8_t seenLen = 0;
     if (busLastPayload(g_bus, m.id, m.ext != 0, f.data, &seenLen)) {
       if (seenLen > f.len) f.len = seenLen;
     }
   }
 
-  /* The selector, written from the signal's own mux code. This is not a
+  /* The selector, written from the code this value belongs to. This is not a
    * setting anyone should have to remember: the frame map already says that
    * WheelDia_mm is the payload of opcode 32, so opcode 32 is what goes out
    * with it. The code is a raw bit pattern by definition, so it is inserted
    * directly rather than pushed through the selector's scaling. */
-  if (sg.muxValue >= 0 && m.muxSignal >= 0 &&
-      (uint16_t)m.muxSignal < g_dbc.sigCount) {
-    const DbcSignal &ms = g_dbc.sig[m.muxSignal];
+  if (selCode >= 0 && selSig >= 0 && (uint16_t)selSig < g_dbc.sigCount) {
+    const DbcSignal &ms = g_dbc.sig[selSig];
     if (!dbcInsertBits(f.data, f.len, ms.startBit, ms.bits, ms.intel != 0,
-                       (uint64_t)sg.muxValue)) {
+                       (uint64_t)selCode)) {
       status = TXS_BAD_FRAME;
       return false;
     }
@@ -343,7 +354,12 @@ static void perform(MCP2515 &can, const TxRequest &r) {
      * wire yet - a half-written command frame is worse than none. */
     if (r.hold && c.kind == TXK_SIGNAL) {
       s_pending.msg = c.msg;
+      /* The code this frame is being built under, by the same rule the frame
+       * itself was built by: the map's own, else the manual override's. */
       s_pending.mux = g_dbc.sig[c.sig].muxValue;
+      if (s_pending.mux < 0 && txOverrideSelector(c, g_dbc) >= 0) {
+        s_pending.mux = c.muxCode;
+      }
       s_pending.len = f.len;
       memcpy(s_pending.data, f.data, 8);
       o.status  = TXS_PENDING;

@@ -1,6 +1,6 @@
 <h1 align="center">can-logger-esp32</h1>
 <p align="center"><i>ESP32 CAN logger with optional DBC decoding</i></p>
-<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.1.1"><img alt="release" src="https://img.shields.io/badge/release-v1.1.1-8957E5?style=flat-square"></a></p>
+<p align="center"><a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions"><img alt="CI" src="https://github.com/mhmmdbdrhmd/can-logger-esp32/actions/workflows/ci.yml/badge.svg"></a> <img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <a href="https://github.com/mhmmdbdrhmd/can-logger-esp32/releases/tag/v1.2.0"><img alt="release" src="https://img.shields.io/badge/release-v1.2.0-8957E5?style=flat-square"></a></p>
 
 > Log a CAN bus to SD with **nothing bus-specific compiled in** — identifiers, scaling and units all come from a DBC file on the card.
 
@@ -312,7 +312,7 @@ and Windows all send the same bytes, so the same two commands do it everywhere:
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image can-logger-esp32-v1.1.1-4mb-merged.bin
+python3 tools/flash.py --image can-logger-esp32-v1.2.0-4mb-merged.bin
 ```
 
 It finds the board itself, and says what to try if the chip never enters

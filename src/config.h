@@ -418,4 +418,4 @@
 #define TX_ATTEMPTS         3
 
 #define FIRMWARE_NAME    "CAN Logger ESP32"
-#define FIRMWARE_VERSION "1.1.1"
+#define FIRMWARE_VERSION "1.2.0"

@@ -62,19 +62,21 @@ than added in part, and a setup file written before this rule - or carried
 across to a map where the message has gained a signal - is completed on load and
 told to you.
 
-### Nothing is written until you ask
+### The desk tools write no files; the logger still saves by itself
 
-The page used to write `/dash.cfg` on a timer after every edit, so laying out a
-dashboard wrote the file a dozen times and a half-finished setup was the one on
-the card. Editing now happens in the page; **Save to device** writes it once, the
-button carries a dot while there is something unsaved, and leaving the page with
-unsaved changes asks first.
+`customize.py` and `tools/preview_dashboard.py` **no longer write anything at
+all.** They no longer pair a `.cfg` with every `.dbc` they are shown, so loading
+a frame map leaves nothing beside it and the page does not come up on a setup
+you did not ask for. `--cfg` is read once at the start and never written back;
+`--cfg-dir` is gone; **Export** in the page is the one way a setup comes out.
 
-`customize.py` and `tools/preview_dashboard.py` follow the same rule and one
-more: **they no longer pair a `.cfg` with a `.dbc` by themselves.** Loading a
-frame map at a desk leaves nothing behind - no file appears beside the map you
-opened, and the page does not come up on a setup you did not ask for. `--cfg`
-names a file to start from and is written only on Save; `--cfg-dir` is gone.
+Saving on the logger is unchanged: an edit reaches it about a second after you
+stop making it. A **Save to device** button was tried and removed in the same
+breath, because it broke the dashboard - `handleDash()` renders the values from
+the layout the LOGGER holds, so a cell it has not been told about shows nothing,
+and an editing session that had not reached it was one with half the screen
+blank. The button is gone; the note in `webpage.cpp` says why, so it does not
+get reinvented.
 
 ### What you type stays typed
 

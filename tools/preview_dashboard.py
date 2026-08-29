@@ -16,10 +16,10 @@ thing: customize the dashboard, drag cells around, arm the Send tab.
 
 THE DATA IS INVENTED. The point of this tool is the interface and the
 interaction; the numbers are made up here in Python and prove nothing about the
-firmware. Layout changes are kept in memory. NOTHING is written to disk until
-you press Save to device in the page, and then only if --cfg named a file to
-write - so a layout worked out here can be copied to the SD card, and a frame
-map you merely looked at leaves nothing behind.
+firmware. Layout changes are kept in memory and NOTHING is ever written to disk:
+--cfg is read at the start and never written back, and a frame map you loaded
+leaves nothing beside it. Press Export in the page to get a setup out, then copy
+it onto the SD card as /dash.cfg.
 
 Only the standard library is used.
 """
@@ -414,10 +414,9 @@ def main():
     ap.add_argument("--no-dbc", action="store_true",
                     help="show the page as it looks with no frame map at all")
     ap.add_argument("--cfg",
-                    help="setup file to start from. It is written back only when "
-                         "you press Save to device in the page - nothing is "
-                         "written by loading a frame map or by editing. Leave it "
-                         "out and the preview writes no file at all")
+                    help="setup file to start from. READ ONLY: this tool never "
+                         "writes it, or any other file. Use Export in the page "
+                         "to get a setup out")
     ap.add_argument("--empty", action="store_true",
                     help="start with no setup at all - the page as it looks on a "
                          "logger with nothing on its card")
@@ -723,13 +722,18 @@ def main():
                 return
 
             if p == "/api/dash/cfg":
-                # Save to device. The one thing that writes a file, and only
-                # when --cfg named one to write.
+                # The page sends this shortly after every edit, and it has to:
+                # the dashboard's values are rendered from the layout the SERVER
+                # holds, so a cell it has not been told about shows nothing.
+                #
+                # It stays in memory. On a logger this is the moment the card is
+                # written, because a logger IS the place the setup lives; at a
+                # desk there is no card, and a tool that wrote a file every time
+                # somebody dragged a gauge would leave .cfg files in whatever
+                # directory it was pointed at. Export in the page is how a setup
+                # leaves this tool.
                 state["cfg"] = body
                 state["gen"] += 1
-                if args.cfg:
-                    Path(args.cfg).write_text(body)
-                    print("saved: %s" % args.cfg, flush=True)
                 self._json({"ok": 1, "errors": 0, "missing": 0, "gen": state["gen"]})
 
             elif p == "/api/tx/arm":

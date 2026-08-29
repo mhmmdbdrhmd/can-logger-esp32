@@ -24,11 +24,10 @@ Press Export in the page to save the setup you have built, then copy it onto
 the SD card as /dash.cfg alongside your .dbc as /frames.dbc, and the logger
 starts up with your dashboard already on it.
 
-NOTHING IS WRITTEN UNTIL YOU ASK FOR IT. This tool used to pair a .cfg with
-every .dbc it was shown, which left files in whatever directory you had pointed
-it at and opened the page on a setup you had not asked for. Now a frame map you
-merely looked at leaves nothing behind, and the setup is yours to export when it
-is worth keeping.
+IT WRITES NO FILES AT ALL. This tool used to pair a .cfg with every .dbc it was
+shown, which left files in whatever directory you had pointed it at and opened
+the page on a setup you had not asked for. Now a frame map you merely looked at
+leaves nothing behind, and Export is the one way a setup comes out.
 
 No hardware, no wiring, no CAN traffic, and nothing to install - just Python,
 which is why this is a .py and not a shell script: it runs the same way on
@@ -153,7 +152,7 @@ def main():
           % (dbc if dbc is not None
              else "none yet - load one with Frame map, top right"))
     print("  your setup  %s"
-          % ("%s   (opened from there; Export to write it back)" % cfg
+          % ("%s   (read from there; Export to save your changes)" % cfg
              if have_cfg else "starts empty - Export in the page when you "
                               "want to keep it"))
     print("  open        %s" % url)
@@ -181,9 +180,8 @@ def main():
                      daemon=True).start()
 
     import preview_dashboard
-    # --cfg only when there is already a file to read. Passing one that does not
-    # exist would create it on the first Save, which is the uninvited file this
-    # tool no longer leaves behind.
+    # --cfg only when there is already a file to read; it is never written back.
+    # Export in the page is the one way a setup leaves this tool.
     sys.argv = ["preview_dashboard.py", "--port", str(port)]
     sys.argv += ["--cfg", str(cfg)] if have_cfg else ["--empty"]
     sys.argv += ["--dbc", str(dbc)] if dbc is not None else ["--no-dbc"]

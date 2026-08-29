@@ -492,7 +492,7 @@ route to the internet. What the logger sends is one small JSON document of
 pre-formatted values and health counters; it never touches a pixel. Customizing
 costs it even less: laying out a dashboard is browser work on a copy of the
 config, and the logger sees a request only when the frame map is first read and
-when **Save to device** is pressed on the finished layout.
+about a second after each edit stops.
 
 ![The dashboard](docs/img/dashboard-dbc.png)
 
@@ -651,24 +651,29 @@ logger's own memory.
 
 That is the whole sheet: what is on the logger now, Export, Import.
 
-### Nothing is written until you say so
+### Saving happens by itself, and has to
 
-Editing happens **in the page**. Moving a cell, changing a range, adding a
-sendable value, setting the role — none of it touches the card. **Save to
-device** writes it, once, and the button carries a dot while there is something
-unsaved. Leaving the page with unsaved changes asks first; reloading without
-saving throws them away, which is also how you abandon an experiment.
+An edit reaches the logger about a second after you stop making it. There is no
+Save button, and there was one for exactly one release — it was a mistake worth
+recording, because it broke the dashboard in a way that is easy to miss.
 
-This used to write on a timer after every edit, which meant laying out a
-dashboard wrote the file a dozen times and a half-finished setup was the one on
-the card. It also meant there was no way to try something without keeping it.
+**The dashboard's values come from the logger, not from the browser.**
+`handleDash()` walks `g_dash` — the layout the *logger* holds — and renders the
+numbers from it. A cell the logger has not been told about is a cell it sends no
+value for, so it sits blank. With a Save button, an editing session that had not
+reached the logger yet was one where half the screen showed nothing, and the
+dashboard only came alive once you found the button.
 
-`tools/customize.py` and `tools/preview_dashboard.py` follow the same rule and
-one more: **they never pair a `.cfg` with a `.dbc` by themselves.** Loading a
-frame map at the desk leaves nothing behind — no file appears next to the map
-you opened, and the page does not come up on a setup you did not ask for.
-`--cfg` names a file to *start from*, and it is written only when you press
-Save; otherwise Export gives you the text and you decide where it goes.
+The delay is what keeps it cheap: dragging a cell across the grid is one write
+when you let go, not one per frame. Leaving *Customize* writes immediately.
+
+The desk tools do the same thing for the same reason — the page tells the server
+after every edit, or the preview would show blank cells — but **they write no
+files at all.** `--cfg` is read once at the start and never written back, no
+`.cfg` appears next to a `.dbc` you loaded, and **Export** in the page is the
+one way a setup comes out of them. A logger is where a setup lives; a desk is
+not, and a tool that wrote a file every time somebody dragged a gauge left them
+in whatever directory it had been pointed at.
 
 Two copies, one rule — because this is set up **at a desk, before you go out**,
 and has to be there when you arrive.
@@ -693,7 +698,7 @@ agreed with:
 - **nothing anywhere** → an empty grid, and the page says so
 
 The effect is the one people expect: *whichever you edited last is the one you
-get.* Pressing Save to device writes the card immediately, through the task that
+get.* Saving from the browser writes the card immediately, through the task that
 owns it; the flash copy is written when no recording is running, because writing
 NVS stops the flash cache and the CAN interrupt is reached through a dispatcher
 that may not be resident in IRAM. Losing power in between costs nothing — the
@@ -730,8 +735,8 @@ when you swap buses — only that file does.
 # It writes no file at all.
 python3 tools/preview_dashboard.py
 
-# keep the changes: --cfg names the file, and Save to device in the page is
-# what writes it. Loading a frame map still writes nothing.
+# start from a setup of your own. It is READ, never written - use Export in
+# the page to get your changes back out.
 python3 tools/preview_dashboard.py --cfg examples/dash.cfg
 
 # a logger with nothing on its card, which is a different page
@@ -766,7 +771,8 @@ That one command:
 - checks the file against the limits this firmware was built with, and says what
   it could not read
 - picks a free port, starts the page and opens your browser at it
-- reads `mine.cfg` if one is already sitting beside your `.dbc`
+- reads `mine.cfg` if one is already sitting beside your `.dbc` — and never
+  writes it back
 
 **It writes nothing you did not ask for.** No file appears next to the `.dbc`
 you opened, and loading a second frame map in the same session leaves the first

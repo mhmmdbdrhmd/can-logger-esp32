@@ -460,7 +460,6 @@ static const char PAGE_2[] PROGMEM = R"HTML(
   <!-- then whatever this operator decided matters -->
   <div class="bar" id="viewbar" style="margin-top:16px">
     <button id="customize">Customize dashboard</button>
-    <button id="savecfg" class="savebtn">Save to device</button>
     <div class="spacer"></div>
     <span class="sub" id="dashnote">&nbsp;</span>
   </div>
@@ -478,7 +477,6 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <button id="fillbus">Fill from bus</button>
     <button id="clearcfg" class="warn">Clear all</button>
     <div class="spacer"></div>
-    <button id="savecfg2" class="savebtn">Save to device</button>
     <button id="donedit" class="pri">Done</button>
   </div>
 
@@ -1712,43 +1710,32 @@ function pollLog(){
 }
 
 /* ---- saving ------------------------------------------------------------ */
-/* Nothing is written to the card until somebody asks for it.
+/* An edit reaches the logger by itself, shortly after you stop making it.
  *
- * Every edit used to schedule a write, so laying out a dashboard wrote the file
- * a dozen times and a half-finished setup was the one on the card. Editing now
- * happens in the page and the card is written by Save to device, once. What is
- * not saved is lost by reloading, which is the point: it is also how you throw
- * an experiment away. */
-var UNSAVED = false;
+ * This is not only about not losing work. The dashboard's VALUES come from the
+ * logger, which renders them from the layout it holds - handleDash() walks
+ * g_dash, and nothing in this page. So a cell the logger has not been told
+ * about shows nothing at all, and an editing session that never reaches it is
+ * one where half the screen stays blank. There was a Save button here for one
+ * release and that was exactly its effect: the dashboard only came alive once
+ * you found the button.
+ *
+ * The delay is what keeps it cheap. Dragging a cell across the grid is one
+ * write when you let go, not one per frame. */
+var saveTimer = null;
 function markDirty(){
-  UNSAVED = true;
-  paintSaveState();
-}
-function paintSaveState(){
-  Array.prototype.forEach.call(document.querySelectorAll('.savebtn'),
-    function(b){
-      b.classList.toggle('pri', UNSAVED);
-      b.textContent = UNSAVED ? 'Save to device •' : 'Save to device';
-      b.title = UNSAVED
-        ? 'Changes are in this page only — write them to the logger'
-        : 'Nothing has changed since the last save';
-    });
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveCfg, 1200);
 }
 function saveCfg(){
+  clearTimeout(saveTimer);
   return fetch('/api/dash/cfg', {method:'POST', body:dumpCfg()})
     .then(function(r){ return r.json(); })
     .then(function(d){
       GEN = d.gen;
-      if(!d.ok){
-        toast('Not saved', 'The logger could not store the layout', 'bad');
-        return;
-      }
-      UNSAVED = false;
-      paintSaveState();
-      if(d.missing) toast('Saved',
+      if(!d.ok) toast('Not saved', 'The logger could not store the layout', 'bad');
+      else if(d.missing) toast('Saved',
         d.missing + ' cell(s) name a signal this frame map does not have', 'bad');
-      else toast('Saved', 'The logger will come up with this after a restart',
-                 'ok');
     })
     .catch(function(){ toast('Not saved', 'The logger did not answer', 'bad'); });
 }
@@ -1777,7 +1764,7 @@ function setEdit(on){
   if(on) loadDbc();
   renderGrid();
   startPolls();
-  if(!on) markDirty();
+  if(!on) saveCfg();          /* leaving the editor is a decision */
 }
 function step(which, by){
   var lim = which === 'cols' ? 6 : 8;
@@ -3443,17 +3430,6 @@ q('tabs').addEventListener('click', function(e){
 
 q('customize').onclick = function(){ setEdit(true); };
 q('donedit').onclick   = function(){ setEdit(false); };
-q('savecfg').onclick   = saveCfg;
-q('savecfg2').onclick  = saveCfg;
-
-/* Editing lives in the page now, so leaving the page throws it away. Said once,
-   by the browser, rather than by writing the card behind somebody's back. */
-window.addEventListener('beforeunload', function(e){
-  if(!UNSAVED) return;
-  e.preventDefault();
-  e.returnValue = '';
-});
-
 q('colplus').onclick   = function(){ step('cols', 1); };
 q('colminus').onclick  = function(){ step('cols', -1); };
 q('rowplus').onclick   = function(){ step('rows', 1); };
@@ -3747,10 +3723,7 @@ q('rebootbtn').onclick = function(){
 window.addEventListener('hashchange', function(){
   showTab(location.hash.slice(1));
 });
-loadCfg().then(function(){
-  paintSaveState();
-  showTab(location.hash.slice(1) || 'dash');
-});
+loadCfg().then(function(){ showTab(location.hash.slice(1) || 'dash'); });
 </script>
 </body></html>
 )HTML";

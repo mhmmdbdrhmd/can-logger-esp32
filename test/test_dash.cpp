@@ -52,6 +52,35 @@ static void loadMap(DbcDb &db) {
   dbcLoadText(db, text.c_str(), text.size());
 }
 
+/* True when any non-comment, non-blank line of a serialised layout contains
+ * `needle`. The file opens with a '#' legend that names every key it supports,
+ * so a plain substring search over the whole text would find the documentation
+ * rather than the data. */
+static bool dataLinesMention(const char *text, size_t len, const char *needle) {
+  const std::string all(text, len);
+  size_t start = 0;
+  while (start < all.size()) {
+    size_t nl = all.find('\n', start);
+    if (nl == std::string::npos) nl = all.size();
+    const std::string line = all.substr(start, nl - start);
+    start = nl + 1;
+    if (line.empty() || line[0] == '#') continue;
+    if (line.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+/* dashResolve() and dashDropUnresolved() take one map PER BUS. These tests are
+ * about resolution rather than about routing, so unless a case says otherwise
+ * both buses get the same map - which also proves a single-bus layout still
+ * resolves exactly as it did. */
+static const DbcDb *both(const DbcDb &a) {
+  static DbcDb pair[CAN_BUSES];
+  pair[0] = a;
+  pair[1] = a;
+  return pair;
+}
+
 int main() {
   printf("== an empty configuration ==\n");
   {
@@ -294,7 +323,7 @@ int main() {
       "send 0 label=Tyre sig=WheelInfo.TireSize\n"
       "send 1 label=Wide sig=WheelInfo.TireSize lo=-9999 hi=99999\n");
 
-    const uint16_t missing = dashResolve(c, db);
+    const uint16_t missing = dashResolve(c, both(db));
     ck("one reference could not be resolved", missing == 1,
        std::to_string(missing) + " missing");
     ck("a resolved cell has an index", c.cell[0].sig >= 0);
@@ -311,7 +340,7 @@ int main() {
     {
       DashConfig d = c;
       snprintf(d.role, sizeof(d.role), "%s", "Vehicle");
-      const uint16_t gone = dashDropUnresolved(d, db);
+      const uint16_t gone = dashDropUnresolved(d, both(db));
       ck("loading a new map drops what it cannot account for", gone == 1,
          std::to_string(gone) + " dropped");
       ck("a role the new map still names is left alone",
@@ -334,7 +363,7 @@ int main() {
       dbcLoadText(other, unrelated, strlen(unrelated));
       DashConfig e = c;
       snprintf(e.role, sizeof(e.role), "%s", "Vehicle");
-      const uint16_t all = dashDropUnresolved(e, other);
+      const uint16_t all = dashDropUnresolved(e, both(other));
       ck("an unrelated frame map clears the setup", all == 6,
          std::to_string(all) + " dropped");
       ck("and leaves nothing behind",
@@ -347,7 +376,7 @@ int main() {
 
       DashConfig f = c;
       snprintf(f.role, sizeof(f.role), "%s", "Tester");
-      dashDropUnresolved(f, other);
+      dashDropUnresolved(f, both(other));
       ck("a role the new map DOES name survives it",
          strcmp(f.role, "Tester") == 0, f.role);
       dbcFree(other);
@@ -380,7 +409,7 @@ int main() {
     DashConfig c;
     dashReset(c);
     feed(c, "grid 1 1\ncell 0 widget=bar sig=Drive.Gear\n");
-    dashResolve(c, db);
+    dashResolve(c, both(db));
 
     /* Gear has no [min|max] in the map. Falling back to what four bits can
      * hold gives a bar that is at least drawable, rather than one with a
@@ -445,7 +474,7 @@ int main() {
       "send 1 label=Amp sig=ABS_Cmd.Cmd_Amp lo=-2000 hi=2000 msel=Cmd_Op mxc=16\n"
       "send 2 label=Pay sig=Declared.Pay lo=0 hi=255 msel=Sel mxc=3\n"
       "send 3 label=Gone sig=ABS_Cmd.Cmd_Val lo=0 hi=255 msel=NoSuchSignal mxc=1\n");
-    dashResolve(c, db);
+    dashResolve(c, both(db));
 
     ck("the selector named by hand resolves to a signal of its own message",
        txOverrideSelector(c.tx[0], db) >= 0 &&
@@ -486,9 +515,89 @@ int main() {
     DashConfig h;
     dashReset(h);
     feed(h, "send 0 label=Val sig=ABS_Cmd.Cmd_Val lo=0 hi=255 msel=Cmd_Op\n");
-    dashResolve(h, db);
+    dashResolve(h, both(db));
     ck("a selector with no code is not an override",
        txOverrideSelector(h.tx[0], db) < 0);
+  }
+
+  printf("\n== which bus a cell and a setpoint belong to ==\n");
+  {
+    DbcDb db;
+    loadMap(db);
+
+    /* A layout written by the SINGLE-BUS logger has no bus= anywhere. It must
+     * load, mean bus 1, and serialise back to a file with no bus= in it - or
+     * every existing dash.cfg quietly changes the first time it is saved. */
+    DashConfig old;
+    dashReset(old);
+    feed(old,
+      "grid 2 2\n"
+      "cell 0 widget=gauge sig=Drive.Speed lo=0 hi=50\n"
+      "send 0 label=Set sig=ABS_Cmd.Cmd_Val lo=0 hi=255\n");
+    ck("a layout with no bus= means bus 1",
+       old.cell[0].bus == 0 && old.tx[0].bus == 0);
+
+    char buf[DASH_CFG_MAX];
+    const size_t n0 = dashSerialize(old, buf, sizeof(buf));
+    /* Only the data lines. The '#' legend at the top of the file documents the
+     * bus= key and is expected to mention it. */
+    ck("and writes no bus= back", !dataLinesMention(buf, n0, " bus="));
+
+    /* An explicit bus survives the round trip, which is what makes the layout
+     * a durable record rather than something the logger reinterprets. */
+    DashConfig two;
+    dashReset(two);
+    feed(two,
+      "grid 2 2\n"
+      "cell 0 widget=gauge sig=Drive.Speed bus=2 lo=0 hi=50\n"
+      "cell 1 widget=bar   sig=Drive.Speed bus=1 lo=0 hi=50\n"
+      "send 0 label=Set sig=ABS_Cmd.Cmd_Val bus=2 lo=0 hi=255\n");
+    ck("bus= is parsed, one-based in the file",
+       two.cell[0].bus == 1 && two.cell[1].bus == 0 && two.tx[0].bus == 1);
+
+    const size_t n1 = dashSerialize(two, buf, sizeof(buf));
+    DashConfig back;
+    dashReset(back);
+    dashParse(back, buf, n1);
+    ck("and survives a round trip",
+       back.cell[0].bus == 1 && back.cell[1].bus == 0 && back.tx[0].bus == 1);
+
+    /* An out-of-range bus is clamped rather than accepted: a hand-edited file
+     * must not be able to point a cell at a controller that does not exist. */
+    DashConfig bad;
+    dashReset(bad);
+    feed(bad, "cell 0 widget=gauge sig=Drive.Speed bus=9 lo=0 hi=50\n");
+    ck("an impossible bus falls back to bus 1", bad.cell[0].bus == 0);
+
+    /* The saved text is what dashstore hashes, so two layouts differing only
+     * by bus must not collide - otherwise flash would keep the wrong one. */
+    DashConfig a1, a2;
+    dashReset(a1); dashReset(a2);
+    feed(a1, "cell 0 widget=gauge sig=Drive.Speed bus=1 lo=0 hi=50\n");
+    feed(a2, "cell 0 widget=gauge sig=Drive.Speed bus=2 lo=0 hi=50\n");
+    char b1[DASH_CFG_MAX], b2[DASH_CFG_MAX];
+    const size_t k1 = dashSerialize(a1, b1, sizeof(b1));
+    const size_t k2 = dashSerialize(a2, b2, sizeof(b2));
+    ck("the bus changes the hash", dashHash(b1, k1) != dashHash(b2, k2));
+
+    /* Resolution follows the cell's own bus. With the map on bus 1 only, a
+     * cell pointed at bus 2 must NOT resolve - decoding it against the other
+     * bus's map is exactly the silent error the split exists to prevent. */
+    DbcDb empty; dbcReset(empty);
+    static DbcDb split[CAN_BUSES];
+    split[0] = db;
+    split[1] = empty;
+
+    DashConfig r;
+    dashReset(r);
+    feed(r,
+      "cell 0 widget=gauge sig=Drive.Speed bus=1 lo=0 hi=50\n"
+      "cell 1 widget=gauge sig=Drive.Speed bus=2 lo=0 hi=50\n");
+    const uint16_t missing = dashResolve(r, split);
+    ck("the bus-1 cell resolves", r.cell[0].sig >= 0);
+    ck("the bus-2 cell does not, against an empty map", r.cell[1].sig < 0);
+    ck("and it is counted as missing", missing == 1,
+       "got " + std::to_string(missing));
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);

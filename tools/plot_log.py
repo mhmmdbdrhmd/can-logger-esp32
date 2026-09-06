@@ -26,7 +26,10 @@ try:
 except ImportError:
     sys.exit("matplotlib is not installed:  pip install matplotlib")
 
-COLUMNS = ["t_us", "id", "name", "signal", "value", "unit", "raw"]
+# Schema 2, what the dual-bus logger writes, and schema 1 from the single-bus
+# one. Both are read; the column count on a row says which it is.
+COLUMNS = ["t_us", "bus", "id", "name", "signal", "value", "unit", "raw"]
+COLUMNS_V1 = ["t_us", "id", "name", "signal", "value", "unit", "raw"]
 
 
 def load(path):
@@ -42,13 +45,21 @@ def load(path):
             if not line or line.startswith("#"):
                 continue
             f = line.split(";")
-            if len(f) != len(COLUMNS) or f == COLUMNS:
+            if f == COLUMNS or f == COLUMNS_V1:
                 continue
-            _, _, msg, sig, value, unit, _ = f
+            if len(f) == len(COLUMNS):
+                _, bus, _, msg, sig, value, unit, _ = f
+            elif len(f) == len(COLUMNS_V1):
+                _, _, msg, sig, value, unit, _ = f
+                bus = "1"          # a single-bus recording is bus 1
+            else:
+                continue
             if not sig or value == "":
                 continue
 
-            key = f"{msg}.{sig}"
+            # Qualified by bus, so two buses carrying a message of the same
+            # name plot as two traces rather than one interleaved mess.
+            key = f"CAN{bus}.{msg}.{sig}"
             try:
                 v = float(value)
             except ValueError:

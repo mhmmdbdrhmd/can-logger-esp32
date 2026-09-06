@@ -13,6 +13,7 @@ TxState g_tx;
 struct TxRequest {
   uint32_t ticket;
   uint8_t  cmd;          /* index into g_dash.tx, or 0xFF for a raw frame */
+  uint8_t  bus;          /* which controller sends it: 0 = CAN1, 1 = CAN2  */
   uint8_t  hold;         /* 1 = write into the frame but do not send it yet */
   float    value;
   uint32_t id;
@@ -33,12 +34,20 @@ struct TxRequest {
  * buffer, and only the last one transmits. The queue is FIFO and drained by
  * one task, so the group cannot be split by anything else in between. */
 struct TxPending {
-  int16_t  msg;          /* index into g_dbc.msg, -1 = nothing in progress    */
+  int16_t  msg;          /* index into that bus's map, -1 = nothing in progress */
   int16_t  mux;          /* the selector code the frame carries, -1 = none    */
   uint8_t  len;
   uint8_t  data[8];
 };
-static TxPending s_pending = { -1, -1, 0, {0, 0, 0, 0, 0, 0, 0, 0} };
+
+/* One per bus. A group under construction for CAN1 must not be completed, or
+ * cancelled, by a request that happens to be for CAN2 - the two are different
+ * frames on different wires, and sharing one buffer would let an interleaved
+ * pair of groups emit each other's payloads. */
+static TxPending s_pending[CAN_BUSES] = {
+  { -1, -1, 0, {0, 0, 0, 0, 0, 0, 0, 0} },
+  { -1, -1, 0, {0, 0, 0, 0, 0, 0, 0, 0} },
+};
 
 static QueueHandle_t s_queue  = nullptr;
 static uint32_t      s_ticket = 0;
@@ -76,17 +85,19 @@ static void record(const TxOutcome &o) {
 
 /* A refusal that never reached the controller still has to be reported, or the
  * browser sees a Send that did nothing and no reason why. */
-static uint32_t refuse(uint8_t cmd, float value, uint8_t status) {
+static uint32_t refuse(uint8_t cmd, uint8_t bus, float value, uint8_t status) {
   TxOutcome o;
   memset(&o, 0, sizeof(o));
   o.ticket    = ++s_ticket;
   o.ms        = millis();
   o.status    = status;
   o.cmd       = cmd;
+  o.bus       = bus;
   o.requested = value;
   record(o);
 
-  LOG_FILE(LVL_WARN, "TX refused: %s", txStatusText(status));
+  LOG_FILE(LVL_WARN, "TX refused on CAN%u: %s", (unsigned)(bus + 1),
+           txStatusText(status));
   return 0;
 }
 
@@ -133,9 +144,9 @@ void txArm(bool on, const char *who) {
  *  Requests
  * ======================================================================== */
 static uint32_t enqueue(const TxRequest &r) {
-  if (!s_queue) return refuse(r.cmd, r.value, TXS_QUEUE_FULL);
+  if (!s_queue) return refuse(r.cmd, r.bus, r.value, TXS_QUEUE_FULL);
   if (xQueueSend(s_queue, &r, 0) != pdTRUE) {
-    return refuse(r.cmd, r.value, TXS_QUEUE_FULL);
+    return refuse(r.cmd, r.bus, r.value, TXS_QUEUE_FULL);
   }
   return r.ticket;
 }
@@ -146,13 +157,14 @@ uint32_t txSendCommand(uint8_t cmdIndex, float value) {
 
 uint32_t txSendPart(uint8_t cmdIndex, float value, bool hold) {
   if (cmdIndex >= TX_MAX_COMMANDS || !txCommandUsed(g_dash.tx[cmdIndex])) {
-    return refuse(cmdIndex, value, TXS_UNKNOWN_COMMAND);
+    return refuse(cmdIndex, 0, value, TXS_UNKNOWN_COMMAND);
   }
-  if (!txArmed()) return refuse(cmdIndex, value, TXS_NOT_ARMED);
-
   const TxCommand &c = g_dash.tx[cmdIndex];
+  const uint8_t bus = (c.bus < CAN_BUSES) ? c.bus : 0;
+
+  if (!txArmed()) return refuse(cmdIndex, bus, value, TXS_NOT_ARMED);
   if (c.kind == TXK_SIGNAL && c.sig < 0) {
-    return refuse(cmdIndex, value, TXS_NO_SIGNAL);
+    return refuse(cmdIndex, bus, value, TXS_NO_SIGNAL);
   }
 
   /* Refuse rather than clamp. The slider already stops at the limits, so a
@@ -161,26 +173,30 @@ uint32_t txSendPart(uint8_t cmdIndex, float value, bool hold) {
    * operator ends up believing they set something they did not. */
   if (c.kind == TXK_SIGNAL && c.hi > c.lo &&
       (value < c.lo - 1e-6f || value > c.hi + 1e-6f)) {
-    return refuse(cmdIndex, value, TXS_OUT_OF_RANGE);
+    return refuse(cmdIndex, bus, value, TXS_OUT_OF_RANGE);
   }
 
   TxRequest r;
   memset(&r, 0, sizeof(r));
   r.ticket = ++s_ticket;
   r.cmd    = cmdIndex;
+  r.bus    = bus;
   r.value  = value;
   r.hold   = hold ? 1 : 0;
   return enqueue(r);
 }
 
-uint32_t txSendRaw(uint32_t id, bool ext, const uint8_t *data, uint8_t len) {
-  if (!txArmed()) return refuse(TX_RAW_CMD, 0.0f, TXS_NOT_ARMED);
-  if (len > 8)    return refuse(TX_RAW_CMD, 0.0f, TXS_BAD_FRAME);
+uint32_t txSendRaw(uint8_t bus, uint32_t id, bool ext, const uint8_t *data,
+                   uint8_t len) {
+  if (bus >= CAN_BUSES) return refuse(TX_RAW_CMD, 0, 0.0f, TXS_BAD_FRAME);
+  if (!txArmed()) return refuse(TX_RAW_CMD, bus, 0.0f, TXS_NOT_ARMED);
+  if (len > 8)    return refuse(TX_RAW_CMD, bus, 0.0f, TXS_BAD_FRAME);
 
   TxRequest r;
   memset(&r, 0, sizeof(r));
   r.ticket = ++s_ticket;
   r.cmd    = TX_RAW_CMD;
+  r.bus    = bus;
   r.id     = id;
   r.ext    = ext ? 1 : 0;
   r.len    = len;
@@ -198,7 +214,10 @@ void txSetCyclic(uint8_t cmdIndex, bool on, float value) {
     return;
   }
   if (!txCommandUsed(g_dash.tx[cmdIndex]) || !g_dash.tx[cmdIndex].cyclicMs) return;
-  if (!txArmed()) { (void)refuse(cmdIndex, value, TXS_NOT_ARMED); return; }
+  if (!txArmed()) {
+    (void)refuse(cmdIndex, g_dash.tx[cmdIndex].bus, value, TXS_NOT_ARMED);
+    return;
+  }
 
   g_tx.cyclicValue[cmdIndex]  = value;
   g_tx.cyclicNextMs[cmdIndex] = millis();       /* first one goes out now */
@@ -223,19 +242,24 @@ bool txCyclicOn(uint8_t cmdIndex) {
  * message contained, and only the target signal's bits are changed. With
  * nothing ever seen for that identifier - a message this logger originates -
  * zeros are the only available starting point, and are correct. */
-static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
-                             uint8_t &status, float &applied, bool &clamped) {
-  if (c.sig < 0 || c.msg < 0 || c.msg >= (int16_t)g_dbc.msgCount) {
+static bool buildSignalFrame(const TxCommand &c, uint8_t bus, float value,
+                             CanFrame &f, uint8_t &status, float &applied,
+                             bool &clamped) {
+  const DbcDb &db = g_dbc[bus];
+  TxPending   &pend = s_pending[bus];
+
+  if (c.sig < 0 || c.msg < 0 || c.msg >= (int16_t)db.msgCount) {
     status = TXS_NO_SIGNAL;
     return false;
   }
-  const DbcMessage &m  = g_dbc.msg[c.msg];
-  const DbcSignal  &sg = g_dbc.sig[c.sig];
+  const DbcMessage &m  = db.msg[c.msg];
+  const DbcSignal  &sg = db.sig[c.sig];
 
   memset(&f, 0, sizeof(f));
   f.id  = m.id;
   f.ext = m.ext;
   f.tx  = 1;
+  f.bus = bus;
   f.len = m.dlc ? m.dlc : 8;
 
   /* Which selector code this value travels under, and which signal carries it.
@@ -246,11 +270,11 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
   int16_t selSig  = m.muxSignal;
   int16_t selCode = sg.muxValue;
   if (selSig < 0) {
-    const int16_t ov = txOverrideSelector(c, g_dbc);
+    const int16_t ov = txOverrideSelector(c, db);
     if (ov >= 0) { selSig = ov; selCode = c.muxCode; }
   }
 
-  if (s_pending.msg == c.msg) {
+  if (pend.msg == c.msg) {
     /* Continuing a frame: keep what the earlier members already wrote.
      *
      * Unless the two are under different selector codes, which is not a frame
@@ -260,12 +284,12 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
      * is not what anyone asked for. The page cannot build such a request any
      * more; a setup file written before it could still can, so it is refused
      * here as well as prevented there. */
-    if (selCode >= 0 && s_pending.mux >= 0 && selCode != s_pending.mux) {
+    if (selCode >= 0 && pend.mux >= 0 && selCode != pend.mux) {
       status = TXS_BAD_FRAME;
       return false;
     }
-    memcpy(f.data, s_pending.data, 8);
-    if (s_pending.len > f.len) f.len = s_pending.len;
+    memcpy(f.data, pend.data, 8);
+    if (pend.len > f.len) f.len = pend.len;
   } else if (selSig < 0) {
     /* Start from what the bus last said, so any signal of the message that was
      * not set up keeps the value it already had rather than being zeroed. A
@@ -273,7 +297,7 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
      * under different codes, so carrying a previous code's bytes forward would
      * send garbage under a new opcode. */
     uint8_t seenLen = 0;
-    if (busLastPayload(g_bus, m.id, m.ext != 0, f.data, &seenLen)) {
+    if (busLastPayload(g_bus[bus], m.id, m.ext != 0, f.data, &seenLen)) {
       if (seenLen > f.len) f.len = seenLen;
     }
   }
@@ -283,8 +307,8 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
    * WheelDia_mm is the payload of opcode 32, so opcode 32 is what goes out
    * with it. The code is a raw bit pattern by definition, so it is inserted
    * directly rather than pushed through the selector's scaling. */
-  if (selCode >= 0 && selSig >= 0 && (uint16_t)selSig < g_dbc.sigCount) {
-    const DbcSignal &ms = g_dbc.sig[selSig];
+  if (selCode >= 0 && selSig >= 0 && (uint16_t)selSig < db.sigCount) {
+    const DbcSignal &ms = db.sig[selSig];
     if (!dbcInsertBits(f.data, f.len, ms.startBit, ms.bits, ms.intel != 0,
                        (uint64_t)selCode)) {
       status = TXS_BAD_FRAME;
@@ -300,11 +324,14 @@ static bool buildSignalFrame(const TxCommand &c, float value, CanFrame &f,
   return true;
 }
 
-static void perform(MCP2515 &can, const TxRequest &r) {
+static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
+  TxPending &pend = s_pending[bus];
+
   TxOutcome o;
   memset(&o, 0, sizeof(o));
   o.ticket    = r.ticket;
   o.cmd       = r.cmd;
+  o.bus       = bus;
   o.requested = r.value;
 
   /* Checked here as well as at the door. A request can sit in the queue while
@@ -313,8 +340,8 @@ static void perform(MCP2515 &can, const TxRequest &r) {
   if (!txArmed()) {
     o.status = TXS_NOT_ARMED;
     o.ms     = millis();
-    s_pending.msg = -1;      /* an abandoned group leaves nothing behind */
-    s_pending.mux = -1;
+    pend.msg = -1;      /* an abandoned group leaves nothing behind */
+    pend.mux = -1;
     record(o);
     return;
   }
@@ -330,6 +357,7 @@ static void perform(MCP2515 &can, const TxRequest &r) {
     f.ext = r.ext;
     f.len = r.len;
     f.tx  = 1;
+    f.bus = bus;
     memcpy(f.data, r.data, 8);
   } else {
     const TxCommand &c = g_dash.tx[r.cmd];
@@ -339,12 +367,13 @@ static void perform(MCP2515 &can, const TxRequest &r) {
       f.ext = c.ext;
       f.len = c.len;
       f.tx  = 1;
+      f.bus = bus;
       memcpy(f.data, c.data, 8);
-    } else if (!buildSignalFrame(c, r.value, f, status, applied, clamped)) {
+    } else if (!buildSignalFrame(c, bus, r.value, f, status, applied, clamped)) {
       o.status = status;
       o.ms     = millis();
-      s_pending.msg = -1;
-      s_pending.mux = -1;
+      pend.msg = -1;
+      pend.mux = -1;
       record(o);
       g_tx.failed++;
       return;
@@ -353,15 +382,15 @@ static void perform(MCP2515 &can, const TxRequest &r) {
     /* Hold the frame for the next member of the group. Nothing goes on the
      * wire yet - a half-written command frame is worse than none. */
     if (r.hold && c.kind == TXK_SIGNAL) {
-      s_pending.msg = c.msg;
+      pend.msg = c.msg;
       /* The code this frame is being built under, by the same rule the frame
        * itself was built by: the map's own, else the manual override's. */
-      s_pending.mux = g_dbc.sig[c.sig].muxValue;
-      if (s_pending.mux < 0 && txOverrideSelector(c, g_dbc) >= 0) {
-        s_pending.mux = c.muxCode;
+      pend.mux = g_dbc[bus].sig[c.sig].muxValue;
+      if (pend.mux < 0 && txOverrideSelector(c, g_dbc[bus]) >= 0) {
+        pend.mux = c.muxCode;
       }
-      s_pending.len = f.len;
-      memcpy(s_pending.data, f.data, 8);
+      pend.len = f.len;
+      memcpy(pend.data, f.data, 8);
       o.status  = TXS_PENDING;
       o.ms      = millis();
       o.id      = f.id;
@@ -375,8 +404,8 @@ static void perform(MCP2515 &can, const TxRequest &r) {
     }
   }
 
-  s_pending.msg = -1;          /* this frame is complete either way */
-  s_pending.mux = -1;
+  pend.msg = -1;          /* this frame is complete either way */
+  pend.mux = -1;
 
   int16_t tec = 0;
   const MCP2515::TxResult res = can.sendFrame(f, TX_ATTEMPTS, &tec);
@@ -394,7 +423,7 @@ static void perform(MCP2515 &can, const TxRequest &r) {
 
   if (res != MCP2515::TX_OK) {
     g_tx.failed++;
-    LOG_LIVE(LVL_ERROR, "TX 0x%lX failed: %s",
+    LOG_LIVE(LVL_ERROR, "TX CAN%u 0x%lX failed: %s", (unsigned)(bus + 1),
              (unsigned long)f.id, txStatusText(o.status));
     return;
   }
@@ -407,17 +436,17 @@ static void perform(MCP2515 &can, const TxRequest &r) {
   f.esp_us = (uint64_t)esp_timer_get_time();
   if (g_frameQueue) {
     if (xQueueSend(g_frameQueue, &f, 0) != pdTRUE) {
-      LOG_FILE(LVL_WARN, "TX 0x%lX went out but did not fit in the recording",
-               (unsigned long)f.id);
+      LOG_FILE(LVL_WARN, "TX CAN%u 0x%lX went out but did not fit in the "
+                         "recording", (unsigned)(bus + 1), (unsigned long)f.id);
     }
   }
 
   if (r.cmd != TX_RAW_CMD && g_dash.tx[r.cmd].kind == TXK_SIGNAL) {
-    LOG_FILE(LVL_INFO, "TX %s = %s%.4g %s (0x%lX)", g_dash.tx[r.cmd].label,
-             clamped ? "clamped to " : "", (double)applied,
+    LOG_FILE(LVL_INFO, "TX CAN%u %s = %s%.4g %s (0x%lX)", (unsigned)(bus + 1),
+             g_dash.tx[r.cmd].label, clamped ? "clamped to " : "", (double)applied,
              g_dash.tx[r.cmd].unit, (unsigned long)f.id);
   } else {
-    LOG_FILE(LVL_INFO, "TX raw 0x%lX, %u bytes",
+    LOG_FILE(LVL_INFO, "TX CAN%u raw 0x%lX, %u bytes", (unsigned)(bus + 1),
              (unsigned long)f.id, (unsigned)f.len);
   }
 }
@@ -430,10 +459,26 @@ void txBegin() {
   }
 }
 
-void txService(MCP2515 &can) {
+/* Requests that arrived for the OTHER controller while this one was being
+ * serviced. A single FIFO keeps a group of values indivisible, which is the
+ * whole reason it is a FIFO - so a request for the other bus is set aside and
+ * put back rather than performed out of order or dropped. At most TX_QUEUE_LEN
+ * of them can exist, so this is bounded by the queue it came from. */
+static void requeueOthers(TxRequest *held, uint8_t n) {
+  for (uint8_t i = 0; i < n; i++) {
+    if (xQueueSend(s_queue, &held[i], 0) != pdTRUE) {
+      (void)refuse(held[i].cmd, held[i].bus, held[i].value, TXS_QUEUE_FULL);
+    }
+  }
+}
+
+void txService(MCP2515 &can, uint8_t bus) {
+  if (bus >= CAN_BUSES) return;
+
   /* The gate expiring is not a quiet event: a cyclic setpoint stops when it
-   * happens, and the operator needs to know why. */
-  if (g_tx.armed && !txArmed()) {
+   * happens, and the operator needs to know why. Checked on the first bus
+   * only, so two controllers do not each announce the same expiry. */
+  if (bus == 0 && g_tx.armed && !txArmed()) {
     LOG_LIVE(LVL_INFO, "transmit disarmed itself after %lu s idle",
              (unsigned long)(TX_ARM_TIMEOUT_MS / 1000UL));
     g_tx.armed    = 0;
@@ -442,7 +487,19 @@ void txService(MCP2515 &can) {
 
   if (s_queue) {
     TxRequest r;
-    while (xQueueReceive(s_queue, &r, 0) == pdTRUE) perform(can, r);
+    TxRequest held[TX_QUEUE_LEN];
+    uint8_t   nHeld = 0;
+
+    while (xQueueReceive(s_queue, &r, 0) == pdTRUE) {
+      if (r.bus == bus) {
+        perform(can, bus, r);
+      } else if (nHeld < TX_QUEUE_LEN) {
+        held[nHeld++] = r;
+      } else {
+        (void)refuse(r.cmd, r.bus, r.value, TXS_QUEUE_FULL);
+      }
+    }
+    requeueOthers(held, nHeld);
   }
 
   if (!g_tx.cyclicOn) return;
@@ -453,6 +510,7 @@ void txService(MCP2515 &can) {
 
     const TxCommand &c = g_dash.tx[i];
     if (!txCommandUsed(c) || !c.cyclicMs) { g_tx.cyclicOn &= ~(1UL << i); continue; }
+    if (c.bus != bus) continue;          /* the other controller's repeat */
     if ((int32_t)(now - g_tx.cyclicNextMs[i]) < 0) continue;
 
     /* Step the schedule from the deadline, not from now, so a period does not
@@ -466,7 +524,8 @@ void txService(MCP2515 &can) {
     memset(&r, 0, sizeof(r));
     r.ticket = ++s_ticket;
     r.cmd    = i;
+    r.bus    = bus;
     r.value  = g_tx.cyclicValue[i];
-    perform(can, r);
+    perform(can, bus, r);
   }
 }

@@ -11,7 +11,7 @@ static const char PAGE_1[] PROGMEM = R"HTML(<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>CAN Logger</title>
+<title>Dual CAN Logger</title>
 <style>
 :root{
   --bg:#0e1116; --panel:#171c24; --line:#252c38; --txt:#e8edf5; --dim:#8b97a8;
@@ -136,6 +136,26 @@ button.reboot:hover{border-color:var(--bad);color:var(--bad)}
   color:var(--dim);font-weight:600;padding:0 4px}
 .step b{font-variant-numeric:tabular-nums;min-width:16px;text-align:center;
   font-size:14px}
+/* The bus badge on a dashboard cell. Small, dim and out of the way: it answers
+   "which wire is this" when asked, and does not compete with the value. */
+.cell .cbus{position:absolute;top:6px;left:8px;font-size:10px;letter-spacing:.4px;
+            color:var(--dim);text-transform:uppercase}
+
+/* Bus selectors. Wider than a stepper button because they carry a word, and
+   the selected one is filled so "which bus am I looking at" survives a glance
+   from arm's length - which is how this page is usually read. */
+/* `.step button` sets a 28px square for the +/- steppers, and it is the more
+   specific selector, so these have to say `.step .bussel` to win. Written that
+   way rather than moving them out of `.step` because the row spacing and
+   alignment are exactly what a stepper row already gives. */
+.bussel, .step .bussel{
+  width:auto;padding:0 14px;height:28px;border-radius:8px;
+  font:inherit;font-size:13px;font-weight:500;line-height:26px;
+  white-space:nowrap;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel);color:var(--txt)}
+.bussel + .bussel, .step .bussel + .bussel{margin-left:6px}
+.bussel.on, .step .bussel.on{
+  background:var(--acc);border-color:var(--acc);color:#08111f;font-weight:600}
 .step button{width:28px;height:28px;padding:0;margin:0;border-radius:8px;
   font-size:16px;line-height:1;background:var(--panel)}
 
@@ -444,7 +464,7 @@ tr.un td{color:var(--dim)}
  * ======================================================================== */
 static const char PAGE_2[] PROGMEM = R"HTML(
 <header>
-  <h1>CAN Logger</h1>
+  <h1>Dual CAN Logger</h1>
   <div class="tabs" id="tabs">
     <button data-tab="dash" class="on">Dashboard</button>
     <button data-tab="bus">Bus</button>
@@ -466,22 +486,34 @@ static const char PAGE_2[] PROGMEM = R"HTML(
       <div class="state"><span class="dot" id="d_sd"></span>
         <div><div class="big" id="t_sd">--</div><div class="sub" id="s_sd"></div></div></div>
     </div>
-    <div class="card"><h2>Bus</h2>
-      <div class="state"><span class="dot" id="d_can"></span>
-        <div><div class="big" id="t_can">--</div><div class="sub" id="s_can"></div></div></div>
+    <!-- One card per controller. Deliberately NOT merged into a single "Bus"
+         card: the failure worth catching is asymmetric - one bus deaf while
+         the other is fine - and an averaged figure is exactly the thing that
+         would hide it. Frame rate, interrupt health and load are all per bus,
+         so they live together here. -->
+    <div class="card"><h2>CAN 1</h2>
+      <div class="state"><span class="dot" id="d_c1"></span>
+        <div><div class="big" id="t_c1">--</div><div class="sub" id="s_c1"></div></div></div>
+      <div class="meter"><span id="bar_c1"></span></div>
     </div>
-    <div class="card"><h2>Interrupt Path</h2>
-      <div class="state"><span class="dot" id="d_irq"></span>
-        <div><div class="big" id="t_irq">--</div><div class="sub" id="s_irq"></div></div></div>
+    <div class="card"><h2>CAN 2</h2>
+      <div class="state"><span class="dot" id="d_c2"></span>
+        <div><div class="big" id="t_c2">--</div><div class="sub" id="s_c2"></div></div></div>
+      <div class="meter"><span id="bar_c2"></span></div>
     </div>
+    <!-- Shared, because there is one queue and one card. Losing a frame here
+         costs it whichever controller it arrived on. -->
     <div class="card"><h2>Data Integrity</h2>
       <div class="state"><span class="dot" id="d_lost"></span>
         <div><div class="big" id="t_lost">--</div><div class="sub" id="s_lost"></div></div></div>
     </div>
-    <div class="card"><h2>CAN Bus Load</h2>
-      <div class="state"><span class="dot" id="d_load"></span>
-        <div><div class="big" id="t_load">--</div><div class="sub" id="s_load"></div></div></div>
-      <div class="meter"><span id="loadbar"></span></div>
+    <!-- The number the dual-bus design turns on: worst microseconds spent
+         draining BOTH controllers in one pass, against the ~200 us a third
+         frame takes to arrive at 500 kbit/s. -->
+    <div class="card"><h2>Capture Path</h2>
+      <div class="state"><span class="dot" id="d_drain"></span>
+        <div><div class="big" id="t_drain">--</div><div class="sub" id="s_drain"></div></div></div>
+      <div class="meter"><span id="drainbar"></span></div>
     </div>
   </div>
 
@@ -538,7 +570,20 @@ static const char PAGE_2[] PROGMEM = R"HTML(
 
 <!-- ==================== BUS ==================== -->
 <section id="v_bus" hidden>
-  <div class="card">
+  <!-- One bus at a time rather than two tables side by side. The question a
+       reader has here is "what is on THIS wire", and interleaving two buses
+       into one table answers a question nobody asked while making the real one
+       harder. The selector is remembered for the session. -->
+  <div class="bar">
+    <div class="step" id="buspick">
+      <button class="bussel on" data-bus="1">CAN 1</button
+      ><button class="bussel" data-bus="2">CAN 2</button>
+    </div>
+    <div class="spacer"></div>
+    <span class="sub" id="s_buspick">&nbsp;</span>
+  </div>
+
+  <div class="card" style="margin-top:12px">
     <h2>Live Signals</h2>
     <div class="scroll">
       <table class="sig"><thead><tr>
@@ -614,6 +659,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
       <div style="grid-column:span 2"><label for="rawdata">Payload, hex</label>
         <input id="rawdata" placeholder="2F10200001000000" autocomplete="off"></div>
     </div>
+    <div class="step" id="rawbus" style="margin:8px 0"></div>
     <button id="rawsend" class="pri">Send this frame</button>
     <div class="sub">Up to eight bytes, exactly as typed. This is the way out
       when a value is not in the frame map at all &mdash; nothing about it is
@@ -636,6 +682,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <div class="preview"><div class="cell" id="prevcell"></div></div>
 
     <h4>Signal</h4>
+    <div class="step" id="ebus" style="margin-bottom:8px"></div>
     <input id="sfilter" placeholder="Search messages and signals" autocomplete="off">
     <div class="slist" id="slist" style="margin-top:8px"></div>
 
@@ -678,6 +725,15 @@ static const char PAGE_2[] PROGMEM = R"HTML(
       picked &mdash; a list of the four tyre sizes your fleet actually uses is a
       far better thing to hand somebody standing next to a running machine than
       an empty number box.</div>
+    <div class="card" style="margin-bottom:14px">
+      <h2>Which bus</h2>
+      <div class="sub" style="margin:0 0 8px">Values already set up for the
+        other bus stay exactly as they are. This chooses which frame map the
+        list below offers, and which controller a value added from here will
+        be sent on.</div>
+      <div class="step" id="txbus"></div>
+    </div>
+
     <div class="card" style="margin-bottom:14px">
       <h2>Fill from the frame map</h2>
       <div class="sub" style="margin:0 0 4px">Most machines take their settings
@@ -809,7 +865,20 @@ var CFG = { cols:4, rows:2, poll:200, role:'', cells:{}, tx:{} };
 /* How many cells this firmware can store. Told to us by /api/dash rather than
    written down here, so the two cannot drift apart. */
 var MAXCELLS = 48, MAXSEND = 32;
-var DBC = { loaded:0, m:[] };     /* the frame map, fetched when the editor opens */
+/* How many controllers this firmware has. Kept in one place so the page has a
+   single answer, and so a third bus would be a number rather than a rewrite. */
+var NBUS  = 2;
+
+/* One frame map per bus, fetched on demand and cached. DBC is whichever of
+   them the OPEN EDITOR is about - every dialog edits one cell or one setpoint,
+   and that belongs to exactly one bus, so the twenty places that read DBC.m
+   stay as they are and only the swap has to be got right. */
+var DBCS  = [null, null];
+var DBC   = { loaded:0, m:[] };
+var EDBUS = 1;                    /* the bus the open editor is working on */
+var BUS   = 1;                    /* the bus the Bus tab is showing        */
+
+function edBus(){ return EDBUS; }
 var GEN = 0;
 
 function cellsCount(){ return Math.min(CFG.cols * CFG.rows, MAXCELLS); }
@@ -858,6 +927,15 @@ function numOr(v, dflt){
   return isFinite(f) ? f : dflt;
 }
 
+/* Which bus a cell or setpoint belongs to, as the file writes it: one-based,
+   and absent means bus 1. Kept one-based on the client too, because every
+   label the operator sees says CAN 1 and CAN 2 and a page that counted from
+   zero internally would eventually show it. */
+function busOr(v){
+  var n = parseInt(v, 10);
+  return (n >= 1 && n <= NBUS) ? n : 1;
+}
+
 function parseCfg(text){
   var c = { cols:4, rows:2, poll:200, role:'', cells:{}, tx:{} };
   text.split(/\r?\n/).forEach(function(line){
@@ -887,7 +965,7 @@ function parseCfg(text){
       if(kw === 'cell'){
         if(!p.sig) return;
         c.cells[idx] = {
-          w: p.widget || 'number', sig: p.sig,
+          w: p.widget || 'number', sig: p.sig, b: busOr(p.bus),
           label: p.label || '', unit: p.unit || '',
           lo: numOr(p.lo, 0), hi: numOr(p.hi, 100),
           dec: p.dec === undefined ? null : parseInt(p.dec, 10),
@@ -898,7 +976,7 @@ function parseCfg(text){
       } else {
         if(!p.label) return;
         c.tx[idx] = {
-          label: p.label, sig: p.sig || '', unit: p.unit || '',
+          label: p.label, sig: p.sig || '', b: busOr(p.bus), unit: p.unit || '',
           lo: numOr(p.lo, 0), hi: numOr(p.hi, 0),
           step: numOr(p.step, 1), preset: numOr(p.preset, 0),
           dec: p.dec === undefined ? null : parseInt(p.dec, 10),
@@ -937,6 +1015,9 @@ function dumpCfg(){
     var c = CFG.cells[i];
     if(!c || !c.sig) return;
     var s = 'cell ' + i + ' widget=' + c.w + ' sig=' + quote(c.sig);
+    /* Only when it is not bus 1, so a single-bus layout round trips to exactly
+       the file it came from - the firmware writes it the same way. */
+    if(c.b > 1) s += ' bus=' + c.b;
     if(c.label) s += ' label=' + quote(c.label);
     if(c.unit)  s += ' unit=' + quote(c.unit);
     s += ' lo=' + trimNum(c.lo) + ' hi=' + trimNum(c.hi);
@@ -950,6 +1031,7 @@ function dumpCfg(){
     var t = CFG.tx[i];
     if(!t || !t.label) return;
     var s = 'send ' + i + ' label=' + quote(t.label);
+    if(t.b > 1) s += ' bus=' + t.b;
     if(t.raw){
       s += ' id=' + (t.id || '0x000');
       if(t.ext) s += ' ext=1';
@@ -1459,6 +1541,14 @@ function buildCell(slot){
   tools.appendChild(bEdit); tools.appendChild(bDel);
   e.appendChild(tools);
 
+  /* Badged only when it is NOT bus 1. On a dashboard where most cells come
+     from one bus, marking every cell would be noise; marking the exceptions is
+     the information. A one-bus dashboard looks exactly as it did. */
+  if((c.b || 1) > 1){
+    var badge = el('div', 'cbus', 'CAN ' + c.b);
+    e.appendChild(badge);
+  }
+
   e.appendChild(el('div', 'cname', cellTitle(c)));
 
   var w = makeWidget(c);
@@ -1551,7 +1641,7 @@ function applyValues(v, f){
       o.val.className = 'cval' + (o.w.node ? '' : ' big') + ' v-' + z;
     }
     if(o.w.set) o.w.set(num, raw, z);
-    if(c.sig) LIVE[c.sig] = raw;
+    if(c.sig) LIVE[(c.b || 1) + ':' + c.sig] = raw;
   });
 }
 
@@ -1568,47 +1658,88 @@ function paintHealth(d){
   else { setDot('d_sd','ok'); q('t_sd').textContent = 'READY';
              q('s_sd').textContent = d.sdType + ', ' + (d.sdMB/1024).toFixed(1) + ' GB'; }
 
-  if(!d.can){
-    setDot('d_irq','warn'); q('t_irq').textContent = 'IDLE';
-    q('s_irq').textContent = 'No traffic, nothing to interrupt on';
-  } else if(d.intStuck){
-    setDot('d_irq','bad'); q('t_irq').textContent = 'NOT FIRING';
-    q('s_irq').textContent = 'Running on the fallback poll - check the INT wire';
-  } else {
-    setDot('d_irq','ok'); q('t_irq').textContent = d.irq.toLocaleString() + ' /s';
-    q('s_irq').textContent = 'ISR healthy - INT line ' +
-                             (d.intLevel ? 'idle high' : 'asserted');
+  /* One card per controller. `d.can` is the ARRAY of them - both /api/status
+     and the dashboard poll carry the same shape, so this runs unchanged on
+     either. */
+  var buses = d.can || [];
+  for(var bi = 0; bi < buses.length; bi++){
+    var b = buses[bi], n = bi + 1;
+    var dot = 'd_c' + n, big = 't_c' + n, sub = 's_c' + n, bar = 'bar_c' + n;
+    if(!q(dot)) continue;
+
+    if(!b.on){
+      /* Two different reasons a controller is not here, and they need
+         different messages: compiled out is a decision, no answer is a
+         wiring check. Telling somebody with an unplugged module that it is
+         "disabled in config.h" sends them to the wrong file. */
+      setDot(dot, b.en ? 'bad' : 'warn');
+      q(big).textContent = b.en ? 'NOT DETECTED' : 'OFF';
+      q(sub).textContent = b.en
+        ? 'No controller answered - check this module, or set CAN' + n +
+          '_ENABLED 0'
+        : 'Disabled in config.h - running as a single-bus logger';
+      q(bar).style.width = '0%'; continue;
+    }
+    if(b.intStuck){
+      /* The worst failure this logger has, because it is silent: frames still
+         arrive, just ninety percent fewer of them. */
+      setDot(dot,'bad'); q(big).textContent = 'INT NOT FIRING';
+      q(sub).textContent = 'On the fallback poll - check this bus\'s INT wire';
+    } else if(!b.alive){
+      setDot(dot,'bad'); q(big).textContent = 'NO DATA';
+      q(sub).textContent = 'Check the wiring, bit rate and this module\'s crystal';
+    } else {
+      setDot(dot,'ok');
+      q(big).textContent = b.fps.toLocaleString() + ' /s';
+      q(sub).textContent = b.load + '% load \u00b7 irq ' + b.irq.toLocaleString() +
+                           '/s \u00b7 INT ' + (b.intLevel ? 'idle high' : 'asserted') +
+                           (b.dbc ? '' : ' \u00b7 raw');
+    }
+
+    var L = b.alive ? b.load : 0, eb = q(bar);
+    eb.style.width = Math.min(L, 100) + '%';
+    eb.style.background = L < 60 ? 'var(--ok)' : (L < 80 ? 'var(--warn)' : 'var(--bad)');
   }
 
-  var L = d.load;
-  q('t_load').textContent = L + '%';
-  q('s_load').textContent = d.fps.toLocaleString() + ' frames/s';
-  var bar2 = q('loadbar');
-  bar2.style.width = Math.min(L, 100) + '%';
-  if(L < 60){ setDot('d_load','ok');   bar2.style.background = 'var(--ok)'; }
-  else if(L < 80){ setDot('d_load','warn'); bar2.style.background = 'var(--warn)'; }
-  else { setDot('d_load','bad'); bar2.style.background = 'var(--bad)'; }
-
-  if(d.can){ setDot('d_can','ok'); q('t_can').textContent = 'RECEIVING';
-             q('s_can').textContent = d.fps + ' frames/s'; }
-  else { setDot('d_can','bad'); q('t_can').textContent = 'NO DATA';
-             q('s_can').textContent = 'Check the wiring, bit rate and crystal'; }
+  /* "on either bus" is a lie on a logger with one module fitted, and it is
+     the kind of lie that makes somebody go looking for hardware they never
+     installed. Counted from what actually answered. */
+  var liveBuses = 0;
+  for(var li = 0; li < buses.length; li++) if(buses[li].on) liveBuses++;
 
   if(!d.lost){ setDot('d_lost','ok'); q('t_lost').textContent = 'ALL GOOD';
-               q('s_lost').textContent = 'No frames lost - up to ' + d.risk +
-                 ' ms at risk if power is cut'; }
+               q('s_lost').textContent = 'No frames lost on ' +
+                 (liveBuses > 1 ? 'either bus' : 'the bus') + ' - up to ' +
+                 d.risk + ' ms at risk if power is cut'; }
   else {
-    /* The controller's overflow flags are sticky: they say a frame was lost,
-       never how many. So this is a FLOOR, and it says so - a number presented
-       as exact when it is not is worse than no number. */
+    /* A FLOOR, and it says so. The queue-drop half is exact - it counts frames
+       - but a controller's overflow flags are sticky and say only THAT a frame
+       was lost, never how many. Broken out per bus, because "which one" is the
+       first thing anyone needs to know. */
     setDot('d_lost','bad');
     q('t_lost').textContent = '\u2265 ' + d.lost + ' LOST';
     var parts = [];
-    if(d.qDrop) parts.push(d.qDrop + ' the writer could not keep up with');
-    if(d.ovfEv) parts.push(d.ovfEv + ' controller overflow(s), each costing at '
-                           + 'least one frame and usually more');
+    if(d.qDrop) parts.push(d.qDrop + ' the writer could not keep up with (exact)');
+    for(var k = 0; k < buses.length; k++){
+      if(buses[k].ovfEv) parts.push('CAN' + (k+1) + ': ' + buses[k].ovfEv +
+        ' controller overflow(s), each costing at least one frame and usually more');
+    }
     q('s_lost').textContent = parts.length ? parts.join(' \u00b7 ')
                                            : 'Some frames could not be saved';
+  }
+
+  /* Drain time against the 200 us deadline. Shown always, not only when it has
+     gone wrong: the margin is the claim, so it should be visible while it
+     holds rather than appearing only once it does not. */
+  if(q('t_drain')){
+    var us = d.drain || 0, pct = Math.min(us / 2, 100);
+    q('t_drain').textContent = us + ' \u00b5s';
+    q('s_drain').textContent = 'worst drain of both controllers, deadline 200 \u00b5s' +
+      (d.qPeak !== undefined ? ' \u00b7 queue peak ' + d.qPeak + '/' + d.qLen : '');
+    setDot('d_drain', us < 120 ? 'ok' : (us < 200 ? 'warn' : 'bad'));
+    var db = q('drainbar');
+    db.style.width = pct + '%';
+    db.style.background = us < 120 ? 'var(--ok)' : (us < 200 ? 'var(--warn)' : 'var(--bad)');
   }
 
   if(d.rec){
@@ -1684,11 +1815,14 @@ function paintIds(list){
   body.innerHTML = html || '<tr><td colspan="5">nothing received yet</td></tr>';
 }
 
-function paintSigs(list, mapped){
+function paintSigs(list, mapped, bus){
   var body = q('sigs'), html = '', i;
   for(i = 0; i < list.length; i++){
     var e2 = list[i];
-    LIVE[e2.m + '.' + e2.s] = e2.v;
+    /* Keyed by bus as well as by name. Two buses routinely carry a message of
+       the same name, and a shared key would have one bus's value quietly
+       overwriting the other's on every poll - including on the dashboard. */
+    LIVE[bus + ':' + e2.m + '.' + e2.s] = e2.v;
     html += '<tr><td class="c1 ell" title="' + esc(e2.m) + '">' + esc(e2.m) +
             '</td><td class="c2 ell" title="' + esc(e2.s) + '">' + esc(e2.s) +
             '</td><td class="c3 num mono">' + esc(e2.v) +
@@ -1706,17 +1840,43 @@ function pollStatus(){
   return fetch('/api/status').then(function(r){ return r.json(); }).then(function(d){
     fails = 0;
     paintHealth(d);
-    paintSigs(d.sig, d.dbc);
-    q('s_sigs').textContent = d.dbc
-      ? ('frame map loaded: ' + d.dbcMsg + ' messages, ' + d.dbcSig + ' signals' +
-         (d.sigMore ? '  -  showing the first ' + d.sig.length : ''))
-      : 'add a DBC file to the card to decode signals in real time';
-    paintIds(d.ids);
-    q('s_ids').textContent = d.idMore
-      ? 'more identifiers are on the bus than the table tracks - all of them ' +
-        'are still recorded'
-      : 'every identifier seen since the recording started';
+
+    /* Every bus's live values are absorbed on every poll, whichever one the
+       tables are showing: a dashboard cell reads from LIVE, and a cell bound to
+       CAN 2 must keep updating while the operator is looking at CAN 1. */
+    var all = d.can || [];
+    for(var i = 0; i < all.length; i++) paintLive(all[i].b, all[i].sig || []);
+
+    var b = all[BUS - 1];
+    if(!b){ return; }
+
+    paintSigs(b.sig || [], b.dbc, b.b);
+    q('s_sigs').textContent = b.dbc
+      ? ('CAN ' + b.b + ' frame map: ' + b.dbcMsg + ' messages, ' + b.dbcSig +
+         ' signals' + (b.sigMore ? '  -  showing the first ' + b.sig.length : ''))
+      : ('no frame map for CAN ' + b.b +
+         ' - upload one to decode this bus in real time');
+
+    paintIds(b.ids || []);
+    q('s_ids').textContent = b.idMore
+      ? 'more identifiers are on CAN ' + b.b + ' than the table tracks - all of ' +
+        'them are still recorded'
+      : 'every identifier seen on CAN ' + b.b + ' since the recording started';
+
+    q('s_buspick').textContent = all.map(function(x){
+      return 'CAN ' + x.b + ': ' + (x.on ? (x.kbps + ' kbit/s, ' +
+             (x.alive ? x.fps.toLocaleString() + ' frames/s' : 'quiet'))
+             : (x.en ? 'not detected' : 'off'));
+    }).join('   \u00b7   ');
   }).catch(function(){ if(++fails > 2) q('conn').textContent = 'connection lost'; });
+}
+
+/* Fills LIVE for one bus without touching the DOM. Split out from paintSigs so
+   the values of the bus that is NOT on screen still reach the dashboard. */
+function paintLive(bus, list){
+  for(var i = 0; i < list.length; i++){
+    LIVE[bus + ':' + list[i].m + '.' + list[i].s] = list[i].v;
+  }
 }
 
 function pollLog(){
@@ -1778,10 +1938,18 @@ function loadCfg(){
       startPolls();
     });
 }
-function loadDbc(force){
-  if(DBC.m.length && !force) return Promise.resolve();
-  return fetch('/api/signals').then(function(r){ return r.json(); })
-    .then(function(d){ DBC = d; });
+function loadDbc(bus, force){
+  bus = bus || EDBUS;
+  EDBUS = bus;
+  if(DBCS[bus - 1] && !force){ DBC = DBCS[bus - 1]; return Promise.resolve(); }
+  return fetch('/api/signals?bus=' + bus).then(function(r){ return r.json(); })
+    .then(function(d){ DBCS[bus - 1] = d; DBC = d; });
+}
+
+/* Point the editor at another bus and redraw whatever it is showing. Used by
+   the bus selector inside the cell and setpoint dialogs. */
+function useDbc(bus, after){
+  return loadDbc(bus, false).then(function(){ if(after) after(); });
 }
 
 /* ---- customize mode ---------------------------------------------------- */
@@ -1790,7 +1958,7 @@ function setEdit(on){
   document.body.classList.toggle('edit', on);
   q('editbar').hidden = !on;
   q('viewbar').hidden = on;
-  if(on) loadDbc();
+  if(on) loadDbc(BUS);
   renderGrid();
   startPolls();
   if(!on) saveCfg();          /* leaving the editor is a decision */
@@ -2111,8 +2279,9 @@ function renderSignalList(filter){
       nm.title = ref;
       row.appendChild(nm);
       row.appendChild(el('div', 'sm', m.n + (s.u ? ' · ' + s.u : '')));
+      var lk = edBus() + ':' + ref;
       row.appendChild(el('div', 'sv',
-        LIVE[ref] !== undefined && LIVE[ref] !== '' ? LIVE[ref] : ''));
+        LIVE[lk] !== undefined && LIVE[lk] !== '' ? LIVE[lk] : ''));
       row.onclick = function(){ chooseSignal(ref, s); };
       if(edCfg.sig === ref) box._sel = row;
       box.appendChild(row);
@@ -2232,7 +2401,7 @@ function refreshPreview(){
   if(w.node) gfx.appendChild(w.node);
   host.appendChild(gfx);
 
-  var raw = LIVE[edCfg.sig];
+  var raw = LIVE[(edCfg.b || 1) + ':' + edCfg.sig];
   var v = (raw === undefined || raw === '') ? NaN : parseFloat(raw);
   /* With nothing live, park the needle where it can be seen rather than hard
      against the stop. */
@@ -2248,23 +2417,61 @@ function refreshPreview(){
 }
 
 function openEditor(slot){
-  loadDbc().then(function(){
+  var have = CFG.cells[slot];
+  /* An existing cell opens on ITS bus; a new one opens on whichever bus the
+     operator was last looking at, which is almost always the one they mean. */
+  var bus = have ? (have.b || 1) : BUS;
+
+  loadDbc(bus).then(function(){
     edSlot = slot;
-    var have = CFG.cells[slot];
     edPicked = !!have;
     edCfg = have ? JSON.parse(JSON.stringify(have))
-                 : {w:'number', sig:'', label:'', unit:'', lo:0, hi:100,
+                 : {w:'number', sig:'', b:bus, label:'', unit:'', lo:0, hi:100,
                     dec:null, warn:null, crit:null, lowbad:0};
+    if(!edCfg.b) edCfg.b = bus;
 
     q('sheettitle').textContent = have ? 'Edit this cell' : 'Add a value';
     q('e_del').style.display = have ? '' : 'none';
     q('sfilter').value = '';
+    renderBusPicker();
     renderSignalList('');
     renderWidgetPicker();
     fieldsFromCfg();
     refreshPreview();
     q('sheet').classList.add('on');
   });
+}
+
+/* Which bus this cell reads from. Offered as a pair of buttons above the
+   signal list rather than buried in the fields, because changing it changes
+   what the list below can even offer - and a signal chosen from the wrong
+   bus's map is a cell that will never show a value. */
+function renderBusPicker(){
+  var box = q('ebus');
+  if(!box) return;
+  box.innerHTML = '';
+  for(var i = 1; i <= NBUS; i++){
+    (function(n){
+      var b = el('button', 'bussel' + (edCfg.b === n ? ' on' : ''), 'CAN ' + n);
+      b.onclick = function(){
+        if(edCfg.b === n) return;
+        edCfg.b = n;
+        /* The old signal belonged to the old map. Clearing it is the honest
+           move: silently keeping a reference this bus cannot resolve would
+           produce a cell that looks configured and never updates. */
+        edCfg.sig = '';
+        edPicked = false;
+        useDbc(n, function(){
+          renderBusPicker();
+          q('sfilter').value = '';
+          renderSignalList('');
+          fieldsFromCfg();
+          refreshPreview();
+        });
+      };
+      box.appendChild(b);
+    })(i);
+  }
 }
 function closeEditor(){ q('sheet').classList.remove('on'); }
 
@@ -2617,9 +2824,12 @@ function txUnitKey(map, i){
   var t = map[i];
   if(!t || !t.sig) return 'i' + i;
   var c = muxCodeOf(t);
-  /* '#' cannot occur in a DBC name, so one message's code can never
+  /* Keyed by BUS as well. Two buses routinely carry a message of the same
+     name, and grouping them together would build one frame out of values
+     belonging to two different wires - which cannot be sent at all.
+     '#' cannot occur in a DBC name, so one message's code can never
      collide with another message that happens to be named after it. */
-  return 'm' + msgOf(t.sig) + (c === null ? '' : '#' + c);
+  return 'b' + (t.b || 1) + 'm' + msgOf(t.sig) + (c === null ? '' : '#' + c);
 }
 
 /* [{key, ids, msg, code, mux}], in the order the values were set up. */
@@ -2636,6 +2846,7 @@ function txUnits(map){
   order.forEach(function(u){
     var t = map[u.ids[0]];
     u.msg  = (t && t.sig) ? msgOf(t.sig) : '';
+    u.bus  = (t && t.b) ? t.b : 1;
     u.code = muxCodeOf(t);
     u.mux  = u.code !== null;
   });
@@ -2649,8 +2860,11 @@ function txUnits(map){
 function txFrames(map){
   var out = [], at = {};
   txUnits(map).forEach(function(u){
-    var k = u.msg || u.key;
-    if(at[k] === undefined){ at[k] = out.length; out.push({msg:u.msg, units:[]}); }
+    var k = 'b' + u.bus + (u.msg || u.key);
+    if(at[k] === undefined){
+      at[k] = out.length;
+      out.push({msg:u.msg, bus:u.bus, units:[]});
+    }
     out[at[k]].units.push(u);
   });
   return out;
@@ -2957,7 +3171,8 @@ function renderTxEdit(){
     var oh = el('div', 'ghead');
     oh.appendChild(el('b', null, fr.msg));
     oh.appendChild(el('span', null, 'multiplexed — ' + fr.units.length
-      + ' frames on one identifier'));
+      + ' frames on one identifier'
+      + (fr.bus > 1 ? ' · CAN ' + fr.bus : '')));
     var ctl = muxOverrideControl(TXED, fr);
     if(ctl) oh.appendChild(ctl);
     o.appendChild(oh);
@@ -3402,9 +3617,39 @@ function txFillFromMap(){
   }
 }
 
+/* Which bus the TX editor is currently offering signals from. Values already
+   set up for the other bus are still listed and still saved - this only
+   decides what a NEW value can be built out of. */
+var TXBUS = 1;
+
+function renderTxBusPicker(){
+  var box = q('txbus');
+  if(!box) return;
+  box.innerHTML = '';
+  for(var i = 1; i <= NBUS; i++){
+    (function(n){
+      var b = el('button', 'bussel' + (TXBUS === n ? ' on' : ''), 'CAN ' + n);
+      b.onclick = function(){
+        if(TXBUS === n) return;
+        TXBUS = n;
+        useDbc(n, function(){ renderTxBusPicker(); openTxEditBody(); });
+      };
+      box.appendChild(b);
+    })(i);
+  }
+}
+
 function openTxEdit(){
-  return loadDbc().then(function(){
-    TXED = JSON.parse(JSON.stringify(CFG.tx));
+  TXBUS = BUS;
+  return loadDbc(TXBUS).then(function(){
+    renderTxBusPicker();
+    return openTxEditBody();
+  });
+}
+
+function openTxEditBody(){
+  return Promise.resolve().then(function(){
+    if(!TXED || !Object.keys(TXED).length) TXED = JSON.parse(JSON.stringify(CFG.tx));
 
     /* A setup written before the whole-frame rule, or against a frame map that
        has since changed, is made whole here rather than left to send frames
@@ -3602,6 +3847,14 @@ q('rolesheet').onclick  = function(e){
   if(e.target === q('rolesheet')) q('rolesheet').classList.remove('on');
 };
 
+/* The button carries its target. Uploading replaces one bus's frame map and
+   drops every dashboard cell that map cannot account for, so which bus it is
+   about has to be readable BEFORE the click, not explained in the toast
+   afterwards. It follows the Bus tab's selector. */
+function renderDbcBtn(){
+  q('dbcbtn').textContent = 'Frame map: CAN ' + BUS;
+}
+
 q('dbcbtn').onclick = function(){ q('dbcpick').click(); };
 
 q('dbcpick').onchange = function(){
@@ -3615,10 +3868,11 @@ q('dbcpick').onchange = function(){
   var fd = new FormData();
   fd.append('file', f, f.name);
 
-  toast('Sending the frame map', f.name + ' — ' + Math.round(f.size / 1024)
-        + ' KB', 'ok');
+  var target = BUS;
+  toast('Sending the frame map for CAN ' + target,
+        f.name + ' — ' + Math.round(f.size / 1024) + ' KB', 'ok');
 
-  fetch('/api/dbc', {method:'POST', body:fd})
+  fetch('/api/dbc?bus=' + target, {method:'POST', body:fd})
     .then(function(r){ return r.json(); })
     .then(function(d){
       if(!d.ok){
@@ -3631,9 +3885,12 @@ q('dbcpick').onchange = function(){
          rather than pruned a second time in the browser. Two copies pruning
          themselves independently is exactly how a page holding the old layout
          gets to write it back over a card that had just been cleaned. */
-      return loadDbc(1).then(loadCfg).then(function(){
-        toast('Frame map loaded', d.messages + ' message(s), ' + d.signals
-              + ' signal(s)'
+      /* Forced, because this bus's cached map is exactly the one that just
+         changed. The other bus's cache is untouched and stays valid. */
+      DBCS[target - 1] = null;
+      return loadDbc(target, true).then(loadCfg).then(function(){
+        toast('Frame map loaded for CAN ' + target,
+              d.messages + ' message(s), ' + d.signals + ' signal(s)'
               + (d.errors ? ', ' + d.errors + ' line(s) unreadable' : '')
               + (d.dropped ? ' — ' + d.dropped + ' item(s) from the old map '
                         + 'removed' : ''), 'ok');
@@ -3685,6 +3942,23 @@ q('filepick').onchange = function(){
 };
 
 q('sfilter').oninput = function(){ renderSignalList(q('sfilter').value); };
+
+/* The Bus tab's controller selector. Repaints immediately from the next poll
+   rather than waiting for it, so a tap feels like it did something. */
+Array.prototype.forEach.call(q('buspick').querySelectorAll('.bussel'),
+  function(b){
+    b.onclick = function(){
+      var n = parseInt(b.dataset.bus, 10);
+      if(!(n >= 1 && n <= NBUS) || n === BUS) return;
+      BUS = n;
+      Array.prototype.forEach.call(q('buspick').querySelectorAll('.bussel'),
+        function(o){ o.classList.toggle('on', +o.dataset.bus === BUS); });
+      renderDbcBtn();
+      q('sigs').innerHTML = '<tr><td colspan="4">loading...</td></tr>';
+      q('ids').innerHTML  = '<tr><td colspan="5">loading...</td></tr>';
+      pollStatus();
+    };
+  });
 ['f_label','f_unit','f_dec','f_lo','f_hi','f_warn','f_crit'].forEach(function(id){
   q(id).oninput = function(){ cfgFromFields(); refreshPreview(); };
 });
@@ -3735,8 +4009,29 @@ q('rawsend').onclick = function(){
   var data = q('rawdata').value.replace(/[^0-9a-fA-F]/g, '');
   if(!id){ toast('Not sent', 'Enter an identifier', 'bad'); return; }
   if(data.length % 2){ toast('Not sent', 'The payload needs whole bytes', 'bad'); return; }
-  postForm('/api/tx/send', {id:id, data:data}).then(pollDash);
+  /* A typed-in frame has no setpoint to take a bus from, so it goes out on the
+     one the operator has selected - which the button label states. */
+  postForm('/api/tx/send', {bus:RAWBUS, id:id, data:data}).then(pollDash);
 };
+
+/* Which bus the one-off frame goes out on. Its own selector rather than the
+   Bus tab's, because typing a frame and reading a bus are separate acts and
+   silently borrowing the other tab's selection is how the wrong ECU gets
+   written to. */
+var RAWBUS = 1;
+function renderRawBus(){
+  var box = q('rawbus');
+  if(!box) return;
+  box.innerHTML = '';
+  for(var i = 1; i <= NBUS; i++){
+    (function(n){
+      var b = el('button', 'bussel' + (RAWBUS === n ? ' on' : ''), 'CAN ' + n);
+      b.onclick = function(){ RAWBUS = n; renderRawBus(); };
+      box.appendChild(b);
+    })(i);
+  }
+}
+renderRawBus();
 q('editsend').onclick = openTxEdit;
 q('tx_cancel').onclick = function(){ q('txsheet').classList.remove('on'); };
 q('txfill').onclick = txFillFromMap;
@@ -3744,11 +4039,14 @@ q('txfill').onclick = txFillFromMap;
 q('tx_add').onclick = function(){
   var i = 0;
   while(TXED[i] && i < MAXSEND) i++;
+  /* Stamped at creation. Everything downstream - the frame grouping, the
+     signal lookup, the controller it is finally handed to - reads it from
+     here, so getting it right once is the whole job. */
   if(i >= MAXSEND){
     toast('Full', 'This build stores ' + MAXSEND + ' saved values', 'bad');
     return;
   }
-  TXED[i] = {label:'New value', sig:'', unit:'', lo:0, hi:100, step:1,
+  TXED[i] = {label:'New value', sig:'', b:TXBUS, unit:'', lo:0, hi:100, step:1,
              preset:0, dec:null, cyclic:0, raw:false, style:'number',
              choices:''};
   renderTxEdit();
@@ -3779,6 +4077,7 @@ q('rebootbtn').onclick = function(){
 window.addEventListener('hashchange', function(){
   showTab(location.hash.slice(1));
 });
+renderDbcBtn();
 loadCfg().then(function(){ showTab(location.hash.slice(1) || 'dash'); });
 </script>
 </body></html>

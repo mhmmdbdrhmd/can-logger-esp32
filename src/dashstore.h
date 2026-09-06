@@ -43,7 +43,7 @@ void dashStoreBegin();
  *  disables the flash cache on both cores for the duration. An interrupt whose
  *  handler is not resident in IRAM cannot run while that is true.
  *
- *  canIsr() in app.cpp IS in IRAM - but attachInterrupt() reaches it through
+ *  canIsr1()/canIsr2() in app.cpp ARE in IRAM - but attachInterrupt() reaches it through
  *  the Arduino core's shared GPIO dispatcher, and whether THAT is resident was
  *  decided when the core was built, not by anything in this project. So a save
  *  during a recording could cost the CAN interrupt a few milliseconds, and the

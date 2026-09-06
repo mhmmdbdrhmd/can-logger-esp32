@@ -86,10 +86,10 @@ jobs:
           # of ESP-IDF, and it buys nothing -- the PlatformIO job below builds it
           # for the real target. This step covers the portable library code, where
           # a host compiler genuinely catches things the IDE would not.
-          for f in arduino/CanLogger/*.cpp; do
+          for f in arduino/DualCanLogger/*.cpp; do
             case "$(basename "$f")" in app.cpp) continue ;; esac
             g++ -std=c++17 -Wall -Wextra -Wno-unused-parameter \
-                -I test/shim -I arduino/CanLogger -c "$f" -o /dev/null
+                -I test/shim -I arduino/DualCanLogger -c "$f" -o /dev/null
           done
           echo "portable sketch sources compile"
 
@@ -113,15 +113,33 @@ jobs:
           python - <<'PY'
           rows = [
               "# generated in CI",
-              "t_us;id;name;signal;value;unit;raw",
-              "0;0x100;NodeStatus;Uptime;42;s;",
-              "0;0x100;NodeStatus;State;running;;",
-              "1000;0x101;MotorFeedback;Speed;-250.00;rpm;",
-              "2000;0x200;;;;;1122",
+              "t_us;bus;id;name;signal;value;unit;raw",
+              "0;1;0x100;NodeStatus;Uptime;42;s;",
+              "0;1;0x100;NodeStatus;State;running;;",
+              "1000;1;0x101;MotorFeedback;Speed;-250.00;rpm;",
+              # The SAME identifier on the other bus, meaning something else.
+              # If the tools ever merge these two, this is the row that says so.
+              "1500;2;0x100;PumpState;Pressure;3.5;bar;",
+              "2000;2;0x200;;;;;1122",
           ]
           open("sample.csv", "w").write("\n".join(rows) + "\n")
+
+          # A schema-1 recording from the single-bus logger, which the tools
+          # must still read: seven columns, no bus.
+          old = [
+              "t_us;id;name;signal;value;unit;raw",
+              "0;0x100;NodeStatus;Uptime;42;s;",
+              "1000;0x101;MotorFeedback;Speed;-250.00;rpm;",
+          ]
+          open("legacy.csv", "w").write("\n".join(old) + "\n")
           PY
           python tools/parse_log.py sample.csv
           python tools/parse_log.py sample.csv --list
+          python tools/parse_log.py sample.csv --bus 2 --list
           python tools/parse_log.py sample.csv --wide wide.csv
           test -s wide.csv
+          # The two buses must survive the pivot as separate columns.
+          grep -q 'CAN1.NodeStatus.Uptime' wide.csv
+          grep -q 'CAN2.PumpState.Pressure' wide.csv
+          # And a single-bus recording still reads, as bus 1.
+          python tools/parse_log.py legacy.csv --list | grep -q 'CAN1.NodeStatus.Uptime'

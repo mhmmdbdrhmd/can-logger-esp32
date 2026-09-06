@@ -1,42 +1,55 @@
 /* ============================================================================
- *  CAN Logger ESP32 - an MCP2515 bus recorder that writes decoded CSV to SD
+ *  Dual CAN Logger ESP32 - two MCP2515 bus recorders writing one decoded CSV
  *
  *  ---------------------------------------------------------------------------
- *  HOW THE RECEIVE PATH AVOIDS BOTH LOSS AND LATENCY
+ *  HOW THE RECEIVE PATH AVOIDS BOTH LOSS AND LATENCY, TWICE OVER
  *
- *  A busy 250 kbit/s bus delivers on the order of 1000 frames/s and the MCP2515
- *  has room for exactly two. That is roughly 2 ms of slack, against SD block
- *  writes that can stall for 100 ms on a bad card. Polling cannot bridge that,
- *  so the path is staged, and the first stage is deliberately tiny:
+ *  A busy 500 kbit/s bus delivers thousands of frames a second and an MCP2515
+ *  has room for exactly two. At 500 kbit/s a third frame arrives about 200 us
+ *  after the first, against SD block writes that can stall for 320 ms on a bad
+ *  card. Polling cannot bridge that, so the path is staged, and the first stage
+ *  is deliberately tiny:
  *
- *   1. INT falls  ->  ISR (a few microseconds, IRAM-resident)
+ *   1. INT falls  ->  ISR (a few microseconds, IRAM-resident), one per bus
  *        Takes the arrival timestamp with esp_timer_get_time() - this is the
  *        number that ends up in the CSV, so it is captured before any queuing
- *        or scheduling delay can smear it - pushes it into a small ring and
+ *        or scheduling delay can smear it - pushes it into that bus's ring and
  *        unblocks the reader task. NO SPI IN THE ISR: an SPI transaction can
  *        block, and blocking in an interrupt handler is how frames are lost.
  *        The work done here is bounded and constant, whatever the bus is doing.
  *
- *   2. CAN reader task, priority 20, application core
- *        Drains BOTH receive buffers over SPI and keeps draining until the
- *        controller reports empty. This is what makes the edge-triggered
- *        interrupt safe: if a second frame arrives while INT is still low there
- *        is no new edge, but the drain loop picks it up anyway. A 20 ms timeout
- *        on the wait re-runs the drain unconditionally, so even a completely
- *        missed interrupt costs latency, never data. Frames go into a
- *        1024-deep queue = one full second of buffering.
+ *        Both buses share one esp_timer, so a frame on CAN1 and a frame on CAN2
+ *        are directly comparable to the microsecond. That is the entire reason
+ *        to log two buses on one device instead of two devices.
+ *
+ *   2. CAN reader task, priority 20, application core - ONE task, BOTH buses
+ *        Drains every receive buffer on controller 1, then controller 2, and
+ *        keeps draining each until it reports empty. This is what makes the
+ *        edge-triggered interrupt safe: if a second frame arrives while INT is
+ *        still low there is no new edge, but the drain loop picks it up anyway.
+ *        A 20 ms timeout on the wait re-runs the drain unconditionally, so even
+ *        a completely missed interrupt costs latency, never data.
+ *
+ *        ONE task rather than one per bus, and that is a deliberate choice.
+ *        Two tasks would contend for the SPI bus mutex on the one path with a
+ *        hard deadline, adding a priority-inversion surface for nothing: the
+ *        work is identical either way, and serialising it here makes the worst
+ *        case something you can compute. Drain time is measured directly into
+ *        g_rec.drainMaxUs, and the design is only honest while that stays well
+ *        under 200 us.
  *
  *   3. Writer task, priority 10, application core
- *        Decodes against the frame map, formats CSV text, fills an 8 KB block,
- *        hands it to the SD card. While it is blocked in that write the reader
- *        task simply preempts it.
+ *        Decodes against that bus's frame map, formats CSV text, fills a 32 KB
+ *        block, hands it to the SD card. While it is blocked in that write the
+ *        reader task simply preempts it.
  *
  *   4. Wi-Fi and HTTP live on core 0 and in loop() at the lowest priority,
- *        where they cannot interfere with either of the above.
+ *        where they cannot interfere with any of the above.
  *
- *  Every place a frame could still be lost is counted and reported: the
- *  controller's own overflow flags (stage 1->2) and the queue-full counter
- *  (stage 2->3). A recording that ends with `lost 0` is provably complete.
+ *  Every place a frame could still be lost is counted and reported, per bus for
+ *  the controller's own overflow flags (stage 1->2) and once for the shared
+ *  queue-full counter (stage 2->3). A recording that ends with `lost 0` is
+ *  provably complete - on both buses.
  * ==========================================================================*/
 
 #include "app.h"
@@ -59,44 +72,73 @@
 #include <ArduinoOTA.h>
 #endif
 
+/* One SPI bus, two controllers. Only CS and INT are unique per controller -
+ * MISO tri-states while CS is high - so the wiring cost of the second bus is
+ * two pins. Both objects share s_canSpi, and because only the CAN task ever
+ * touches either of them, the bus mutex inside SPIClass is never contended. */
 static SPIClass s_canSpi(VSPI);
-static MCP2515  s_can(s_canSpi, PIN_CAN_CS, CAN_SPI_HZ);
+static MCP2515  s_can1(s_canSpi, PIN_CAN1_CS, CAN_SPI_HZ);
+static MCP2515  s_can2(s_canSpi, PIN_CAN2_CS, CAN_SPI_HZ);
+
+/* Indexed by bus, matching CanFrame::bus and g_rec.bus[]: 0 = CAN1, 1 = CAN2.
+ * Pointers rather than an array of objects because MCP2515 holds a reference,
+ * and this keeps the initialisation obvious on every C++ dialect the Arduino
+ * cores have shipped. */
+static MCP2515 *const s_can[CAN_BUSES]      = { &s_can1, &s_can2 };
+static const uint8_t  s_intPin[CAN_BUSES]   = { PIN_CAN1_INT, PIN_CAN2_INT };
+static const uint16_t s_bitrate[CAN_BUSES]  = { CAN1_BITRATE_KBPS, CAN2_BITRATE_KBPS };
+static const uint8_t  s_crystal[CAN_BUSES]  = { CAN1_CRYSTAL_MHZ, CAN2_CRYSTAL_MHZ };
+static const bool     s_listen[CAN_BUSES]   = { CAN1_LISTEN_ONLY, CAN2_LISTEN_ONLY };
+static const bool     s_enabled[CAN_BUSES]  = { true, CAN2_ENABLED ? true : false };
 
 static TaskHandle_t s_canTask = nullptr;
 
 /* ---- ISR -> task timestamp hand-off ------------------------------------ */
-/* Power of two so the wrap is a mask. Sized well above the two frames the
- * controller can hold, to absorb a burst of interrupts during an SD stall. */
+/* Power of two so the wrap is a mask. Sized well above the two frames a
+ * controller can hold, to absorb a burst of interrupts during an SD stall.
+ * One ring per bus: a timestamp that cannot be attributed to a controller is
+ * worthless once there are two of them. */
 #define TS_RING 32
-static volatile uint64_t s_ts[TS_RING];
-static volatile uint8_t  s_tsHead = 0;
-static volatile uint8_t  s_tsTail = 0;
+static volatile uint64_t s_ts[CAN_BUSES][TS_RING];
+static volatile uint8_t  s_tsHead[CAN_BUSES] = { 0, 0 };
+static volatile uint8_t  s_tsTail[CAN_BUSES] = { 0, 0 };
 
 /* Kept in IRAM: the flash cache can be disabled during an SPI flash write, and
- * an ISR that lives in flash would fault if it ran at that moment. */
-static void IRAM_ATTR canIsr() {
+ * an ISR that lives in flash would fault if it ran at that moment. Both
+ * handlers share this body, and it is IRAM-resident for the same reason they
+ * are - a call out to flash would defeat the point of putting them there. */
+static void IRAM_ATTR canIsrBody(uint8_t b) {
   const uint64_t now = (uint64_t)esp_timer_get_time();
 
-  const uint8_t head = s_tsHead;
+  const uint8_t head = s_tsHead[b];
   const uint8_t next = (uint8_t)((head + 1) & (TS_RING - 1));
-  if (next != s_tsTail) {          /* drop the timestamp, never the frame */
-    s_ts[head] = now;
-    s_tsHead   = next;
+  if (next != s_tsTail[b]) {       /* drop the timestamp, never the frame */
+    s_ts[b][head] = now;
+    s_tsHead[b]   = next;
   }
 
-  g_rec.irqCount++;               /* proves the INT line is actually firing */
+  g_rec.bus[b].irqCount++;        /* proves THIS INT line is actually firing */
 
+  /* Both buses wake the same task. It drains both controllers on every pass,
+   * so a notification from either is enough - and the count of pending
+   * notifications is irrelevant, which is why pdTRUE clears it below. */
   BaseType_t woken = pdFALSE;
   vTaskNotifyGiveFromISR(s_canTask, &woken);
   if (woken) portYIELD_FROM_ISR();
 }
 
-/* Arrival timestamp for the frame we are about to read. Falls back to "now" if
- * the ring ran dry, which can only happen after an interrupt storm. */
-static inline uint64_t popTimestamp() {
-  if (s_tsTail != s_tsHead) {
-    const uint64_t t = s_ts[s_tsTail];
-    s_tsTail = (uint8_t)((s_tsTail + 1) & (TS_RING - 1));
+static void IRAM_ATTR canIsr1() { canIsrBody(0); }
+static void IRAM_ATTR canIsr2() { canIsrBody(1); }
+
+static void (*const s_isr[CAN_BUSES])() = { canIsr1, canIsr2 };
+
+/* Arrival timestamp for the frame we are about to read off bus `b`. Falls back
+ * to "now" if that ring ran dry, which can only happen after an interrupt
+ * storm. */
+static inline uint64_t popTimestamp(uint8_t b) {
+  if (s_tsTail[b] != s_tsHead[b]) {
+    const uint64_t t = s_ts[b][s_tsTail[b]];
+    s_tsTail[b] = (uint8_t)((s_tsTail[b] + 1) & (TS_RING - 1));
     return t;
   }
   return (uint64_t)esp_timer_get_time();
@@ -108,76 +150,115 @@ static void canTaskFn(void *arg) {
   CanFrame f;
 
   for (;;) {
-    /* Woken by the ISR, or every 20 ms as a safety net so a lost edge can
+    /* Woken by either ISR, or every 20 ms as a safety net so a lost edge can
      * never wedge the receiver. */
     /* That safety net is a last resort, not a mode of operation: 50 wake-ups/s
-     * x 2 receive buffers caps throughput at ~100 frames/s. If the status line
-     * ever shows a healthy rx with irq=0/s, the interrupt is dead and this
-     * poll is all that is left. */
+     * x 2 receive buffers caps throughput at ~100 frames/s per bus. If the
+     * status line ever shows a healthy rx with irq=0/s on a bus, that bus's
+     * interrupt is dead and this poll is all that is left. */
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
     g_rec.wakeCount++;
 
-    /* Drain until the controller is empty. Both receive buffers are checked on
-     * every pass, which is what covers the missed-edge case. */
-    while (s_can.readFrame(f)) {
-      f.esp_us = popTimestamp();
+    /* Measured across BOTH controllers, because that is what the deadline is
+     * about: a frame arriving on CAN2 does not care that the task was busy
+     * with CAN1. Started here and stopped before txService below - a transmit
+     * blocks for milliseconds by design and would swamp a figure that is only
+     * meaningful in microseconds. */
+    const uint32_t drainStart = micros();
 
-      g_rec.framesRx++;
-      g_rec.lastFrameMs = millis();
+    for (uint8_t b = 0; b < CAN_BUSES; b++) {
+      /* `present` and not just `enabled`: with no module fitted, that chip
+       * select selects nothing and MISO is left floating. A float that happens
+       * to read back as 0xFF looks like READ STATUS reporting a full receive
+       * buffer, and readFrame() would then never return false - this loop
+       * would spin until the watchdog fired. Skipping a controller that did
+       * not answer at boot is what makes "fit one module, leave the other
+       * socket empty" a supported configuration rather than a hang. */
+      if (!s_enabled[b] || !g_rec.bus[b].present) continue;
 
-      /* Bits this frame occupied on the wire, for the bus-load figure. A
-       * standard data frame is 44 fixed bits + 8 per data byte, plus 3 bits of
-       * inter-frame space, plus stuffing - which applies to the 34 + 8*len
-       * bits from SOF to CRC and adds at most one bit per five. Extended
-       * frames carry 20 more bits of identifier. */
-      g_rec.rxBits += (f.ext ? 67u : 47u) + 8u * f.len
-                    + ((f.ext ? 54u : 34u) + 8u * f.len) / 5u;
+      BusHealth &h = g_rec.bus[b];
+      MCP2515   &c = *s_can[b];
 
-      if (xQueueSend(g_frameQueue, &f, 0) != pdTRUE) {
-        /* The writer could not keep up for a full second. Count it - a
-         * recording is only trustworthy if this stays at zero. */
-        g_rec.queueDropped++;
+      /* Drain until this controller is empty. Both of its receive buffers are
+       * checked on every pass, which is what covers the missed-edge case. */
+      while (c.readFrame(f)) {
+        f.esp_us = popTimestamp(b);
+        f.bus    = b;
+
+        h.framesRx++;
+        h.lastFrameMs = millis();
+
+        /* Bits this frame occupied on the wire, for the bus-load figure. A
+         * standard data frame is 44 fixed bits + 8 per data byte, plus 3 bits
+         * of inter-frame space, plus stuffing - which applies to the 34 + 8*len
+         * bits from SOF to CRC and adds at most one bit per five. Extended
+         * frames carry 20 more bits of identifier. */
+        h.rxBits += (f.ext ? 67u : 47u) + 8u * f.len
+                  + ((f.ext ? 54u : 34u) + 8u * f.len) / 5u;
+
+        if (xQueueSend(g_frameQueue, &f, 0) != pdTRUE) {
+          /* The writer could not keep up. Counted once, not per bus: there is
+           * one queue, and a frame that did not fit is lost whichever
+           * controller it came from. A recording is only trustworthy if this
+           * stays at zero. */
+          g_rec.queueDropped++;
+        }
       }
+
+      /* This controller itself overflowed: a frame was lost before we saw it. */
+      const uint8_t ovf = c.takeRxOverflow();
+      if (ovf) {
+        h.canOvfEvents++;
+
+        /* One sticky bit per receive buffer, so both set means at least two
+         * frames went missing. How many MORE is not knowable here - the
+         * controller only remembers THAT it happened, not how often - so this
+         * is a floor and is named like one. Against the rolling counters this
+         * bus carries, the true figure was about 1.7x it.
+         *
+         * Counted by set bits rather than by naming the two constants, because
+         * takeRxOverflow() is documented to return those bits and nothing else,
+         * and a popcount stays right if that ever widens. */
+        uint8_t buffers = 0;
+        for (uint8_t bit = ovf; bit; bit &= (uint8_t)(bit - 1)) buffers++;
+        h.canOvfFramesMin += buffers ? buffers : 1;
+
+        LOG_FILE(LVL_WARN, "CAN%u receive overflow (EFLG=0x%02X) - at least %u "
+                           "frame(s) lost", (unsigned)(b + 1), ovf,
+                 (unsigned)buffers);
+      }
+
+      /* MUST happen every pass, for every controller. ERRIF and MERRF are
+       * sticky and the INT pin is level active-low, so one latched flag kills
+       * every future edge and drops that bus into the 20 ms poll above -
+       * permanently, and only for that bus, which is exactly the kind of
+       * half-failure the per-bus counters exist to make visible. */
+      const uint8_t sticky = c.clearErrorInterrupts();
+      if (sticky) {
+        h.canIntfSticky++;
+        LOG_FILE(LVL_DEBUG, "CAN%u: cleared sticky CANINTF=0x%02X (would have "
+                            "wedged INT)", (unsigned)(b + 1), sticky);
+      }
+
+      h.intLevel = (uint8_t)digitalRead(s_intPin[b]);
     }
 
-    /* The controller itself overflowed: a frame was lost before we saw it. */
-    const uint8_t ovf = s_can.takeRxOverflow();
-    if (ovf) {
-      g_rec.canOvfEvents++;
-
-      /* One sticky bit per receive buffer, so both set means at least two
-       * frames went missing. How many MORE is not knowable here - the
-       * controller only remembers THAT it happened, not how often - so this is
-       * a floor and is named like one. Against the rolling counters this bus
-       * carries, the true figure was about 1.7x it.
-       *
-       * Counted by set bits rather than by naming the two constants, because
-       * takeRxOverflow() is documented to return those bits and nothing else,
-       * and a popcount stays right if that ever widens. */
-      uint8_t buffers = 0;
-      for (uint8_t bit = ovf; bit; bit &= (uint8_t)(bit - 1)) buffers++;
-      g_rec.canOvfFramesMin += buffers ? buffers : 1;
-
-      LOG_FILE(LVL_WARN, "MCP2515 receive overflow (EFLG=0x%02X) - at least %u "
-                         "frame(s) lost", ovf, (unsigned)buffers);
-    }
-
-    /* MUST happen every pass. ERRIF and MERRF are sticky and the INT pin is
-     * level active-low, so one latched flag kills every future edge and drops
-     * the receiver into the 20 ms poll above - permanently. */
-    const uint8_t sticky = s_can.clearErrorInterrupts();
-    if (sticky) {
-      g_rec.canIntfSticky++;
-      LOG_FILE(LVL_DEBUG, "cleared sticky CANINTF=0x%02X (would have wedged INT)",
-               sticky);
-    }
-
-    g_rec.intLevel = (uint8_t)digitalRead(PIN_CAN_INT);
+    const uint32_t drainUs = micros() - drainStart;
+    if (drainUs > g_rec.drainMaxUs) g_rec.drainMaxUs = drainUs;
 
     /* Last, and in this task rather than in the web handler: the receive path
      * has already been drained, so a transmit cannot delay a frame that was
-     * waiting, and nothing else ever holds this chip select. */
-    txService(s_can);
+     * waiting, and nothing else ever holds either chip select.
+     *
+     * A send does block this task for as long as the controller takes to
+     * finish with the frame - milliseconds in the worst case, which is far
+     * longer than the receive deadline. That is a real cost and it is paid on
+     * both buses, but only while somebody is actually pressing Send, and if it
+     * ever costs a frame the overflow counters above will say so rather than
+     * letting it pass silently. One-shot mode keeps the worst case bounded. */
+    for (uint8_t b = 0; b < CAN_BUSES; b++) {
+      if (s_enabled[b] && g_rec.bus[b].present) txService(*s_can[b], b);
+    }
   }
 }
 
@@ -194,10 +275,14 @@ static void setupOta() {
      *     moment it finishes, and a CSV whose length was never committed would
      *     lose everything since the last sync,
      *  2. the CAN interrupt must not fire during the update - the flash cache
-     *     is disabled while flash is being written, and although canIsr is in
-     *     IRAM, the Arduino core's shared GPIO dispatcher it is reached through
-     *     may not be. Detaching removes the question entirely. */
-    detachInterrupt(digitalPinToInterrupt(PIN_CAN_INT));
+     *     is disabled while flash is being written, and although both handlers
+     *     are in IRAM, the Arduino core's shared GPIO dispatcher they are
+     *     reached through may not be. Detaching removes the question. */
+    for (uint8_t b = 0; b < CAN_BUSES; b++) {
+      if (s_enabled[b] && g_rec.bus[b].present) {
+        detachInterrupt(digitalPinToInterrupt(s_intPin[b]));
+      }
+    }
 
     LOG_LIVE(LVL_WARN, "OTA UPDATE STARTING - closing files, pausing recording");
     if (!recorderStopAndWait(4000)) {
@@ -234,8 +319,13 @@ static void setupOta() {
     LOG_LIVE(LVL_ERROR, "OTA FAILED: %s", what);
     logService();
     /* Put the receive path back so the logger keeps working on the old firmware
-     * rather than sitting there deaf until someone power-cycles it. */
-    attachInterrupt(digitalPinToInterrupt(PIN_CAN_INT), canIsr, FALLING);
+     * rather than sitting there deaf until someone power-cycles it. Both
+     * buses: half a logger is harder to diagnose than none. */
+    for (uint8_t b = 0; b < CAN_BUSES; b++) {
+      if (s_enabled[b] && g_rec.bus[b].present) {
+        attachInterrupt(digitalPinToInterrupt(s_intPin[b]), s_isr[b], FALLING);
+      }
+    }
   });
 
   ArduinoOTA.begin();
@@ -291,9 +381,11 @@ void appSetup() {
   LOG_FILE(LVL_INFO, "build %s %s, chip %s rev %d, %d MHz, flash %lu KB",
            __DATE__, __TIME__, ESP.getChipModel(), ESP.getChipRevision(),
            (int)ESP.getCpuFreqMHz(), (unsigned long)(ESP.getFlashChipSize() / 1024));
-  LOG_FILE(LVL_INFO, "pins  CAN: cs=%d int=%d sck=%d miso=%d mosi=%d @ %lu Hz",
-           PIN_CAN_CS, PIN_CAN_INT, PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI,
-           (unsigned long)CAN_SPI_HZ);
+  LOG_FILE(LVL_INFO, "pins  VSPI: sck=%d miso=%d mosi=%d @ %lu Hz (shared)",
+           PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI, (unsigned long)CAN_SPI_HZ);
+  LOG_FILE(LVL_INFO, "pins  CAN1: cs=%d int=%d | CAN2: cs=%d int=%d%s",
+           PIN_CAN1_CS, PIN_CAN1_INT, PIN_CAN2_CS, PIN_CAN2_INT,
+           CAN2_ENABLED ? "" : " (DISABLED)");
   LOG_FILE(LVL_INFO, "pins  SD : cs=%d sck=%d miso=%d mosi=%d @ %lu Hz",
            PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, (unsigned long)SD_SPI_HZ);
 
@@ -302,8 +394,10 @@ void appSetup() {
     LOG_LIVE(LVL_ERROR, "out of memory allocating the frame queue - halted");
     for (;;) { logService(); delay(1000); }
   }
-  busReset(g_bus);
-  liveReset(g_live);
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    busReset(g_bus[b]);
+    liveReset(g_live[b]);
+  }
   txBegin();
 
   /* ---- SD card ---- */
@@ -326,22 +420,56 @@ void appSetup() {
 
   netLoadConfig();
 
-  /* ---- CAN controller ---- */
-  s_canSpi.begin(PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI, PIN_CAN_CS);
-  pinMode(PIN_CAN_INT, INPUT_PULLUP);
+  /* ---- CAN controllers ----
+   * One SPI bus for both. begin() is given CAN1's chip select only because
+   * SPIClass wants one to drive; every transaction sets its own CS explicitly,
+   * and CAN2's pin is configured below. */
+  s_canSpi.begin(PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI, PIN_CAN1_CS);
+  pinMode(PIN_CAN2_CS, OUTPUT);
+  digitalWrite(PIN_CAN2_CS, HIGH);   /* idle high before anything talks */
 
-  /* Configured but still silent - it does not open the bus until
-   * startReceiving() below, once the reader task and the ISR exist. */
-  if (s_can.begin(CAN_BITRATE_KBPS, CAN_CRYSTAL_MHZ)) {
-    LOG_LIVE(LVL_INFO, "CAN controller OK: %d kbit/s, %s mode (not listening yet)",
-             CAN_BITRATE_KBPS, CAN_LISTEN_ONLY ? "listen-only" : "normal");
-    LOG_FILE(LVL_INFO, "MCP2515: %u MHz crystal, mode=%u, filters disabled, "
-                       "RXB0 rollover enabled",
-             (unsigned)CAN_CRYSTAL_MHZ, (unsigned)s_can.mode());
-  } else {
-    LOG_LIVE(LVL_ERROR, "CAN CONTROLLER NOT RESPONDING - check the MCP2515 "
-                        "wiring (CS=D%d, 3V3) and the crystal setting",
-             PIN_CAN_CS);
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    BusHealth &h = g_rec.bus[b];
+    h.enabled     = s_enabled[b];
+    h.bitrateKbps = s_bitrate[b];
+    h.listenOnly  = s_listen[b];
+
+    if (!s_enabled[b]) {
+      LOG_LIVE(LVL_INFO, "CAN%u disabled in config.h - running single-bus",
+               (unsigned)(b + 1));
+      continue;
+    }
+
+    pinMode(s_intPin[b], INPUT_PULLUP);
+
+    /* Configured but still silent - it does not open the bus until
+     * startReceiving() below, once the reader task and the ISRs exist. */
+    if (s_can[b]->begin(s_bitrate[b], s_crystal[b])) {
+      h.present = true;
+      LOG_LIVE(LVL_INFO, "CAN%u controller OK: %u kbit/s, %s mode "
+                         "(not listening yet)",
+               (unsigned)(b + 1), (unsigned)s_bitrate[b],
+               s_listen[b] ? "listen-only" : "normal");
+      LOG_FILE(LVL_INFO, "CAN%u MCP2515: %u MHz crystal, mode=%u, filters "
+                         "disabled, RXB0 rollover enabled",
+               (unsigned)(b + 1), (unsigned)s_crystal[b],
+               (unsigned)s_can[b]->mode());
+    } else if (b > 0) {
+      /* The second controller is optional hardware. Say so, at a level that
+       * does not read like a fault, and carry on as a single-bus logger -
+       * somebody running this firmware on one module must not be told their
+       * logger is broken. */
+      LOG_LIVE(LVL_WARN, "CAN%u did not answer - continuing on CAN1 alone. If "
+                         "a second MCP2515 is fitted, check CS=D%d, INT=D%d, "
+                         "3V3 and that module's crystal setting; if not, this "
+                         "is expected and can be silenced with CAN2_ENABLED 0.",
+               (unsigned)(b + 1), (int)PIN_CAN2_CS, (int)s_intPin[b]);
+    } else {
+      LOG_LIVE(LVL_ERROR, "CAN%u CONTROLLER NOT RESPONDING - check the MCP2515 "
+                          "wiring (CS=D%d, INT=D%d, 3V3) and the crystal "
+                          "setting for THAT module",
+               (unsigned)(b + 1), (int)PIN_CAN1_CS, (int)s_intPin[b]);
+    }
   }
 
   /* ---- tasks ---- */
@@ -350,22 +478,32 @@ void appSetup() {
   xTaskCreatePinnedToCore(recorderTask, "writer", TASK_STACK_WRITER, nullptr,
                           TASK_PRIO_WRITER, nullptr, TASK_CORE_WRITER);
 
-  /* Attach the interrupt only once the task exists - an early edge would
+  /* Attach the interrupts only once the task exists - an early edge would
    * otherwise notify a null handle. FALLING is correct for the MCP2515's
    * active-low INT; the drain loop covers the level-triggered corner case. */
-  attachInterrupt(digitalPinToInterrupt(PIN_CAN_INT), canIsr, FALLING);
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    /* Only for a controller that actually answered. An unconnected INT pin is
+     * held high by its pull-up and would never fire anyway, but arming it
+     * would leave the ISR free to count edges picked up by a floating wire and
+     * report an interrupt rate for a bus that does not exist. */
+    if (s_enabled[b] && g_rec.bus[b].present) {
+      attachInterrupt(digitalPinToInterrupt(s_intPin[b]), s_isr[b], FALLING);
+    }
+  }
 
-  /* NOW open the bus. Everything that has to watch it already exists, so the
+  /* NOW open the buses. Everything that has to watch them already exists, so a
    * controller's two receive buffers cannot overflow in a gap - which used to
    * cost frames on every single boot. */
-  if (s_can.startReceiving(CAN_LISTEN_ONLY)) {
-    LOG_LIVE(LVL_INFO, "CAN bus open - listening");
-#if CAN_LISTEN_ONLY
-    LOG_LIVE(LVL_INFO, "listen-only: the logger cannot write to the bus. Set "
-                       "CAN_LISTEN_ONLY to 0 in config.h to use Send.");
-#endif
-  } else {
-    LOG_LIVE(LVL_ERROR, "CAN controller would not leave configuration mode");
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    if (!s_enabled[b] || !g_rec.bus[b].present) continue;
+
+    if (s_can[b]->startReceiving(s_listen[b])) {
+      LOG_LIVE(LVL_INFO, "CAN%u bus open - listening%s", (unsigned)(b + 1),
+               s_listen[b] ? " (listen-only: cannot Send on this bus)" : "");
+    } else {
+      LOG_LIVE(LVL_ERROR, "CAN%u controller would not leave configuration mode",
+               (unsigned)(b + 1));
+    }
   }
 
 #if PIN_POWER_FAIL >= 0

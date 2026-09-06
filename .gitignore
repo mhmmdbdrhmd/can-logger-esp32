@@ -14,11 +14,11 @@ build/
 
 # ---- the Arduino sketch folder is generated from src/ ---------------------
 # There is one copy of the firmware, in src/. arduino/sync.sh mirrors it into
-# arduino/CanLogger/ for the Arduino IDE; those copies are not checked in,
+# arduino/DualCanLogger/ for the Arduino IDE; those copies are not checked in,
 # because a second committed copy of every file is a second thing to keep
 # correct. Only the .ino wrapper is tracked.
-arduino/CanLogger/*.h
-arduino/CanLogger/*.cpp
+arduino/DualCanLogger/*.h
+arduino/DualCanLogger/*.cpp
 
 # ---- captured data --------------------------------------------------------
 # Recordings never belong in the repository: they are large, and they are

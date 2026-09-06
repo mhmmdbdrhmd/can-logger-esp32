@@ -68,6 +68,7 @@ struct TxOutcome {
   uint32_t ms;          /* millis() when it finished                        */
   uint8_t  status;
   uint8_t  cmd;         /* index in g_dash.tx, or 0xFF for a one-off frame  */
+  uint8_t  bus;         /* which bus it went out on, 0 = CAN1              */
   uint32_t id;
   uint8_t  ext;
   uint8_t  len;
@@ -120,7 +121,8 @@ uint32_t txSendCommand(uint8_t cmdIndex, float value);
  * is the call that puts the finished frame on the wire. Members are drained in
  * order by one task, so nothing can be interleaved between them. */
 uint32_t txSendPart(uint8_t cmdIndex, float value, bool hold);
-uint32_t txSendRaw(uint32_t id, bool ext, const uint8_t *data, uint8_t len);
+uint32_t txSendRaw(uint8_t bus, uint32_t id, bool ext, const uint8_t *data,
+                   uint8_t len);
 
 /* Starts or stops a cyclic setpoint. Repeats stop on their own when the
  * dashboard disarms. */
@@ -131,6 +133,10 @@ bool txCyclicOn(uint8_t cmdIndex);
  * Drains the request queue, performs the sends, expires the arm gate and
  * services cyclic repeats. Called from the CAN reader task on every pass, and
  * from nowhere else. */
-void txService(MCP2515 &can);
+/* Called once PER CONTROLLER on every pass. Each call performs only the
+ * requests and repeats belonging to that bus; anything for the other one is
+ * put back in order, because a group of values that must leave in one frame
+ * must not be split by a request for a different wire. */
+void txService(MCP2515 &can, uint8_t bus);
 
 const char *txStatusText(uint8_t status);

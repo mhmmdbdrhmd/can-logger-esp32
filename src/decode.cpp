@@ -9,8 +9,8 @@
 #include "canopen.h"
 #endif
 
-BusStats    g_bus;
-LiveSignals g_live;
+BusStats    g_bus[CAN_BUSES];
+LiveSignals g_live[CAN_BUSES];
 
 /* ==========================================================================
  *  Live bus activity
@@ -175,23 +175,32 @@ static char *putPayload(char *p, const CanFrame &f) {
 /* Copies the text just written into the CSV into the live view's slot for that
  * signal. The web handler then only has to concatenate strings - it never
  * decodes anything, and it never learns a signal's name from the firmware. */
-static void publishLive(const DbcDb *db, uint16_t sigIndex,
+static void publishLive(const DbcDb *db, uint8_t bus, uint16_t sigIndex,
                         const char *text, size_t len) {
-  if (!db || sigIndex >= g_live.cap) return;
+  if (!db || bus >= CAN_BUSES) return;
+  LiveSignals &l = g_live[bus];
+  if (sigIndex >= l.cap) return;
   if (len > LIVE_TEXT_MAX - 1) len = LIVE_TEXT_MAX - 1;
 
-  memcpy(g_live.text[sigIndex], text, len);
-  g_live.text[sigIndex][len] = '\0';
-  g_live.lastMs[sigIndex]    = millis();
-  if (!g_live.seen[sigIndex]) {
-    g_live.seen[sigIndex] = 1;
-    g_live.seenCount++;
+  memcpy(l.text[sigIndex], text, len);
+  l.text[sigIndex][len] = '\0';
+  l.lastMs[sigIndex]    = millis();
+  if (!l.seen[sigIndex]) {
+    l.seen[sigIndex] = 1;
+    l.seenCount++;
   }
 }
 
-/* t_us;id;  - the two columns every row starts with. */
-static char *putPrefix(char *p, int64_t t, uint32_t id, bool ext) {
+/* t_us;bus;id;  - the three columns every row starts with.
+ *
+ * The bus is printed one-based. Internally it is an index; on the wiring
+ * diagram, on the case and in every conversation about the machine it is
+ * "CAN 1" and "CAN 2", and a log that disagrees with the label on the
+ * connector is a log people misread. */
+static char *putPrefix(char *p, int64_t t, uint8_t bus, uint32_t id, bool ext) {
   p = fmtI64(p, t);
+  *p++ = ';';
+  *p++ = (char)('1' + (bus < CAN_BUSES ? bus : 0));
   *p++ = ';';
   p = fmtCanId(p, id, ext);
   *p++ = ';';
@@ -199,10 +208,10 @@ static char *putPrefix(char *p, int64_t t, uint32_t id, bool ext) {
 }
 
 void Decoder::reset(DbcDb *db) {
-  _db    = db;
+  _db    = db;                    /* an array of CAN_BUSES maps */
   _have  = false;
   _epoch = 0;
-  if (db) dbcResetRuntime(*db);
+  if (db) for (uint8_t b = 0; b < CAN_BUSES; b++) dbcResetRuntime(db[b]);
 }
 
 size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut) {
@@ -212,19 +221,25 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
   if (!_have) { _epoch = f.esp_us; _have = true; }
   const int64_t t = (int64_t)(f.esp_us - _epoch);
   const bool    ext = (f.ext != 0);
+  const uint8_t bus = (f.bus < CAN_BUSES) ? f.bus : 0;
+
+  /* THE frame map for this frame: the one belonging to the bus it arrived on.
+   * Decoding a CAN2 frame against CAN1's map would produce a row that looks
+   * perfectly plausible and is wrong, which is the one failure mode a logger
+   * must not have. */
+  DbcDb *const db = _db ? &_db[bus] : nullptr;
 
   char *p = buf;
   uint8_t emitted = 0;
   bool    rawDone = false;
 
-  const DbcMessage *m = _db ? dbcFind(*_db, f.id, ext) : nullptr;
+  const DbcMessage *m = db ? dbcFind(*db, f.id, ext) : nullptr;
   const char *msgName = m ? m->name : nullptr;
 
   /* A frame this logger sent is written into the same file, in the same
-   * schema, with its message name prefixed. The seven columns are unchanged -
-   * every existing parser keeps working - and a reader can tell a command
-   * apart from the data around it by looking at the name, which is where a
-   * reader would look anyway. */
+   * schema, with its message name prefixed. The columns are unchanged - a
+   * reader can tell a command apart from the data around it by looking at the
+   * name, which is where a reader would look anyway. */
   const bool isTx = (f.tx != 0);
 
 #if CANOPEN_DECODE
@@ -239,19 +254,19 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
      * so that value has to be read before anything else can be trusted. */
     int32_t muxNow = -1;
     if (m->muxSignal >= 0) {
-      DbcValue mv = dbcDecodeSignal(*_db, _db->sig[m->muxSignal], f.data, f.len);
+      DbcValue mv = dbcDecodeSignal(*db, db->sig[m->muxSignal], f.data, f.len);
       if (mv.ok) muxNow = (int32_t)(mv.exact ? mv.scaled : (int64_t)mv.fval);
     }
 
     for (uint16_t i = 0; i < m->signalCount && emitted < DECODE_MAX_ROWS; i++) {
-      DbcSignal &s = _db->sig[m->firstSignal + i];
+      DbcSignal &s = db->sig[m->firstSignal + i];
 
       if (s.muxValue >= 0 && s.muxValue != muxNow) continue;
 
-      DbcValue v = dbcDecodeSignal(*_db, s, f.data, f.len);
+      DbcValue v = dbcDecodeSignal(*db, s, f.data, f.len);
       if (!v.ok) continue;          /* declared past the end of this payload */
 
-      p = putPrefix(p, t, f.id, ext);
+      p = putPrefix(p, t, bus, f.id, ext);
       if (isTx) p = putStr(p, "TX:");
       p = putStr(p, msgName);
       *p++ = ';';
@@ -268,7 +283,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
        * jumps to the commanded value the moment Send is pressed would be
        * reporting the request as though it were the answer. */
       if (!isTx) {
-        publishLive(_db, (uint16_t)(m->firstSignal + i), valStart,
+        publishLive(db, bus, (uint16_t)(m->firstSignal + i), valStart,
                     (size_t)(p - valStart));
       }
 
@@ -290,7 +305,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
     CanopenField fld[CANOPEN_MAX_FIELDS];
     const uint8_t nf = canopenFields(f.id, f.data, f.len, fld, CANOPEN_MAX_FIELDS);
     for (uint8_t i = 0; i < nf && emitted < DECODE_MAX_ROWS; i++) {
-      p = putPrefix(p, t, f.id, ext);
+      p = putPrefix(p, t, bus, f.id, ext);
       if (isTx) p = putStr(p, "TX:");
       p = putStr(p, msgName);
       *p++ = ';';
@@ -314,7 +329,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
    * an identifier the map does not describe. Either way the frame is on the
    * card in full and can be decoded offline later.                         */
   if (!emitted) {
-    p = putPrefix(p, t, f.id, ext);
+    p = putPrefix(p, t, bus, f.id, ext);
     if (isTx) p = putStr(p, "TX:");
     p = putStr(p, msgName);
     *p++ = ';';                    /* end of name   */
@@ -324,7 +339,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
     p = putPayload(p, f);
     *p++ = '\n';
     emitted = 1;
-    if (!isTx) g_bus.undecoded++;
+    if (!isTx) g_bus[bus].undecoded++;
   }
 
   (void)rawDone;
@@ -346,7 +361,7 @@ size_t Decoder::rows(const CanFrame &f, char *buf, size_t cap, uint8_t *rowsOut)
  *  well have been edited by the time anyone reads it back.
  * ======================================================================== */
 size_t csvColumnHeader(char *buf, size_t cap) {
-  const int n = snprintf(buf, cap, "t_us;id;name;signal;value;unit;raw\n");
+  const int n = snprintf(buf, cap, "t_us;bus;id;name;signal;value;unit;raw\n");
   return (n < 0 || (size_t)n >= cap) ? 0 : (size_t)n;
 }
 
@@ -377,27 +392,76 @@ static bool mStr(char *buf, size_t cap, int *n, const char *s) {
   return mAppend(buf, cap, n, "\"");
 }
 
+/* The frame map of ONE bus, as it was when this recording was made. */
+static bool metaBus(char *buf, size_t cap, int *n, uint8_t b, const DbcDb &db) {
+  static const char *const kPath[CAN_BUSES] = { DBC_PATH, DBC2_PATH };
+  static const uint16_t    kRate[CAN_BUSES] = { CAN1_BITRATE_KBPS, CAN2_BITRATE_KBPS };
+  static const uint8_t     kListen[CAN_BUSES] = { CAN1_LISTEN_ONLY, CAN2_LISTEN_ONLY };
+
+  if (!mAppend(buf, cap, n,
+      "    { \"bus\": %u, \"bitrate_kbps\": %u, \"listen_only\": %d,\n"
+      "      \"dbc\": { \"loaded\": %d, \"path\": \"%s\", \"messages\": %u, "
+      "\"signals\": %u, \"line_errors\": %u, \"overflow\": %d, \"inexact\": %d,\n"
+      "        \"version\": ",
+      (unsigned)(b + 1), (unsigned)kRate[b], kListen[b] ? 1 : 0,
+      db.loaded ? 1 : 0, kPath[b],
+      (unsigned)db.msgCount, (unsigned)db.sigCount,
+      (unsigned)db.lineErrors, db.overflow ? 1 : 0, db.inexact ? 1 : 0)) return false;
+  if (!mStr(buf, cap, n, db.version)) return false;
+  if (!mAppend(buf, cap, n, " },\n      \"messages\": [\n")) return false;
+
+  for (uint16_t i = 0; i < db.msgCount; i++) {
+    const DbcMessage &m = db.msg[i];
+    if (!mAppend(buf, cap, n, "        { \"id\": \"0x%lX\", \"ext\": %d, "
+                 "\"dlc\": %u, \"name\": ", (unsigned long)m.id, m.ext ? 1 : 0,
+                 (unsigned)m.dlc)) return false;
+    if (!mStr(buf, cap, n, m.name)) return false;
+    if (!mAppend(buf, cap, n, ", \"signals\": [")) return false;
+    for (uint16_t k = 0; k < m.signalCount; k++) {
+      const DbcSignal &sg = db.sig[m.firstSignal + k];
+      if (!mAppend(buf, cap, n, "%s{ \"name\": ", k ? ", " : "")) return false;
+      if (!mStr(buf, cap, n, sg.name)) return false;
+      if (!mAppend(buf, cap, n, ", \"unit\": ")) return false;
+      if (!mStr(buf, cap, n, sg.unit)) return false;
+      if (!mAppend(buf, cap, n,
+                   ", \"bits\": %u, \"signed\": %d, \"exact\": %d }",
+                   (unsigned)sg.bits, sg.isSigned ? 1 : 0,
+                   sg.exact ? 1 : 0)) return false;
+    }
+    if (!mAppend(buf, cap, n, "] }%s\n",
+                 (i + 1 < db.msgCount) ? "," : "")) return false;
+  }
+  return mAppend(buf, cap, n, "      ] }");
+}
+
 size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
-                const DbcDb &db) {
+                const DbcDb *db) {
   int n = 0;
 
+  /* "schema" is the field a tool should branch on. Recordings from the
+   * single-bus logger have no bus column and no such key; anything carrying
+   * schema 2 has eight columns, the second of which is the bus. */
   if (!mAppend(buf, cap, &n,
       "{\n"
       "  \"firmware\": \"%s\",\n"
       "  \"version\": \"%s\",\n"
+      "  \"schema\": 2,\n"
       "  \"csv\": \"%s\",\n"
       "  \"log\": \"%s\",\n"
-      "  \"bus\": { \"bitrate_kbps\": %d, \"listen_only\": %d },\n",
+      "  \"buses\": %u,\n",
       FIRMWARE_NAME, FIRMWARE_VERSION, csvName, logName,
-      CAN_BITRATE_KBPS, CAN_LISTEN_ONLY ? 1 : 0)) return 0;
+      (unsigned)CAN_BUSES)) return 0;
 
   if (!mAppend(buf, cap, &n,
       "  \"columns\": [\n"
       "    { \"name\": \"t_us\",   \"unit\": \"us\", \"zero\": \"start of this file\",\n"
-      "      \"desc\": \"arrival time, captured in the CAN interrupt\" },\n"
+      "      \"desc\": \"arrival time, captured in the CAN interrupt; one clock "
+      "for both buses\" },\n"
+      "    { \"name\": \"bus\",    \"desc\": \"which CAN bus the frame arrived "
+      "on, 1 or 2\" },\n"
       "    { \"name\": \"id\",     \"desc\": \"CAN identifier, hex\" },\n"
-      "    { \"name\": \"name\",   \"desc\": \"message name from the frame map, "
-      "empty if unmapped\" },\n"
+      "    { \"name\": \"name\",   \"desc\": \"message name from that bus's frame "
+      "map, empty if unmapped\" },\n"
       "    { \"name\": \"signal\", \"desc\": \"signal name, empty for a raw row\" },\n"
       "    { \"name\": \"value\",  \"desc\": \"scaled value, or the value-table "
       "label when one applies\" },\n"
@@ -406,39 +470,12 @@ size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
       "per frame\" }\n"
       "  ],\n"
       "  \"layout\": \"one row per SIGNAL; a frame with several signals "
-      "produces several rows sharing t_us and id\",\n")) return 0;
+      "produces several rows sharing t_us, bus and id\",\n")) return 0;
 
-  if (!mAppend(buf, cap, &n,
-      "  \"dbc\": { \"loaded\": %d, \"path\": \"%s\", \"messages\": %u, "
-      "\"signals\": %u, \"line_errors\": %u, \"overflow\": %d, \"inexact\": %d,\n"
-      "    \"version\": ", db.loaded ? 1 : 0, DBC_PATH,
-      (unsigned)db.msgCount, (unsigned)db.sigCount,
-      (unsigned)db.lineErrors, db.overflow ? 1 : 0, db.inexact ? 1 : 0)) return 0;
-  if (!mStr(buf, cap, &n, db.version)) return 0;
-  if (!mAppend(buf, cap, &n, " },\n")) return 0;
-
-  /* The frame map as it was when this recording was made. */
-  if (!mAppend(buf, cap, &n, "  \"messages\": [\n")) return 0;
-  for (uint16_t i = 0; i < db.msgCount; i++) {
-    const DbcMessage &m = db.msg[i];
-    if (!mAppend(buf, cap, &n, "    { \"id\": \"0x%lX\", \"ext\": %d, \"dlc\": %u, "
-                 "\"name\": ", (unsigned long)m.id, m.ext ? 1 : 0,
-                 (unsigned)m.dlc)) return 0;
-    if (!mStr(buf, cap, &n, m.name)) return 0;
-    if (!mAppend(buf, cap, &n, ", \"signals\": [")) return 0;
-    for (uint16_t k = 0; k < m.signalCount; k++) {
-      const DbcSignal &sg = db.sig[m.firstSignal + k];
-      if (!mAppend(buf, cap, &n, "%s{ \"name\": ", k ? ", " : "")) return 0;
-      if (!mStr(buf, cap, &n, sg.name)) return 0;
-      if (!mAppend(buf, cap, &n, ", \"unit\": ")) return 0;
-      if (!mStr(buf, cap, &n, sg.unit)) return 0;
-      if (!mAppend(buf, cap, &n,
-                   ", \"bits\": %u, \"signed\": %d, \"exact\": %d }",
-                   (unsigned)sg.bits, sg.isSigned ? 1 : 0,
-                   sg.exact ? 1 : 0)) return 0;
-    }
-    if (!mAppend(buf, cap, &n, "] }%s\n",
-                 (i + 1 < db.msgCount) ? "," : "")) return 0;
+  if (!mAppend(buf, cap, &n, "  \"can\": [\n")) return 0;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    if (!metaBus(buf, cap, &n, b, db[b])) return 0;
+    if (!mAppend(buf, cap, &n, "%s\n", (b + 1 < CAN_BUSES) ? "," : "")) return 0;
   }
   if (!mAppend(buf, cap, &n, "  ],\n")) return 0;
 
@@ -446,103 +483,14 @@ size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
       "  \"notes\": [\n"
       "    \"An unmapped identifier is still logged: the row carries the raw "
       "payload and no signal name.\",\n"
+      "    \"Group on (t_us, bus, id). An identifier alone does not name a "
+      "message when two buses are recorded.\",\n"
       "    \"Values marked inexact in the dbc block were scaled in floating "
       "point; everything else is exact integer arithmetic.\",\n"
-      "    \"t_us is the recorder's clock. If a node stamps its own time into "
-      "the payload, prefer that for signal timing.\"\n"
+      "    \"t_us is the recorder's clock, shared by both buses, so rows from "
+      "CAN1 and CAN2 are directly comparable.\"\n"
       "  ]\n"
       "}\n")) return 0;
 
   return (size_t)n;
-}
-
-/* ==========================================================================
- *  The self-describing header
- *
- *  Every recording carries its own legend, including the frame map that was
- *  active when it was made. A CSV found on a card a year later is interpretable
- *  on its own, even if the DBC that produced it has since been edited.
- * ======================================================================== */
-size_t csvHeaderBlock(char *buf, size_t cap, const char *filename,
-                      const DbcDb &db) {
-  int n = snprintf(buf, cap,
-    "# =====================================================================\n"
-    "# %s v%s  -  file: %s\n"
-    "# Bus    : classical CAN, %d kbit/s, %s mode\n"
-    "# Layout : one row per decoded signal, event based, ';' separated\n"
-    "#\n"
-    "# COLUMNS\n"
-    "#   t_us    Recorder clock, microseconds since the START of THIS file.\n"
-    "#           Monotonic, captured in the CAN interrupt, so it reflects the\n"
-    "#           moment the frame arrived on the wire.\n"
-    "#   id      CAN identifier, 0x notation. 29-bit ids print 8 digits.\n"
-    "#   name    Message name from the frame map. Empty if unmapped.\n"
-    "#   signal  Signal name from the frame map. Empty on a raw row.\n"
-    "#   value   Physical value, or the symbolic name of that raw value.\n"
-    "#   unit    Unit from the frame map. Often empty.\n"
-    "#   raw     Payload bytes, hex. Always present when no signal could be\n"
-    "#           decoded, so nothing on the bus is ever discarded.\n"
-    "#\n"
-    "# All rows of one frame share t_us and id: group on that pair.\n"
-    "#\n",
-    FIRMWARE_NAME, FIRMWARE_VERSION, filename, CAN_BITRATE_KBPS,
-    CAN_LISTEN_ONLY ? "listen-only" : "normal");
-
-  if (n < 0 || (size_t)n >= cap) return 0;
-
-  if (!db.loaded) {
-    const int k = snprintf(buf + n, cap - (size_t)n,
-      "# FRAME MAP\n"
-      "#   none - no %s was found on the card, so every frame was stored as\n"
-      "#   raw payload bytes. Decode them offline against a DBC, or put one on\n"
-      "#   the card and record again.\n"
-      "# =====================================================================\n"
-      "t_us;id;name;signal;value;unit;raw\n", DBC_PATH);
-    if (k < 0 || (size_t)(n + k) >= cap) return 0;
-    return (size_t)(n + k);
-  }
-
-  /* The name cap is stated whether or not it bit, because it is a property of
-   * the file anyone reads later: matching these rows against the source DBC by
-   * exact name only works if you know where the names stop. */
-  int k = snprintf(buf + n, cap - (size_t)n,
-    "# FRAME MAP: %s\n"
-    "#   %s\n"
-    "#   %u messages, %u signals%s%s\n"
-    "#   names are cut to %u characters%s\n"
-    "#\n",
-    DBC_PATH, db.version[0] ? db.version : "(no VERSION string)",
-    (unsigned)db.msgCount, (unsigned)db.sigCount,
-    db.inexact  ? ", some values via floating point" : ", all values exact",
-    db.overflow ? ", TRUNCATED - the map did not fit" : "",
-    (unsigned)(DBC_NAME_MAX - 1),
-    db.nameClipped ? " - SOME WERE CUT" : "");
-  if (k < 0 || (size_t)(n + k) >= cap) return 0;
-  n += k;
-
-  for (uint16_t i = 0; i < db.msgCount; i++) {
-    const DbcMessage &m = db.msg[i];
-    k = snprintf(buf + n, cap - (size_t)n, "#   0x%0*lX %-24s",
-                 m.ext ? 8 : 3, (unsigned long)m.id, m.name);
-    if (k < 0 || (size_t)(n + k) >= cap) return 0;
-    n += k;
-
-    for (uint16_t j = 0; j < m.signalCount; j++) {
-      const DbcSignal &s = db.sig[m.firstSignal + j];
-      k = snprintf(buf + n, cap - (size_t)n, "%s%s%s%s",
-                   j ? ", " : " ", s.name,
-                   s.unit[0] ? " " : "", s.unit);
-      if (k < 0 || (size_t)(n + k) >= cap) return 0;
-      n += k;
-    }
-    k = snprintf(buf + n, cap - (size_t)n, "\n");
-    if (k < 0 || (size_t)(n + k) >= cap) return 0;
-    n += k;
-  }
-
-  k = snprintf(buf + n, cap - (size_t)n,
-    "# =====================================================================\n"
-    "t_us;id;name;signal;value;unit;raw\n");
-  if (k < 0 || (size_t)(n + k) >= cap) return 0;
-  return (size_t)(n + k);
 }

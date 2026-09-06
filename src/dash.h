@@ -84,6 +84,11 @@ struct DashCell {
   uint8_t flags;
   uint8_t dec;                     /* decimal places, 255 = follow the signal */
 
+  /* Which bus's frame map `ref` is resolved against: 0 = CAN1, 1 = CAN2.
+   * Defaults to 0 when a saved layout does not say, so every dash.cfg written
+   * by the single-bus logger keeps working and keeps meaning what it meant. */
+  uint8_t bus;
+
   /* The signal is stored by name, not by index. An index is smaller and would
    * quietly point at a different signal the first time a message is added to
    * the DBC; the name is the identity and the index is resolved at load. */
@@ -119,6 +124,14 @@ static inline bool dashCellUsed(const DashCell &c) { return c.ref[0] != '\0'; }
 struct TxCommand {
   uint8_t  kind;
   uint8_t  style;                 /* TXI_*                                  */
+
+  /* Which bus this command is sent on, and whose frame map `ref` resolves
+   * against. Defaults to 0 = CAN1 for a layout that does not say. A setpoint
+   * is a thing you do to a machine, so sending it down the wrong bus is not a
+   * cosmetic error - it is the reason this is stored explicitly rather than
+   * inferred from wherever the identifier happens to appear. */
+  uint8_t  bus;
+
   char     label[DASH_LABEL_MAX];
 
   /* The list behind TXI_CHOICE and TXI_TOGGLE, as "value:label|value:label".
@@ -249,7 +262,7 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap);
  * file is the better place to say it and two answers would be one too many. */
 int16_t txOverrideSelector(const TxCommand &t, const DbcDb &db);
 
-uint16_t dashResolve(DashConfig &c, const DbcDb &db);
+uint16_t dashResolve(DashConfig &c, const DbcDb *db);
 
 /* Throw away every cell and every setpoint the frame map cannot account for,
  * and close the gaps they leave. Returns how many went.
@@ -267,7 +280,7 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db);
  * once the message is gone from the map, so they can be deleted one at a time
  * - which is precisely the half-described command the grouping exists to
  * prevent. */
-uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db);
+uint16_t dashDropUnresolved(DashConfig &c, const DbcDb *db);
 
 /* FNV-1a over the serialised text. Used only to notice that /dash.cfg was
  * edited outside the logger; it is not a checksum against corruption. */

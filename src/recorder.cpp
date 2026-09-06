@@ -38,13 +38,13 @@ static uint32_t s_lastSyncMs   = 0;
 /* Where the rolling id list in the per-second debug line starts. A hundred ids
  * do not fit on one line and never will; showing a different nine each second
  * beats showing the same nine for ever. */
-static uint8_t  s_idCursor     = 0;
+static uint8_t  s_idCursor[CAN_BUSES] = { 0, 0 };
 static uint32_t s_lastStatusMs = 0;
-static uint32_t s_framesAtLastStatus = 0;
-static uint32_t s_irqAtLastStatus    = 0;
+static uint32_t s_framesAtLastStatus[CAN_BUSES] = { 0, 0 };
+static uint32_t s_irqAtLastStatus[CAN_BUSES]    = { 0, 0 };
 static uint32_t s_wakeAtLastStatus   = 0;
-static bool     s_warnedIntStuck     = false;
-static uint64_t s_bitsAtLastStatus   = 0;
+static bool     s_warnedIntStuck[CAN_BUSES]     = { false, false };
+static uint64_t s_bitsAtLastStatus[CAN_BUSES]   = { 0, 0 };
 
 void recorderRequestStart() { s_wantStart = true; s_wantStop = false; }
 void recorderRequestSaveDash() { s_wantDashSave = true; }
@@ -143,25 +143,36 @@ static bool readLine(File &f, char *buf, size_t cap) {
   return any;
 }
 
-void recorderLoadDbc() {
-  dbcReset(g_dbc);
-  g_rec.dbcLoaded   = false;
-  g_rec.dbcMessages = 0;
-  g_rec.dbcSignals  = 0;
+/* Loads ONE bus's frame map.
+ *
+ * Called once per bus, in order, and the heap arithmetic below reads the live
+ * free heap - so the second map is fitted to what the first one left rather
+ * than to what the board had at boot. That is the correct joint budget and it
+ * needs no separate bookkeeping, but it does mean a very large map on CAN1 is
+ * the one that shrinks CAN2's. Said out loud in the log when it happens. */
+static void loadOneDbc(uint8_t bus, const char *path) {
+  DbcDb     &db = g_dbc[bus];
+  BusHealth &bh = g_rec.bus[bus];
+  const unsigned busNo = (unsigned)(bus + 1);
 
-  if (!g_rec.sdOk) {
-    LOG_LIVE(LVL_WARN, "no SD card - recording raw payload bytes, nothing decoded");
+  dbcReset(db);
+  bh.dbcLoaded   = false;
+  bh.dbcMessages = 0;
+  bh.dbcSignals  = 0;
+
+  if (!g_rec.sdOk) return;
+
+  if (!SD.exists(path)) {
+    LOG_LIVE(LVL_INFO, "CAN%u: no %s on the card - recording raw payload bytes. "
+                       "Add a DBC to decode this bus in real time.",
+             busNo, path);
     return;
   }
-  if (!SD.exists(DBC_PATH)) {
-    LOG_LIVE(LVL_INFO, "no %s on the card - recording raw payload bytes. "
-                       "Add a DBC to decode signals in real time.", DBC_PATH);
-    return;
-  }
 
-  File f = SD.open(DBC_PATH, FILE_READ);
+  File f = SD.open(path, FILE_READ);
   if (!f) {
-    LOG_LIVE(LVL_WARN, "could not open %s - recording raw payload bytes", DBC_PATH);
+    LOG_LIVE(LVL_WARN, "CAN%u: could not open %s - recording raw payload bytes",
+             busNo, path);
     return;
   }
 
@@ -214,46 +225,46 @@ void recorderLoadDbc() {
       want.messages = (uint16_t)((double)want.messages * k);
       want.signals  = (uint16_t)((double)want.signals  * k);
       want.values   = (uint16_t)((double)want.values   * k);
-      g_dbc.overflow = 1;
+      db.overflow = 1;
     }
   }
 
-  const bool sized = dbcAllocate(g_dbc, want);
-  liveAllocate(g_live, g_dbc.sigCap);
+  const bool sized = dbcAllocate(db, want);
+  liveAllocate(g_live[bus], db.sigCap);
 
   /* SECOND PASS: parse. */
   f.seek(0);
   lines = 0;
   while (readLine(f, line, sizeof(line))) {
-    dbcParseLine(g_dbc, line);
+    dbcParseLine(db, line);
     if (++lines > 20000) break;
   }
   f.close();
 
   (void)sized;
-  g_rec.dbcLoaded   = g_dbc.loaded != 0;
-  g_rec.dbcMessages = g_dbc.msgCount;
-  g_rec.dbcSignals  = g_dbc.sigCount;
+  bh.dbcLoaded   = db.loaded != 0;
+  bh.dbcMessages = db.msgCount;
+  bh.dbcSignals  = db.sigCount;
 
-  if (!g_dbc.loaded) {
-    LOG_LIVE(LVL_WARN, "%s has no BO_ messages - recording raw payload bytes",
-             DBC_PATH);
+  if (!db.loaded) {
+    LOG_LIVE(LVL_WARN, "CAN%u: %s has no BO_ messages - recording raw payload "
+                       "bytes", busNo, path);
     return;
   }
 
-  LOG_LIVE(LVL_INFO, "frame map: %u messages, %u signals from %s (%lu KB, "
+  LOG_LIVE(LVL_INFO, "CAN%u frame map: %u messages, %u signals from %s (%lu KB, "
                      "%lu KB free)",
-           (unsigned)g_dbc.msgCount, (unsigned)g_dbc.sigCount, DBC_PATH,
-           (unsigned long)((dbcBytes(g_dbc) + 1023) / 1024),
+           busNo, (unsigned)db.msgCount, (unsigned)db.sigCount, path,
+           (unsigned long)((dbcBytes(db) + 1023) / 1024),
            (unsigned long)(ESP.getFreeHeap() / 1024));
-  LOG_FILE(LVL_INFO, "dbc: version='%s' values=%u lineErrors=%u inexact=%u "
+  LOG_FILE(LVL_INFO, "CAN%u dbc: version='%s' values=%u lineErrors=%u inexact=%u "
                      "caps=%u/%u/%u bytes=%lu",
-           g_dbc.version, (unsigned)g_dbc.valCount,
-           (unsigned)g_dbc.lineErrors, (unsigned)g_dbc.inexact,
-           (unsigned)g_dbc.msgCap, (unsigned)g_dbc.sigCap,
-           (unsigned)g_dbc.valCap, (unsigned long)dbcBytes(g_dbc));
+           busNo, db.version, (unsigned)db.valCount,
+           (unsigned)db.lineErrors, (unsigned)db.inexact,
+           (unsigned)db.msgCap, (unsigned)db.sigCap,
+           (unsigned)db.valCap, (unsigned long)dbcBytes(db));
 
-  if (g_dbc.overflow) {
+  if (db.overflow) {
     /* Now genuinely rare: it means the file exceeded the DBC_MAX_* ceilings in
      * config.h, or the heap could not hold what the file asked for. Either way
      * say what was kept, because "did not fit" without a number is not
@@ -262,20 +273,46 @@ void recorderLoadDbc() {
                        "%u signals it asked for (ceilings %u/%u in config.h, "
                        "%lu KB heap free). Frames beyond it are still recorded, "
                        "as raw bytes.",
-             (unsigned)g_dbc.msgCap, (unsigned)g_dbc.sigCap,
+             (unsigned)db.msgCap, (unsigned)db.sigCap,
              (unsigned)DBC_MAX_MESSAGES, (unsigned)DBC_MAX_SIGNALS,
              (unsigned long)(ESP.getFreeHeap() / 1024));
   }
-  if (g_dbc.lineErrors) {
+  if (db.lineErrors) {
     LOG_LIVE(LVL_WARN, "%u line(s) of %s could not be parsed - see the .log",
-             (unsigned)g_dbc.lineErrors, DBC_PATH);
+             (unsigned)db.lineErrors, path);
   }
-  if (g_dbc.nameClipped) {
+  if (db.nameClipped) {
     /* Said out loud, because the cost is invisible until somebody matches CSV
      * rows against the source DBC by name and quietly gets none. */
     LOG_LIVE(LVL_WARN, "%u name(s) are longer than %u characters and are cut "
                        "short in the CSV - raise DBC_NAME_MAX in dbc.h",
-             (unsigned)g_dbc.nameClipped, (unsigned)(DBC_NAME_MAX - 1));
+             (unsigned)db.nameClipped, (unsigned)(DBC_NAME_MAX - 1));
+  }
+}
+
+void recorderLoadDbc() {
+  static const char *const kPath[CAN_BUSES] = { DBC_PATH, DBC2_PATH };
+
+  if (!g_rec.sdOk) {
+    for (uint8_t b = 0; b < CAN_BUSES; b++) {
+      dbcReset(g_dbc[b]);
+      g_rec.bus[b].dbcLoaded = false;
+    }
+    LOG_LIVE(LVL_WARN, "no SD card - recording raw payload bytes, nothing decoded");
+    return;
+  }
+
+  /* CAN1 first, deliberately: the maps are fitted to the heap in the order
+   * they load, so the bus named first is the one that gets the room. */
+  for (uint8_t b = 0; b < CAN_BUSES; b++) loadOneDbc(b, kPath[b]);
+
+  bool any = false;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) any = any || g_rec.bus[b].dbcLoaded;
+  if (!any) {
+    LOG_LIVE(LVL_INFO, "no frame map for either bus - every frame is recorded "
+                       "as raw payload bytes, which decodes offline just as "
+                       "well. Add %s or %s to decode live.",
+             DBC_PATH, DBC2_PATH);
   }
 }
 
@@ -386,13 +423,16 @@ static void startRecording() {
     /* Only reachable with a very large frame map. The recording is still valid
      * - it just has to be read against the DBC rather than being self-
      * describing - so say so rather than failing the start. */
-    LOG_LIVE(LVL_WARN, "the CSV header did not fit: %s has no legend block, "
-                       "keep %s alongside it", g_rec.csvName, DBC_PATH);
+    LOG_LIVE(LVL_WARN, "the CSV column header did not fit: %s starts straight "
+                       "into rows - read it against %s", g_rec.csvName,
+             g_rec.metaName);
   }
 
-  s_dec.reset(&g_dbc);
-  busReset(g_bus);
-  liveReset(g_live);
+  s_dec.reset(g_dbc);
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    busReset(g_bus[b]);
+    liveReset(g_live[b]);
+  }
 
   g_rec.fileIndex  = idx;
   g_rec.startMs    = millis();
@@ -408,18 +448,24 @@ static void startRecording() {
    * during boot - before any file existed - would mark every later recording
    * as lossy forever, which trains you to ignore the one number that matters.
    * Lifetime totals are preserved separately for the detailed log. */
-  g_rec.lifeDropped  += g_rec.queueDropped;
-  g_rec.lifeOverflow += g_rec.canOvfFramesMin;
-  g_rec.queueDropped     = 0;
-  g_rec.canOvfEvents     = 0;
-  g_rec.canOvfFramesMin  = 0;
-  g_rec.queuePeak     = 0;
-  g_rec.canIntfSticky = 0;
+  g_rec.lifeDropped += g_rec.queueDropped;
+  g_rec.queueDropped = 0;
+  g_rec.queuePeak    = 0;
+  g_rec.drainMaxUs   = 0;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    BusHealth &h = g_rec.bus[b];
+    h.lifeOverflow   += h.canOvfFramesMin;
+    h.canOvfEvents    = 0;
+    h.canOvfFramesMin = 0;
+    h.canIntfSticky   = 0;
+  }
   g_rec.recording  = true;
 
-  LOG_LIVE(LVL_INFO, "RECORDING STARTED -> %s (+ %s), %s",
-           g_rec.csvName, g_rec.logName,
-           g_rec.dbcLoaded ? "decoding via the frame map" : "raw bytes only");
+  uint8_t mapped = 0;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) if (g_rec.bus[b].dbcLoaded) mapped++;
+  LOG_LIVE(LVL_INFO, "RECORDING STARTED -> %s (+ %s), %u of %u buses decoding "
+                     "via a frame map",
+           g_rec.csvName, g_rec.logName, (unsigned)mapped, (unsigned)CAN_BUSES);
   LOG_FILE(LVL_INFO, "recorder: block=%u B, sync every %u ms, frame queue depth %u, "
                      "power-fail pin %d",
            (unsigned)SD_BLOCK_BYTES, (unsigned)SD_SYNC_INTERVAL_MS,
@@ -439,12 +485,19 @@ static void stopRecording() {
   LOG_LIVE(LVL_INFO, "RECORDING STOPPED: %s, %lu rows, %lu KB, %lu s",
            g_rec.csvName, (unsigned long)g_rec.rows,
            (unsigned long)(g_rec.bytes / 1024ULL), (unsigned long)secs);
-  LOG_FILE(LVL_INFO, "summary: dropped=%lu ovfEvents=%lu ovfFrames>=%lu "
-                     "queuePeak=%lu writes=%lu maxWrite=%lu us undecoded=%lu",
-           (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.canOvfEvents,
-           (unsigned long)g_rec.canOvfFramesMin,
-           (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.writeCount,
-           (unsigned long)g_rec.writeMaxUs, (unsigned long)g_bus.undecoded);
+  LOG_FILE(LVL_INFO, "summary: dropped=%lu queuePeak=%lu writes=%lu "
+                     "maxWrite=%lu us drainMax=%lu us",
+           (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.queuePeak,
+           (unsigned long)g_rec.writeCount, (unsigned long)g_rec.writeMaxUs,
+           (unsigned long)g_rec.drainMaxUs);
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    const BusHealth &h = g_rec.bus[b];
+    LOG_FILE(LVL_INFO, "summary CAN%u: frames=%lu ovfEvents=%lu ovfFrames>=%lu "
+                       "undecoded=%lu sticky=%lu",
+             (unsigned)(b + 1), (unsigned long)h.framesRx,
+             (unsigned long)h.canOvfEvents, (unsigned long)h.canOvfFramesMin,
+             (unsigned long)g_bus[b].undecoded, (unsigned long)h.canIntfSticky);
+  }
 
   logService();                 /* make sure the closing lines reach the file */
   logAttachFile(nullptr);
@@ -482,18 +535,64 @@ static void emergencyStop() {
 }
 
 /* ------------------------------------------------------------------------ */
+/* Everything about ONE bus that has to be recomputed once a second, plus the
+ * one-shot warnings that belong to it. Split out because the interesting
+ * failure is asymmetric - one bus deaf while the other is fine - and a routine
+ * that averaged the two would be incapable of saying so. */
+static void busStatusTick(uint8_t b, uint32_t now, uint32_t dt) {
+  BusHealth &h = g_rec.bus[b];
+  static const uint8_t  kIntPin[CAN_BUSES] = { PIN_CAN1_INT, PIN_CAN2_INT };
+  const unsigned busNo = (unsigned)(b + 1);
+
+  h.frameRate = (uint32_t)(((uint64_t)(h.framesRx - s_framesAtLastStatus[b])
+                            * 1000ULL) / (dt ? dt : 1));
+  s_framesAtLastStatus[b] = h.framesRx;
+  h.canOk = (now - h.lastFrameMs) < CAN_ALIVE_TIMEOUT_MS;
+
+  busTick(g_bus[b], dt);
+
+  /* Interrupt-path health, measured rather than assumed. */
+  h.irqRate = (uint32_t)(((uint64_t)(h.irqCount - s_irqAtLastStatus[b])
+                          * 1000ULL) / (dt ? dt : 1));
+  s_irqAtLastStatus[b] = h.irqCount;
+
+  /* Frames arriving but this line never firing means this bus is running
+   * purely on the 20 ms fallback poll, which caps at ~100 frames/s. */
+  h.intStuck = (h.frameRate > 0) && (h.irqRate == 0);
+
+  /* Bus load: bits/s seen, as a percentage of THIS bus's configured bit rate.
+   * Per bus because the two can be configured differently, and dividing both
+   * by one number would misreport whichever one is not it. */
+  const uint64_t bits = h.rxBits - s_bitsAtLastStatus[b];
+  s_bitsAtLastStatus[b] = h.rxBits;
+  const uint64_t rate  = h.bitrateKbps ? h.bitrateKbps : 1;
+  h.busLoadPct = (uint32_t)((bits * 1000ULL * 100ULL) /
+                            ((uint64_t)(dt ? dt : 1) * rate * 1000ULL));
+
+  if (h.intStuck && !s_warnedIntStuck[b]) {
+    s_warnedIntStuck[b] = true;
+    LOG_LIVE(LVL_ERROR,
+      "CAN%u INTERRUPT NOT FIRING - that bus is running on the 20 ms fallback "
+      "poll, which caps at ~100 frames/s. Check its INT wire (MCP2515 INT -> "
+      "D%d).", busNo, (int)kIntPin[b]);
+  } else if (!h.intStuck && s_warnedIntStuck[b]) {
+    s_warnedIntStuck[b] = false;
+    LOG_LIVE(LVL_INFO, "CAN%u interrupt recovered - %lu irq/s", busNo,
+             (unsigned long)h.irqRate);
+  }
+}
+
 static void statusTick() {
   const uint32_t now = millis();
   const uint32_t dt  = now - s_lastStatusMs;
   if (dt < STATUS_PERIOD_MS) return;
   s_lastStatusMs = now;
 
-  g_rec.frameRate = (uint32_t)(((uint64_t)(g_rec.framesRx - s_framesAtLastStatus)
-                                * 1000ULL) / (dt ? dt : 1));
-  s_framesAtLastStatus = g_rec.framesRx;
-  g_rec.canOk = (now - g_rec.lastFrameMs) < CAN_ALIVE_TIMEOUT_MS;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) busStatusTick(b, now, dt);
 
-  busTick(g_bus, dt);
+  g_rec.wakeRate = (uint32_t)(((uint64_t)(g_rec.wakeCount - s_wakeAtLastStatus)
+                               * 1000ULL) / (dt ? dt : 1));
+  s_wakeAtLastStatus = g_rec.wakeCount;
 
   const uint32_t qNow = g_frameQueue ? uxQueueMessagesWaiting(g_frameQueue) : 0;
   if (qNow > g_rec.queuePeak) g_rec.queuePeak = qNow;
@@ -509,54 +608,63 @@ static void statusTick() {
     snprintf(state, sizeof(state), "IDLE");
   }
 
-  /* Interrupt-path health, measured rather than assumed. */
-  g_rec.irqRate  = (uint32_t)(((uint64_t)(g_rec.irqCount  - s_irqAtLastStatus)
-                               * 1000ULL) / (dt ? dt : 1));
-  g_rec.wakeRate = (uint32_t)(((uint64_t)(g_rec.wakeCount - s_wakeAtLastStatus)
-                               * 1000ULL) / (dt ? dt : 1));
-  s_irqAtLastStatus  = g_rec.irqCount;
-  s_wakeAtLastStatus = g_rec.wakeCount;
+  /* Both buses on one line, each with its own rx/irq, because the question
+   * this line answers is "is the logger working" and with two buses that has
+   * two answers. Kept to one line so a serial console stays readable. */
+  char perBus[CAN_BUSES][48];
+  bool anyOk   = false;
+  bool anyStuck = false;
+  uint32_t lost = g_rec.queueDropped;
 
-  /* Frames arriving but the line never firing means we are running purely on
-   * the 20 ms fallback poll, which caps at ~100 frames/s. */
-  g_rec.intStuck = (g_rec.frameRate > 0) && (g_rec.irqRate == 0);
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    const BusHealth &h = g_rec.bus[b];
+    anyOk    = anyOk || h.canOk;
+    anyStuck = anyStuck || h.intStuck;
+    lost    += h.canOvfFramesMin;
 
-  /* Bus load: bits/s seen, as a percentage of the configured bit rate. */
-  const uint64_t bits = g_rec.rxBits - s_bitsAtLastStatus;
-  s_bitsAtLastStatus  = g_rec.rxBits;
-  g_rec.busLoadPct = (uint32_t)((bits * 1000ULL * 100ULL) /
-                                ((uint64_t)(dt ? dt : 1) *
-                                 (uint64_t)CAN_BITRATE_KBPS * 1000ULL));
-
-  if (g_rec.intStuck && !s_warnedIntStuck) {
-    s_warnedIntStuck = true;
-    LOG_LIVE(LVL_ERROR,
-      "CAN INTERRUPT NOT FIRING - running on the 20 ms fallback poll, which "
-      "caps at ~100 frames/s. Check the INT wire (MCP2515 INT -> D%d).",
-      PIN_CAN_INT);
-  } else if (!g_rec.intStuck && s_warnedIntStuck) {
-    s_warnedIntStuck = false;
-    LOG_LIVE(LVL_INFO, "CAN interrupt recovered - %lu irq/s",
-             (unsigned long)g_rec.irqRate);
+    if (!h.present) {
+      snprintf(perBus[b], sizeof(perBus[b]), "CAN%u=-", (unsigned)(b + 1));
+    } else {
+      snprintf(perBus[b], sizeof(perBus[b]), "CAN%u rx=%lu/s irq=%lu/s %s%lu%%",
+               (unsigned)(b + 1), (unsigned long)h.frameRate,
+               (unsigned long)h.irqRate,
+               h.intStuck ? (h.intLevel ? "DEAD " : "STUCK ")
+                          : (h.canOk ? "" : "QUIET "),
+               (unsigned long)h.busLoadPct);
+    }
   }
 
-  if (g_rec.canOk) {
-    LOG_LIVE(g_rec.intStuck ? LVL_WARN : LVL_INFO,
-      "%s | %lu rows %lu KB | rx=%lu/s irq=%lu/s INT=%s(%d) | %u ids%s | "
-      "q=%lu/%u peak=%lu sticky=%lu | lost %lu",
+  if (anyOk) {
+    LOG_LIVE(anyStuck ? LVL_WARN : LVL_INFO,
+      "%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu drain=%lu us | lost %lu",
       state,
       (unsigned long)g_rec.rows, (unsigned long)(g_rec.bytes / 1024ULL),
-      (unsigned long)g_rec.frameRate, (unsigned long)g_rec.irqRate,
-      g_rec.intStuck ? (g_rec.intLevel ? "DEAD" : "STUCK-LOW")
-                     : (g_rec.irqRate ? "ok" : "idle"),
-      (int)g_rec.intLevel,
-      (unsigned)g_bus.used, g_rec.dbcLoaded ? "" : " (raw)",
+      perBus[0], perBus[1],
       (unsigned long)qNow, (unsigned)FRAME_QUEUE_LEN,
-      (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.canIntfSticky,
-      (unsigned long)(g_rec.queueDropped + g_rec.canOvfFramesMin));
+      (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.drainMaxUs,
+      (unsigned long)lost);
   } else {
-    LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC - check the wiring, the bit rate "
-                       "(%d kbit/s) and CAN_CRYSTAL_MHZ", state, CAN_BITRATE_KBPS);
+    /* Counted rather than assumed: with one module fitted, "on either bus" is
+     * wrong and sends somebody looking at hardware that is not there. */
+    uint8_t live = 0;
+    for (uint8_t b = 0; b < CAN_BUSES; b++) if (g_rec.bus[b].present) live++;
+
+    if (live > 1) {
+      LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC ON EITHER BUS - check the "
+                         "wiring, the bit rates (%u / %u kbit/s) and the "
+                         "crystal setting of each module", state,
+               (unsigned)CAN1_BITRATE_KBPS, (unsigned)CAN2_BITRATE_KBPS);
+    } else if (live == 1) {
+      const uint8_t only = g_rec.bus[0].present ? 0 : 1;
+      LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC on CAN%u (the only controller "
+                         "that answered) - check its wiring, its bit rate "
+                         "(%u kbit/s) and its crystal setting", state,
+               (unsigned)(only + 1),
+               (unsigned)g_rec.bus[only].bitrateKbps);
+    } else {
+      LOG_LIVE(LVL_WARN, "%s | NO CAN CONTROLLER FOUND AT ALL - check the "
+                         "shared SPI wiring (SCK/MISO/MOSI) and 3V3", state);
+    }
   }
 
   /* ---- the detail that only the .log file gets -------------------------- */
@@ -564,21 +672,41 @@ static void statusTick() {
    * ever bought truncation somewhere less visible: LOG_LINE_CHARS is the real
    * limit and everything past it is dropped by vsnprintf in logger.cpp. */
   char per[LOG_LINE_CHARS];
-  const uint8_t shown = busFormatIds(g_bus, &s_idCursor, per, sizeof(per));
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    if (!g_rec.bus[b].present) continue;
+    const uint8_t shown = busFormatIds(g_bus[b], &s_idCursor[b], per, sizeof(per));
 
-  /* Totals FIRST. Appended after the list they were the first thing the
-   * 160-character line dropped, and they were dropped on every bus with more
-   * than about nine ids - which is every real one. */
-  LOG_FILE(LVL_DEBUG, "ids: %u of %u | untracked=%lu undecoded=%lu | %s",
-           (unsigned)shown, (unsigned)g_bus.used,
-           (unsigned long)g_bus.untracked, (unsigned long)g_bus.undecoded, per);
+    /* Totals FIRST. Appended after the list they were the first thing the
+     * 160-character line dropped, and they were dropped on every bus with more
+     * than about nine ids - which is every real one. */
+    LOG_FILE(LVL_DEBUG, "ids CAN%u: %u of %u | untracked=%lu undecoded=%lu | %s",
+             (unsigned)(b + 1), (unsigned)shown, (unsigned)g_bus[b].used,
+             (unsigned long)g_bus[b].untracked,
+             (unsigned long)g_bus[b].undecoded, per);
+  }
+
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    const BusHealth &h = g_rec.bus[b];
+    if (!h.present) continue;
+    LOG_FILE(LVL_DEBUG,
+      "health CAN%u: frames=%lu rx=%lu/s ovfEvents=%lu ovfFrames>=%lu "
+      "sticky=%lu INT=%d load=%lu%%",
+      (unsigned)(b + 1), (unsigned long)h.framesRx, (unsigned long)h.frameRate,
+      (unsigned long)h.canOvfEvents, (unsigned long)h.canOvfFramesMin,
+      (unsigned long)h.canIntfSticky, (int)h.intLevel,
+      (unsigned long)h.busLoadPct);
+  }
+
+  /* drain is the dual-bus number: worst microseconds spent emptying BOTH
+   * controllers in one pass. A controller holds two frames, so at 500 kbit/s
+   * anything approaching 200 means the margin is gone. */
   LOG_FILE(LVL_DEBUG,
-    "health: queue=%lu peak=%lu drop=%lu ovfEvents=%lu ovfFrames>=%lu "
+    "health: queue=%lu peak=%lu drop=%lu drain=%lu us wake=%lu/s "
     "writes=%lu maxWr=%lu us "
     "syncs=%lu maxSync=%lu us atRisk<=%lu ms logDrop=%lu heap=%lu minHeap=%lu",
     (unsigned long)qNow, (unsigned long)g_rec.queuePeak,
-    (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.canOvfEvents,
-    (unsigned long)g_rec.canOvfFramesMin,
+    (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.drainMaxUs,
+    (unsigned long)g_rec.wakeRate,
     (unsigned long)g_rec.writeCount, (unsigned long)g_rec.writeMaxUs,
     (unsigned long)g_rec.syncCount, (unsigned long)g_rec.syncMaxUs,
     (unsigned long)(millis() - s_lastSyncMs),
@@ -766,7 +894,8 @@ void recorderTask(void *arg) {
          * far as this controller is concerned. Counting them would inflate the
          * frame rate and the bus load with our own traffic, and would let a
          * cyclic setpoint make an idle bus look alive. */
-        if (!f.tx) busObserve(g_bus, f, &g_dbc);
+        const uint8_t fb = (f.bus < CAN_BUSES) ? f.bus : 0;
+        if (!f.tx) busObserve(g_bus[fb], f, &g_dbc[fb]);
         if (!g_rec.recording) continue;
 
         /* Decode straight into the staging buffer. The buffer is oversized by

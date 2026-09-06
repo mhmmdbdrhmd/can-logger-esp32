@@ -12,7 +12,7 @@ setlocal
 
 set "HERE=%~dp0"
 set "SRC=%HERE%..\src"
-set "DST=%HERE%CanLogger"
+set "DST=%HERE%DualCanLogger"
 
 if not exist "%SRC%" (
     echo ERROR: cannot find "%SRC%"
@@ -30,13 +30,13 @@ del /q "%DST%\*.cpp" 2>nul
 
 REM main.cpp becomes the .ino (a deliberately tiny wrapper - see app.h);
 REM everything else keeps its name.
-copy /y "%SRC%\main.cpp" "%DST%\CanLogger.ino" >nul
+copy /y "%SRC%\main.cpp" "%DST%\DualCanLogger.ino" >nul
 for %%F in ("%SRC%\*.h" "%SRC%\*.cpp") do (
     if /i not "%%~nxF"=="main.cpp" copy /y "%%F" "%DST%\%%~nxF" >nul
 )
 
 echo.
 echo Synced src\ to %DST%
-echo Now open %DST%\CanLogger.ino in the Arduino IDE.
+echo Now open %DST%\DualCanLogger.ino in the Arduino IDE.
 echo.
 pause

@@ -18,16 +18,33 @@ struct CanFrame {
   uint64_t esp_us;    /* host timestamp captured in the INT service routine  */
   uint32_t id;
   uint8_t  len;
-  uint8_t  ext;       /* 1 = 29-bit identifier                               */
-  uint8_t  rtr;
+
+  /* The flags are bitfields rather than four bytes because the struct had no
+   * padding left to spend. 8 + 4 + 4 + 8 was exactly 24 bytes, and a plain
+   * `uint8_t bus` would have aligned it up to 32 - a third more RAM for a
+   * queue that is thousands of entries deep. Packed, `bus` is free, and every
+   * call site is unchanged because these only ever hold 0 or 1 anyway. */
+  uint8_t  ext : 1;   /* 1 = 29-bit identifier                               */
+  uint8_t  rtr : 1;
+
   /* 1 = this logger sent it, rather than receiving it. An MCP2515 does not
    * hear its own transmissions, so a frame the dashboard sent would otherwise
    * be missing from the recording it was sent during - and a setpoint whose
-   * effect you can see but whose cause you cannot is worse than useless. The
-   * flag costs nothing: it fits in the padding the struct already had. */
-  uint8_t  tx;
+   * effect you can see but whose cause you cannot is worse than useless. */
+  uint8_t  tx  : 1;
+
+  /* Which controller it came from: 0 = CAN1, 1 = CAN2. Zero-based here and
+   * one-based in the CSV, because the wire and the wiring diagram both count
+   * from one and a log nobody can read against the diagram is no use. */
+  uint8_t  bus : 1;
+
   uint8_t  data[8];
 };
+
+/* The queue holds thousands of these, so the size is load-bearing rather than
+ * incidental. Asserted here so that adding a field is a compile error and not
+ * a silent 30 % increase in the frame queue. */
+static_assert(sizeof(CanFrame) == 24, "CanFrame must stay 24 bytes");
 
 class MCP2515 {
 public:
@@ -135,10 +152,15 @@ private:
   inline void select()   { digitalWrite(_cs, LOW);  }
   inline void deselect() { digitalWrite(_cs, HIGH); }
 
+  /* One SPI transaction, clocked as a single block. Every register access and
+   * both frame paths go through this - see the comment in mcp2515.cpp for why
+   * a byte-at-a-time version does not meet the deadline with two controllers
+   * sharing the bus. `rx` must be as long as `tx`. */
+  void    xfer(const uint8_t *tx, uint8_t *rx, size_t n);
+
   void    reset();
   void    abortTx();
   uint8_t readReg(uint8_t addr);
-  void    readRegs(uint8_t addr, uint8_t *buf, uint8_t n);
   void    writeReg(uint8_t addr, uint8_t val);
   void    modifyReg(uint8_t addr, uint8_t mask, uint8_t val);
   uint8_t readStatus();

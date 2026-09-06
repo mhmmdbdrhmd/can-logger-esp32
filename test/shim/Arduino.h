@@ -62,7 +62,21 @@
 extern uint32_t g_fakeMs;
 static inline uint32_t millis() { return g_fakeMs; }
 static inline uint32_t micros() { return g_fakeMs * 1000u; }
-static inline void digitalWrite(int, int) {}
+/* Pin levels are recorded rather than discarded, so a test can model a bus
+ * with more than one device on it: with two MCP2515s sharing SPI, which chip a
+ * transaction is talking to is decided entirely by which CS is low. */
+/* An inline variable so every test that links a driver gets it without
+ * having to pull in shim.cpp. */
+inline uint8_t g_pinLevel[64] = {
+  1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+};
+static inline void digitalWrite(int pin, int level) {
+  if (pin >= 0 && pin < 64) g_pinLevel[pin] = level ? 1 : 0;
+}
+static inline int  digitalRead(int pin) {
+  return (pin >= 0 && pin < 64) ? g_pinLevel[pin] : 1;
+}
 static inline void pinMode(int, int) {}
 static inline void delay(uint32_t) {}
 static inline void delayMicroseconds(uint32_t) {}

@@ -11,32 +11,44 @@ steht in [README.md](README.md), die ausführliche Windows-Anleitung in
 | Teil | Hinweis |
 |---|---|
 | ESP32 DevKit v1 (30-polig) | jedes ESP32-Board geht, der Pinplan unten gilt für das 30-polige v1 |
-| MCP2515 + TJA1050 CAN-Modul | das übliche blaue Modul. **Quarz prüfen** — 8 MHz oder 16 MHz |
+| **2 ×** MCP2515 + TJA1050 CAN-Modul | das übliche blaue Modul. **Jeden Quarz einzeln prüfen** — 8 MHz oder 16 MHz, und zwei Module aus derselben Bestellung können sich unterscheiden |
 | Micro-SD-Modul (SPI) | 3V3-Logik, aber **Versorgung über 5V (VIN)** |
 | Micro-SD-Karte, **FAT32** | Class 10 oder besser. Karten über 32 GB sind meist exFAT und müssen neu formatiert werden |
-| 120 Ω Widerstand | nur wenn der Logger am Busende sitzt |
+| 120 Ω Widerstand, 0–2 Stück | einer je Bus, und nur dort, wo der Logger am Busende sitzt. Die beiden Entscheidungen sind unabhängig |
 
 > **Der Quarz ist die häufigste Fehlerquelle.** Steht in `src/config.h` unter
-> `CAN_CRYSTAL_MHZ` der falsche Wert, meldet der Logger „NO CAN TRAFFIC" —
-> obwohl der Bus einwandfrei läuft.
+> `CAN1_CRYSTAL_MHZ` bzw. `CAN2_CRYSTAL_MHZ` der falsche Wert, meldet der Logger
+> „NO CAN TRAFFIC" für **diesen** Bus — obwohl er einwandfrei läuft. Die beiden
+> Werte werden getrennt eingestellt.
 
 ---
 
 ## 2. Verdrahtung
 
-Bewusst **zwei getrennte SPI-Busse**: ein SD-Schreibvorgang dauert
-Millisekunden, und ein gemeinsamer Bus würde das Lesen der CAN-Frames genau so
-lange blockieren.
+**Beide CAN-Controller teilen sich einen SPI-Bus. Die SD-Karte bekommt ihren
+eigenen.** Diese Trennung trägt das ganze Konzept: ein SD-Schreibvorgang dauert
+Millisekunden — auf einer schlechten Karte Hunderte davon — und ein gemeinsamer
+Bus würde das Lesen der CAN-Frames genau so lange blockieren. Zwei MCP2515 an
+einem SPI-Bus kosten dagegen nichts, weil MISO hochohmig wird, solange CS high
+ist: nur CS und INT müssen eindeutig sein.
 
-| MCP2515 | ESP32 | | SD-Karte | ESP32 |
-|---|---|---|---|---|
-| VCC | 3V3 | | VCC | **5V (VIN)** |
-| GND | GND | | GND | GND |
-| CS  | **D5**  | | CS   | **D4**  |
-| INT | **D17** | | SCK  | **D14** |
-| SCK | D18 | | MISO | **D27** |
-| MISO| D19 | | MOSI | **D13** |
-| MOSI| D23 | | | |
+| MCP2515 #1 → CAN1 | ESP32 | | MCP2515 #2 → CAN2 | ESP32 | | SD-Karte | ESP32 |
+|---|---|---|---|---|---|---|---|
+| VCC | 3V3 | | VCC | 3V3 | | VCC | **5V (VIN)** |
+| GND | GND | | GND | GND | | GND | GND |
+| CS  | **D22** | | CS  | **D5**  | | CS   | **D4**  |
+| INT | **D21** | | INT | **D17** | | SCK  | **D14** |
+| SCK | D18 | | SCK | D18 (geteilt) | | MISO | **D27** |
+| MISO| D19 | | MISO| D19 (geteilt) | | MOSI | **D13** |
+| MOSI| D23 | | MOSI| D23 (geteilt) | | | |
+
+Die geteilten Leitungen SCK/MISO/MOSI kurz halten — ein Steckbrett-Stern mit
+zwei langen Beinen ist die einzige Stelle, an der diese Topologie heikel wird.
+
+> **Auf den meisten DevKit-v1-Boards gibt es keinen Pin „D17".** Dieses Board
+> beschriftet UART2 nach Funktion: der Pin mit dem Aufdruck **TX2** ist GPIO17,
+> **RX2** ist GPIO16. Der INT von CAN2 kommt an TX2. USB-Upload und serielle
+> Ausgabe laufen über UART0 und sind davon nicht betroffen.
 
 > **SD-Modul an 5V (VIN) versorgen, nicht an 3V3.** Fast alle Micro-SD-Platinen
 > haben einen eigenen 3V3-Regler samt Pegelwandlern und erwarten 5 V an VCC. An
@@ -44,10 +56,17 @@ lange blockieren.
 > so, als steckte gar keine Karte im Slot. Die SPI-Leitungen bleiben in beiden
 > Fällen 3V3. Nur bei den seltenen Platinen ohne Regler ist 3V3 richtig.
 
-Busseite: `CAN_H` und `CAN_L` an den Bus, `GND` an die Busmasse. Voreingestellt
-sind **250 kBit/s**.
+Busseite: `CAN_H` und `CAN_L` jedes Moduls an **seinen eigenen** Bus, `GND` an
+die jeweilige Busmasse. Voreingestellt sind **250 kBit/s je Bus**
+(`CAN1_BITRATE_KBPS`, `CAN2_BITRATE_KBPS`); die beiden Busse müssen nicht
+gleich schnell sein.
 
-**Wichtig bei laufender Maschine:** Setzen Sie `CAN_LISTEN_ONLY` in
+**Terminierung je Bus getrennt entscheiden.** 120 Ω gehören zwischen `CAN_H` und
+`CAN_L` nur dort, wo der Logger am physikalischen Ende **dieses** Busses sitzt.
+Am Ende des einen Busses zu sitzen sagt nichts über den anderen aus.
+
+**Wichtig bei laufender Maschine:** Setzen Sie `CAN1_LISTEN_ONLY` bzw.
+`CAN2_LISTEN_ONLY` (je Bus getrennt) in
 `src/config.h` auf `1`, wenn bereits zwei oder mehr Teilnehmer am Bus hängen.
 Der Logger sendet dann nie selbst. Steht er dagegen allein mit einem einzigen
 Steuergerät am Bus, muss der Wert `0` bleiben — sonst quittiert niemand die
@@ -84,7 +103,8 @@ Karte auf **FAT32** formatieren. Optional zwei Textdateien ins Hauptverzeichnis:
 
 | Datei | Wozu |
 |---|---|
-| `frames.dbc` | Ihre DBC-Datei. **Damit werden Signale in Echtzeit dekodiert** — mit Namen und physikalischen Einheiten. Vorlage: `examples/example.dbc` |
+| `frames.dbc` | DBC-Datei für **CAN1**. Damit werden dessen Signale in Echtzeit dekodiert — mit Namen und physikalischen Einheiten. Vorlage: `examples/example.dbc` |
+| `frames2.dbc` | DBC-Datei für **CAN2**. Getrennt, weil dieselbe ID auf zwei Bussen üblicherweise Verschiedenes bedeutet. Fehlt sie, wird CAN2 als Rohdaten aufgezeichnet — das ist kein Fehler |
 | `config.txt` | WLAN-Einstellungen. Fehlt sie, legt der Logger beim ersten Start eine kommentierte Vorlage an |
 
 **Ohne DBC-Datei** zeichnet der Logger trotzdem alles auf — dann als rohe
@@ -138,9 +158,11 @@ steuern.
 |---|---|
 | `NO SD CARD at any clock ...` | Zuerst die **Versorgung** prüfen: die meisten Module brauchen 5V an VIN, nicht 3V3. Dann: Karte FAT32? Verdrahtung CS=D4, SCK=D14, MISO=D27, MOSI=D13 |
 | `SD card needed a slower clock` | Kein Fehler — die Karte ist eingebunden, nur unterhalb von `SD_SPI_HZ`. Ursache sind lange Jumper oder ein billiger Adapter. |
-| `CAN CONTROLLER NOT RESPONDING` | Verdrahtung oder Spannung des MCP2515: CS=D5, 3V3 |
-| `NO CAN TRAFFIC`, Bus läuft aber | falscher `CAN_CRYSTAL_MHZ` (8 statt 16), falsche Baudrate, oder CAN_H/CAN_L vertauscht |
-| `no /frames.dbc on the card` | keine DBC auf der Karte — es wird alles als Rohdaten aufgezeichnet (kein Fehler) |
+| `CAN1 CONTROLLER NOT RESPONDING` (bzw. CAN2) | Verdrahtung oder Spannung **dieses** MCP2515. Die Meldung nennt Bus und Pins. Antwortet nur einer der beiden, ist es fast immer der Chip-Select — das ist die einzige nicht geteilte Leitung |
+| `NO CAN TRAFFIC` auf **einem** Bus | falscher `CAN1_CRYSTAL_MHZ` bzw. `CAN2_CRYSTAL_MHZ` für **dieses** Modul (8 statt 16), falsche Baudrate für diesen Bus, oder dessen CAN_H/CAN_L vertauscht |
+| `NO CAN TRAFFIC ON EITHER BUS` | beide gleichzeitig falsch deutet auf die geteilte Verdrahtung: SCK/MISO/MOSI oder 3V3 |
+| `CAN2 INTERRUPT NOT FIRING` (bzw. CAN1) | die INT-Leitung dieses Busses. Frames kommen weiter über den 20-ms-Notbetrieb an, aber nur noch ~100 Frames/s — es sieht also aus wie „läuft, nur langsam" |
+| `CAN2: no /frames2.dbc on the card` | keine DBC für diesen Bus — er wird als Rohdaten aufgezeichnet (kein Fehler) |
 | `lost` steigt an | SD-Karte zu langsam. Bessere Karte verwenden |
 | kein COM-Port sichtbar | USB-Treiber fehlt, oder das USB-Kabel ist ein reines Ladekabel ohne Datenadern |
 | letzte Sekunden fehlen nach Spannungsausfall | ohne Power-Fail-Eingang normal, maximal 1 Sekunde. Siehe README §8 |

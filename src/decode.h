@@ -3,18 +3,31 @@
  *
  *  THE SCHEMA
  *
- *      t_us;id;name;signal;value;unit;raw
+ *      t_us;bus;id;name;signal;value;unit;raw
  *
- *  Seven fields, ';' separated, always in that order, one row per decoded
+ *  Eight fields, ';' separated, always in that order, one row per decoded
  *  SIGNAL. A frame carrying four signals produces four rows that share a
- *  timestamp and an identifier; a frame nothing could decode produces exactly
- *  one row carrying its payload bytes. Nothing else ever appears, so a parser
- *  is a split on ';' and a group-by on (t_us, id) - no DBC, no bit twiddling
- *  and no per-project special cases downstream.
+ *  timestamp, a bus and an identifier; a frame nothing could decode produces
+ *  exactly one row carrying its payload bytes. Nothing else ever appears, so a
+ *  parser is a split on ';' and a group-by on (t_us, bus, id) - no DBC, no bit
+ *  twiddling and no per-project special cases downstream.
+ *
+ *  `bus` is the second column and not the last because it is part of a row's
+ *  IDENTITY, not part of its payload: on two buses an identifier alone no
+ *  longer names anything. A reader that sorts or groups without it is wrong,
+ *  and putting it next to t_us and id is what makes that hard to forget.
+ *
+ *  This is schema 2. Recordings made by the single-bus logger have seven
+ *  columns and no bus; the companion .meta file carries a "schema" number so a
+ *  tool can tell without guessing.
  *
  *      t_us    recorder clock, microseconds since the start of THIS file.
  *              Captured in the CAN interrupt, so it is the arrival time on the
- *              wire, not the time the row happened to be formatted.
+ *              wire, not the time the row happened to be formatted. ONE clock
+ *              for both buses, so rows from CAN1 and CAN2 are directly
+ *              comparable - which is the whole reason to log them together.
+ *      bus     which CAN bus the frame arrived on: 1 or 2. Counts from one,
+ *              matching the wiring diagram and the labels on the case.
  *      id      identifier, "0x18C" style. 29-bit ids print all eight digits.
  *      name    message name from the DBC, or the CANopen function when that
  *              layer is on. Empty for an identifier nothing described.
@@ -34,6 +47,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "config.h"
 #include "mcp2515.h"
 #include "dbc.h"
 
@@ -79,7 +93,10 @@ struct BusStats {
   uint64_t total;
 };
 
-extern BusStats g_bus;
+/* One activity table per bus. Separate rather than merged because the whole
+ * point of the table is "what is on THIS bus", and a merged one would report a
+ * silent bus as busy the moment the other one was. */
+extern BusStats g_bus[CAN_BUSES];
 
 void busReset(BusStats &b);
 
@@ -134,7 +151,8 @@ struct LiveSignals {
   uint16_t   seenCount = 0;
 };
 
-extern LiveSignals g_live;
+/* One per bus, sized alongside that bus's frame map. */
+extern LiveSignals g_live[CAN_BUSES];
 
 /* Clears the values without releasing the slots. */
 void liveReset(LiveSignals &l);
@@ -151,7 +169,10 @@ void liveFree(LiveSignals &l);
  * -------------------------------------------------------------------------*/
 class Decoder {
 public:
-  /* Forgets the timestamp origin and every wrap counter in the frame map. */
+  /* Forgets the timestamp origin and every wrap counter in both frame maps.
+   * Takes the array rather than one map: which map a frame is decoded against
+   * is decided per frame, by its bus, and handing the decoder a single map
+   * would make that decision impossible to express. */
   void reset(DbcDb *db);
 
   /* Formats one frame as one or more complete CSV rows (newlines included)
@@ -163,7 +184,7 @@ public:
   uint64_t epoch() const   { return _epoch; }
 
 private:
-  DbcDb   *_db    = nullptr;
+  DbcDb   *_db    = nullptr;   /* points at an array of CAN_BUSES maps */
   bool     _have  = false;
   uint64_t _epoch = 0;
 };
@@ -183,7 +204,5 @@ size_t csvColumnHeader(char *buf, size_t cap);
  * can read it directly instead of parsing prose. Needs ~4 KB plus roughly
  * 120 bytes per mapped signal. */
 size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
-                const DbcDb &db);
+                const DbcDb *db);
 
-size_t csvHeaderBlock(char *buf, size_t cap, const char *filename,
-                      const DbcDb &db);

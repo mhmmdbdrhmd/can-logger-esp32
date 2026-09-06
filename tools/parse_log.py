@@ -8,12 +8,24 @@ is that parser, and it does three jobs:
 
     python3 tools/parse_log.py 1.csv                 # summary and integrity
     python3 tools/parse_log.py 1.csv --list          # signals present
+    python3 tools/parse_log.py 1.csv --bus 2         # only what CAN2 carried
     python3 tools/parse_log.py 1.csv --wide out.csv  # one column per signal
 
 `--wide` pivots the long form into a wide table: one row per frame timestamp,
-one column per Message.Signal, which is what most plotting and analysis tools
-want. Values are carried forward, because CAN signals are sampled at whatever
-rate their message is sent at and a wide table needs every column populated.
+one column per bus and Message.Signal, which is what most plotting and analysis
+tools want. Values are carried forward, because CAN signals are sampled at
+whatever rate their message is sent at and a wide table needs every column
+populated.
+
+TWO SCHEMAS
+-----------
+The dual-bus logger writes eight columns, the second of which says which CAN
+bus a row came from. The single-bus logger wrote seven and had no such column.
+Both are read here: the header line decides, and a seven-column recording is
+treated as one bus's worth of rows. A signal is named `CAN1.Message.Signal`
+throughout, because on two buses a message name alone does not identify
+anything - and that stays true of a one-bus recording read later alongside a
+two-bus one.
 
 Only the standard library is used, so this runs anywhere Python does.
 """
@@ -22,7 +34,11 @@ import csv
 import sys
 from collections import Counter, OrderedDict
 
-COLUMNS = ["t_us", "id", "name", "signal", "value", "unit", "raw"]
+# Schema 2, what this logger writes.
+COLUMNS = ["t_us", "bus", "id", "name", "signal", "value", "unit", "raw"]
+
+# Schema 1, what the single-bus logger wrote. Read, never written.
+COLUMNS_V1 = ["t_us", "id", "name", "signal", "value", "unit", "raw"]
 
 # Rows for frames the LOGGER sent, rather than received, carry the prefix on the
 # message name. The schema is unchanged - seven columns, same order - so nothing
@@ -33,6 +49,25 @@ TX_PREFIX = "TX:"
 
 def is_tx(row):
     return row["name"].startswith(TX_PREFIX)
+
+
+def bus_of(row):
+    """Which bus a row came from, as an int. A schema-1 recording has no such
+    column and is reported as bus 1 - which is what it was."""
+    try:
+        return int(row.get("bus", 1) or 1)
+    except ValueError:
+        return 1
+
+
+def sig_key(row):
+    """The fully qualified name of a signal: bus, message, signal.
+
+    Qualified by bus even for a single-bus recording. Two buses routinely carry
+    a message of the same name, so an unqualified key would silently merge two
+    different signals into one column - and a key whose meaning depends on how
+    many buses the file happens to have is worse than a slightly longer one."""
+    return f'CAN{bus_of(row)}.{base_name(row)}.{row["signal"]}'
 
 
 def base_name(row):
@@ -46,6 +81,7 @@ def read_rows(path):
     a recording cut short by a power loss ends in a partial line, and that is
     not a reason to refuse the 40 minutes before it."""
     header, bad, seen_columns = [], 0, False
+    cols = COLUMNS                      # assumed until the header says otherwise
     with open(path, "r", newline="") as fh:
         for lineno, line in enumerate(fh, 1):
             line = line.rstrip("\n")
@@ -59,13 +95,20 @@ def read_rows(path):
                 if fields == COLUMNS:
                     seen_columns = True
                     continue
+                if fields == COLUMNS_V1:
+                    # A single-bus recording. Every row is bus 1.
+                    cols = COLUMNS_V1
+                    seen_columns = True
+                    continue
                 print(f"warning: expected the column header on line {lineno}, "
                       f"got {line[:60]!r}", file=sys.stderr)
                 seen_columns = True
-            if len(fields) != len(COLUMNS):
+            if len(fields) != len(cols):
                 bad += 1
                 continue
-            yield header, dict(zip(COLUMNS, fields))
+            row = dict(zip(cols, fields))
+            row.setdefault("bus", "1")
+            yield header, row
             header = []
     if bad:
         print(f"note: skipped {bad} malformed row(s) - the last one is normally "
@@ -89,18 +132,24 @@ def summarise(path, header, rows):
     t1 = int(rows[-1]["t_us"])
     span = (t1 - t0) / 1e6
 
-    frames = OrderedDict()          # (t_us, id) -> None, preserves order
+    # Keyed on (t_us, bus, id). The bus is part of a frame's identity: two
+    # buses can carry the same identifier in the same microsecond, and without
+    # it those two frames would be counted as one.
+    frames = OrderedDict()
     per_id = Counter()
     per_sig = Counter()
+    per_bus = Counter()
     raw_only = 0
     sent = 0
     sent_sig = Counter()
 
     for r in rows:
-        key = (r["t_us"], r["id"])
+        b = bus_of(r)
+        key = (r["t_us"], b, r["id"])
         if key not in frames:
             frames[key] = None
-            per_id[r["id"]] += 1
+            per_id[(b, r["id"])] += 1
+            per_bus[b] += 1
             if not r["signal"]:
                 raw_only += 1
             if is_tx(r):
@@ -108,9 +157,9 @@ def summarise(path, header, rows):
         if r["signal"]:
             # Grouped under the message's real name, so a signal the logger
             # both watched and wrote is one row rather than two.
-            per_sig[f'{base_name(r)}.{r["signal"]}'] += 1
+            per_sig[sig_key(r)] += 1
             if is_tx(r):
-                sent_sig[f'{base_name(r)}.{r["signal"]}'] += 1
+                sent_sig[sig_key(r)] += 1
 
     print(f"file        {path}")
     for line in header:
@@ -120,6 +169,10 @@ def summarise(path, header, rows):
     print(f"rows        {len(rows)}")
     print(f"frames      {len(frames)}  ({len(frames)/span:.0f}/s)"
           if span > 0 else f"frames      {len(frames)}")
+    for b in sorted(per_bus):
+        n = per_bus[b]
+        rate = f"  ({n/span:.0f}/s)" if span > 0 else ""
+        print(f"  CAN{b}       {n} frame(s){rate}")
     print(f"identifiers {len(per_id)}")
     print(f"undecoded   {raw_only} frame(s) stored as raw bytes")
     print(f"signals     {len(per_sig)}")
@@ -129,9 +182,9 @@ def summarise(path, header, rows):
             print(f"            {name}  x{n}")
 
     print("\nper identifier:")
-    for ident, n in per_id.most_common():
+    for (b, ident), n in per_id.most_common():
         rate = f"{n/span:8.1f}/s" if span > 0 else " " * 11
-        print(f"  {ident:>12}  {n:>9}  {rate}")
+        print(f"  CAN{b}  {ident:>12}  {n:>9}  {rate}")
 
     # Monotonic time is the one invariant worth checking: it is captured in the
     # interrupt, so a step backwards would mean the receive path reordered.
@@ -149,7 +202,7 @@ def list_signals(rows):
     for r in rows:
         if not r["signal"]:
             continue
-        key = f'{base_name(r)}.{r["signal"]}'
+        key = sig_key(r)
         if key not in seen:
             seen[key] = (r["id"], r["unit"], r["value"], is_tx(r))
         elif is_tx(r) and not seen[key][3]:
@@ -157,9 +210,9 @@ def list_signals(rows):
     if not seen:
         print("no decoded signals - this recording has no frame map behind it")
         return
-    print(f'{"signal":<40} {"id":>12}  {"unit":<10} {"":<4} example')
+    print(f'{"signal":<48} {"id":>12}  {"unit":<10} {"":<4} example')
     for key, (ident, unit, example, tx) in seen.items():
-        print(f"{key:<40} {ident:>12}  {unit:<10} "
+        print(f"{key:<48} {ident:>12}  {unit:<10} "
               f"{'TX' if tx else '':<4} {example}")
 
 
@@ -167,7 +220,7 @@ def to_wide(rows, out_path):
     columns = OrderedDict()
     for r in rows:
         if r["signal"]:
-            columns.setdefault(f'{base_name(r)}.{r["signal"]}', None)
+            columns.setdefault(sig_key(r), None)
     if not columns:
         sys.exit("nothing to pivot: this recording carries no decoded signals")
 
@@ -187,7 +240,7 @@ def to_wide(rows, out_path):
                 written += 1
             pending_t = t
             if r["signal"]:
-                current[f'{base_name(r)}.{r["signal"]}'] = r["value"]
+                current[sig_key(r)] = r["value"]
         if pending_t is not None:
             w.writerow([pending_t] + [current[n] for n in names])
             written += 1
@@ -202,11 +255,20 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", help="a recording written by the logger")
     ap.add_argument("--list", action="store_true", help="list the signals present")
+    ap.add_argument("--bus", type=int, metavar="N",
+                    help="only rows from this CAN bus (1 or 2)")
     ap.add_argument("--wide", metavar="OUT.csv",
                     help="pivot to one column per signal")
     args = ap.parse_args()
 
     header, rows = load(args.csv)
+
+    if args.bus is not None:
+        before = len(rows)
+        rows = [r for r in rows if bus_of(r) == args.bus]
+        if not rows:
+            sys.exit(f"no rows from CAN{args.bus} in this recording "
+                     f"({before} row(s) read)")
 
     if args.list:
         list_signals(rows)

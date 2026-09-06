@@ -41,13 +41,94 @@ static void jsonStr(String &out, const char *s) {
   }
 }
 
+/* One bus's worth of status: its health, the identifiers it has seen and the
+ * signals its own frame map decoded. Emitted as an element of the "bus" array
+ * rather than as two sets of suffixed top-level keys, so the page renders it
+ * with one loop and adding a third controller would be a config change. */
+static void statusBus(String &j, uint8_t b) {
+  const BusHealth  &h = g_rec.bus[b];
+  const BusStats   &bs = g_bus[b];
+  const DbcDb      &db = g_dbc[b];
+  const LiveSignals &lv = g_live[b];
+
+  j += "{\"b\":";        j += (uint32_t)(b + 1);
+  j += ",\"on\":";       j += h.present ? 1 : 0;
+  /* Separate from "on": a bus can be off because it was compiled out or
+   * because nothing answered, and only the second one is worth a wiring
+   * check. */
+  j += ",\"en\":";       j += h.enabled ? 1 : 0;
+  j += ",\"kbps\":";     j += (uint32_t)h.bitrateKbps;
+  j += ",\"send\":";     j += h.listenOnly ? 0 : 1;
+  j += ",\"alive\":";    j += h.canOk ? 1 : 0;
+  j += ",\"fps\":";      j += h.frameRate;
+  j += ",\"irq\":";      j += h.irqRate;
+  j += ",\"intStuck\":"; j += h.intStuck ? 1 : 0;
+  j += ",\"intLevel\":"; j += (uint32_t)h.intLevel;
+  j += ",\"load\":";     j += h.busLoadPct;
+
+  /* The controller's overflow floor, on its own. Deliberately NOT added to the
+   * queue-drop count here: one is a floor and the other is exact, and the page
+   * has to be able to say which is which. */
+  j += ",\"ovf\":";      j += h.canOvfFramesMin;
+  j += ",\"ovfEv\":";    j += h.canOvfEvents;
+  j += ",\"sticky\":";   j += h.canIntfSticky;
+  j += ",\"dbc\":";      j += h.dbcLoaded ? 1 : 0;
+  j += ",\"dbcMsg\":";   j += (uint32_t)h.dbcMessages;
+  j += ",\"dbcSig\":";   j += (uint32_t)h.dbcSignals;
+
+  /* ---- identifiers actually seen on this bus, with their latest payload -- */
+  j += ",\"idMore\":"; j += bs.untracked ? 1 : 0;
+  j += ",\"ids\":[";
+  char id[16];
+  for (uint8_t i = 0; i < bs.used; i++) {
+    if (i) j += ',';
+    snprintf(id, sizeof(id), bs.ext[i] ? "0x%08lX" : "0x%03lX",
+             (unsigned long)bs.id[i]);
+    j += "{\"id\":\""; j += id; j += '"';
+    j += ",\"d\":\"";  j += bs.last[i]; j += '"';
+    j += ",\"n\":";    j += (uint32_t)bs.count[i];
+    j += ",\"r\":";    j += (uint32_t)bs.rate[i];
+    j += ",\"k\":";    j += bs.known[i] ? 1 : 0;
+    j += '}';
+  }
+  j += ']';
+
+  /* ---- live decoded signals, straight out of THIS bus's frame map -------
+   * Nothing here knows what any of these are. The names, units and order all
+   * come from the DBC on the card, so the page shows a drive, a weather
+   * station or a test rig without a line of firmware changing. */
+  uint16_t shown = 0;
+  j += ",\"sig\":[";
+  for (uint16_t mi = 0; mi < db.msgCount && shown < WEB_MAX_SIGNALS; mi++) {
+    const DbcMessage &m = db.msg[mi];
+    for (uint16_t k = 0; k < m.signalCount && shown < WEB_MAX_SIGNALS; k++) {
+      const uint16_t si = m.firstSignal + k;
+      if (si >= lv.cap || !lv.seen[si]) continue;
+
+      if (shown) j += ',';
+      j += "{\"m\":\""; jsonStr(j, m.name);
+      j += "\",\"s\":\""; jsonStr(j, db.sig[si].name);
+      j += "\",\"v\":\""; jsonStr(j, lv.text[si]);
+      j += "\",\"u\":\""; jsonStr(j, db.sig[si].unit);
+      j += "\"}";
+      shown++;
+    }
+  }
+  j += ']';
+  j += ",\"sigMore\":"; j += (lv.seenCount > shown) ? 1 : 0;
+  j += '}';
+}
+
 static void handleStatus() {
-  /* A FLOOR, not a total: the controller's overflow flags are sticky and say
-   * only that it happened, never how often. Reported as such by the page. */
-  const uint32_t lost = g_rec.queueDropped + g_rec.canOvfFramesMin;
+  /* A FLOOR, not a total: the controllers' overflow flags are sticky and say
+   * only that it happened, never how often. The queue-drop half IS exact.
+   * Summed here for the headline figure, and available separately per bus so
+   * the page can show where it came from. */
+  uint32_t lost = g_rec.queueDropped;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) lost += g_rec.bus[b].canOvfFramesMin;
 
   String j;
-  j.reserve(2048);
+  j.reserve(4096);          /* two buses of ids and signals */
   j  = "{\"sd\":";      j += g_rec.sdOk ? 1 : 0;
   j += ",\"sdErr\":";   j += g_rec.sdError ? 1 : 0;
   j += ",\"sdType\":\"";j += g_rec.sdType; j += '"';
@@ -60,59 +141,27 @@ static void handleStatus() {
   j += ",\"kb\":";      j += (uint32_t)(g_rec.bytes / 1024ULL);
   j += ",\"pf\":";      j += g_rec.powerFail ? 1 : 0;
   j += ",\"risk\":";    j += (uint32_t)SD_SYNC_INTERVAL_MS;
-  j += ",\"can\":";     j += g_rec.canOk ? 1 : 0;
-  j += ",\"fps\":";     j += g_rec.frameRate;
-  j += ",\"irq\":";     j += g_rec.irqRate;
-  j += ",\"intStuck\":"; j += g_rec.intStuck ? 1 : 0;
-  j += ",\"intLevel\":"; j += (uint32_t)g_rec.intLevel;
-  j += ",\"load\":";    j += g_rec.busLoadPct;
+
+  /* ---- shared between the buses: one queue, one card, one reader task ---- */
   j += ",\"lost\":";    j += lost;
-  j += ",\"ovfEv\":";   j += g_rec.canOvfEvents;
   j += ",\"qDrop\":";   j += g_rec.queueDropped;
-  j += ",\"dbc\":";     j += g_rec.dbcLoaded ? 1 : 0;
-  j += ",\"dbcMsg\":";  j += (uint32_t)g_rec.dbcMessages;
-  j += ",\"dbcSig\":";  j += (uint32_t)g_rec.dbcSignals;
+  j += ",\"qPeak\":";   j += g_rec.queuePeak;
+  j += ",\"qLen\":";    j += (uint32_t)FRAME_QUEUE_LEN;
 
-  /* ---- identifiers actually seen, with their most recent payload ---- */
-  j += ",\"idMore\":"; j += g_bus.untracked ? 1 : 0;
-  j += ",\"ids\":[";
-  char id[16];
-  for (uint8_t i = 0; i < g_bus.used; i++) {
-    if (i) j += ',';
-    snprintf(id, sizeof(id), g_bus.ext[i] ? "0x%08lX" : "0x%03lX",
-             (unsigned long)g_bus.id[i]);
-    j += "{\"id\":\""; j += id; j += '"';
-    j += ",\"d\":\"";  j += g_bus.last[i]; j += '"';
-    j += ",\"n\":";    j += (uint32_t)g_bus.count[i];
-    j += ",\"r\":";    j += (uint32_t)g_bus.rate[i];
-    j += ",\"k\":";    j += g_bus.known[i] ? 1 : 0;
-    j += '}';
+  /* The number the dual-bus design turns on: worst microseconds spent draining
+   * BOTH controllers in one pass, against a ~200 us deadline at 500 kbit/s. */
+  j += ",\"drain\":";   j += g_rec.drainMaxUs;
+  j += ",\"wrMax\":";   j += g_rec.writeMaxUs;
+
+  /* Named "can" rather than "bus" because "bus" reads as a single thing and
+   * this is the list of controllers. The one remaining top-level "bus" in this
+   * API is a transmit outcome saying which one a frame went out on. */
+  j += ",\"can\":[";
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    if (b) j += ',';
+    statusBus(j, b);
   }
   j += ']';
-
-  /* ---- live decoded signals, straight out of the frame map ----------
-   * Nothing here knows what any of these are. The names, units and order all
-   * come from the DBC on the card, so the page shows a drive, a weather
-   * station or a test rig without a line of firmware changing. */
-  uint16_t shown = 0;
-  j += ",\"sig\":[";
-  for (uint16_t mi = 0; mi < g_dbc.msgCount && shown < WEB_MAX_SIGNALS; mi++) {
-    const DbcMessage &m = g_dbc.msg[mi];
-    for (uint16_t k = 0; k < m.signalCount && shown < WEB_MAX_SIGNALS; k++) {
-      const uint16_t si = m.firstSignal + k;
-      if (si >= g_live.cap || !g_live.seen[si]) continue;
-
-      if (shown) j += ',';
-      j += "{\"m\":\""; jsonStr(j, m.name);
-      j += "\",\"s\":\""; jsonStr(j, g_dbc.sig[si].name);
-      j += "\",\"v\":\""; jsonStr(j, g_live.text[si]);
-      j += "\",\"u\":\""; jsonStr(j, g_dbc.sig[si].unit);
-      j += "\"}";
-      shown++;
-    }
-  }
-  j += ']';
-  j += ",\"sigMore\":"; j += (g_live.seenCount > shown) ? 1 : 0;
 
   j += ",\"ap\":";      j += netIsAp() ? 1 : 0;
   j += ",\"ip\":\"";    j += netIp(); j += '"';
@@ -217,11 +266,12 @@ static void handleDash() {
     const DashCell &c = g_dash.cell[i];
     if (!dashCellUsed(c)) { j += "null";  continue; }   /* empty slot        */
     if (c.sig < 0)        { j += "false"; continue; }   /* no such signal     */
-    if (c.sig >= (int16_t)g_live.cap || !g_live.seen[c.sig]) {
+    const LiveSignals &lv = g_live[c.bus < CAN_BUSES ? c.bus : 0];
+    if (c.sig >= (int16_t)lv.cap || !lv.seen[c.sig]) {
       j += "\"\"";  continue;                              /* not arrived yet */
     }
     j += '"';
-    jsonStr(j, g_live.text[c.sig]);
+    jsonStr(j, lv.text[c.sig]);
     j += '"';
   }
   j += ']';
@@ -232,10 +282,21 @@ static void handleDash() {
   for (uint8_t i = 0; i < cells; i++) {
     if (i) j += ',';
     const DashCell &c = g_dash.cell[i];
+    const LiveSignals &lv = g_live[c.bus < CAN_BUSES ? c.bus : 0];
     const bool fresh = dashCellUsed(c) && c.sig >= 0 &&
-                       c.sig < (int16_t)g_live.cap && g_live.seen[c.sig] &&
-                       (now - g_live.lastMs[c.sig]) < DASH_STALE_MS;
+                       c.sig < (int16_t)lv.cap && lv.seen[c.sig] &&
+                       (now - lv.lastMs[c.sig]) < DASH_STALE_MS;
     j += fresh ? '1' : '0';
+  }
+  j += ']';
+
+  /* Which bus each cell reads from, so the page can badge it without having to
+   * fetch the whole layout again on every poll. */
+  j += ",\"cb\":[";
+  for (uint8_t i = 0; i < cells; i++) {
+    if (i) j += ',';
+    const DashCell &c = g_dash.cell[i];
+    j += (uint32_t)((dashCellUsed(c) ? c.bus : 0) + 1);
   }
   j += ']';
 
@@ -248,19 +309,42 @@ static void handleDash() {
    * counters, so carrying them here costs almost nothing and saves a second
    * poll running alongside the first. */
   j += ",\"rec\":";   j += g_rec.recording ? 1 : 0;
-  j += ",\"can\":";   j += g_rec.canOk ? 1 : 0;
   j += ",\"sd\":";    j += g_rec.sdOk ? 1 : 0;
   j += ",\"sdErr\":"; j += g_rec.sdError ? 1 : 0;
   j += ",\"sdType\":\""; j += g_rec.sdType; j += '"';
   j += ",\"sdMB\":";  j += (uint32_t)g_rec.sdSizeMB;
-  j += ",\"lost\":";  j += (uint32_t)(g_rec.queueDropped + g_rec.canOvfFramesMin);
-  j += ",\"ovfEv\":"; j += g_rec.canOvfEvents;
+
+  uint32_t dashLost = g_rec.queueDropped;
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    dashLost += g_rec.bus[b].canOvfFramesMin;
+  }
+  j += ",\"lost\":";  j += dashLost;
   j += ",\"qDrop\":"; j += g_rec.queueDropped;
-  j += ",\"fps\":";   j += g_rec.frameRate;
-  j += ",\"irq\":";   j += g_rec.irqRate;
-  j += ",\"intStuck\":"; j += g_rec.intStuck ? 1 : 0;
-  j += ",\"intLevel\":"; j += (uint32_t)g_rec.intLevel;
-  j += ",\"load\":";  j += g_rec.busLoadPct;
+  j += ",\"drain\":"; j += g_rec.drainMaxUs;
+
+  /* The per-bus half, small enough to carry on the dashboard poll: the four
+   * numbers a header strip shows for each controller, and nothing else. The
+   * full tables stay on /api/status. */
+  j += ",\"can\":[";
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    const BusHealth &h = g_rec.bus[b];
+    if (b) j += ',';
+    j += "{\"b\":";         j += (uint32_t)(b + 1);
+    j += ",\"on\":";        j += h.present ? 1 : 0;
+    j += ",\"en\":";        j += h.enabled ? 1 : 0;
+    j += ",\"alive\":";     j += h.canOk ? 1 : 0;
+    j += ",\"fps\":";       j += h.frameRate;
+    j += ",\"irq\":";       j += h.irqRate;
+    j += ",\"load\":";      j += h.busLoadPct;
+    j += ",\"ovf\":";       j += h.canOvfFramesMin;
+    j += ",\"ovfEv\":";     j += h.canOvfEvents;
+    j += ",\"intStuck\":";  j += h.intStuck ? 1 : 0;
+    j += ",\"intLevel\":";  j += (uint32_t)h.intLevel;
+    j += ",\"dbc\":";       j += h.dbcLoaded ? 1 : 0;
+    j += ",\"send\":";      j += h.listenOnly ? 0 : 1;
+    j += '}';
+  }
+  j += ']';
   j += ",\"risk\":";  j += (uint32_t)SD_SYNC_INTERVAL_MS;
   j += ",\"file\":\""; j += (const char *)(g_rec.csvName[0] ? g_rec.csvName + 1 : "-");
   j += '"';
@@ -268,7 +352,6 @@ static void handleDash() {
   j += ",\"rows\":";  j += (uint32_t)g_rec.rows;
   j += ",\"kb\":";    j += (uint32_t)(g_rec.bytes / 1024ULL);
   j += ",\"pf\":";    j += g_rec.powerFail ? 1 : 0;
-  j += ",\"dbc\":";   j += g_rec.dbcLoaded ? 1 : 0;
   j += ",\"up\":";    j += millis();
   j += ",\"heap\":";  j += (uint32_t)ESP.getFreeHeap();
   j += ",\"ap\":";    j += netIsAp() ? 1 : 0;
@@ -281,7 +364,9 @@ static void handleDash() {
   j += ",\"txOk\":";    j += g_tx.sent;
   j += ",\"txBad\":";   j += g_tx.failed;
   j += ",\"cyc\":";     j += g_tx.cyclicOn;
-  j += ",\"canTx\":";   j += CAN_LISTEN_ONLY ? 0 : 1;
+  /* Whether Send is possible AT ALL. Which bus a given setpoint goes out on,
+   * and whether that one is listen-only, is carried per bus above. */
+  j += ",\"canTx\":";   j += (CAN1_LISTEN_ONLY && CAN2_LISTEN_ONLY) ? 0 : 1;
 
   /* The last few outcomes, newest last. The browser matches them by ticket;
    * sending several means a burst of sends is not lost between two polls. */
@@ -300,6 +385,7 @@ static void handleDash() {
     j += "{\"t\":";    j += o.ticket;
     j += ",\"s\":";    j += o.status;
     j += ",\"cmd\":";  j += o.cmd;
+    j += ",\"bus\":";  j += (uint32_t)(o.bus + 1);
     j += ",\"id\":\""; j += id; j += '"';
     j += ",\"c\":";    j += o.clamped ? 1 : 0;
     j += ",\"tec\":";  j += o.tecDelta;
@@ -379,9 +465,24 @@ static void handleDashCfgPost() {
  * underneath a file in progress would make that header a lie for every row
  * after the swap, and the decoder is being read by the writer task at the
  * time. Stop, load, start. */
+/* Which bus a request is about. Absent means CAN1, so every URL the single-bus
+ * page used still resolves to the bus it used to mean. Out-of-range is clamped
+ * rather than refused: the alternative is a dialog that fails with no signals
+ * and no explanation. */
+static uint8_t argBus() {
+  if (!s_srv->hasArg("bus")) return 0;
+  const long v = strtol(s_srv->arg("bus").c_str(), nullptr, 10);
+  if (v < 1 || v > (long)CAN_BUSES) return 0;
+  return (uint8_t)(v - 1);
+}
+
 static File s_dbcUp;
 static bool s_dbcUpOk   = false;
 static uint32_t s_dbcUpBytes = 0;
+static uint8_t  s_dbcUpBus   = 0;    /* captured at UPLOAD_FILE_START */
+
+static const char *const kDbcPath[CAN_BUSES]    = { DBC_PATH,     DBC2_PATH };
+static const char *const kDbcTmpPath[CAN_BUSES] = { DBC_TMP_PATH, DBC2_TMP_PATH };
 
 static void handleDbcUpload() {
   HTTPUpload &up = s_srv->upload();
@@ -389,9 +490,13 @@ static void handleDbcUpload() {
   if (up.status == UPLOAD_FILE_START) {
     s_dbcUpOk    = false;
     s_dbcUpBytes = 0;
+    /* Read once, here, and remembered for the rest of the upload: the argument
+     * belongs to the request, and the WRITE and END callbacks must not depend
+     * on it still being parseable. */
+    s_dbcUpBus   = argBus();
     if (g_rec.recording || !g_rec.sdOk) return;
-    SD.remove(DBC_TMP_PATH);
-    s_dbcUp = SD.open(DBC_TMP_PATH, FILE_WRITE);
+    SD.remove(kDbcTmpPath[s_dbcUpBus]);
+    s_dbcUp = SD.open(kDbcTmpPath[s_dbcUpBus], FILE_WRITE);
     s_dbcUpOk = (bool)s_dbcUp;
     return;
   }
@@ -415,7 +520,7 @@ static void handleDbcUpload() {
   /* ABORTED */
   if (s_dbcUp) s_dbcUp.close();
   s_dbcUpOk = false;
-  SD.remove(DBC_TMP_PATH);
+  SD.remove(kDbcTmpPath[s_dbcUpBus]);
 }
 
 static void handleDbcDone() {
@@ -429,23 +534,27 @@ static void handleDbcDone() {
   else if (!s_dbcUpOk)      err = "the upload did not finish";
   else if (!s_dbcUpBytes)   err = "the file was empty";
 
+  const uint8_t   bus  = s_dbcUpBus;
+  const char *const dst = kDbcPath[bus];
+  const char *const tmp = kDbcTmpPath[bus];
+
   if (err) {
-    SD.remove(DBC_TMP_PATH);
+    SD.remove(tmp);
     j  = "{\"ok\":0,\"err\":\""; jsonStr(j, err); j += "\"}";
     s_srv->send(409, "application/json", j);
     return;
   }
 
-  SD.remove(DBC_PATH);
-  if (!SD.rename(DBC_TMP_PATH, DBC_PATH)) {
-    SD.remove(DBC_TMP_PATH);
+  SD.remove(dst);
+  if (!SD.rename(tmp, dst)) {
+    SD.remove(tmp);
     s_srv->send(500, "application/json",
                 "{\"ok\":0,\"err\":\"could not put the file in place\"}");
     return;
   }
 
-  LOG_LIVE(LVL_INFO, "frame map uploaded: %lu bytes to %s",
-           (unsigned long)s_dbcUpBytes, DBC_PATH);
+  LOG_LIVE(LVL_INFO, "CAN%u frame map uploaded: %lu bytes to %s",
+           (unsigned)(bus + 1), (unsigned long)s_dbcUpBytes, dst);
 
   recorderLoadDbc();
 
@@ -466,16 +575,18 @@ static void handleDbcDone() {
              (unsigned)dropped);
   }
 
-  j  = "{\"ok\":";        j += g_dbc.loaded ? 1 : 0;
+  const DbcDb &db = g_dbc[bus];
+  j  = "{\"ok\":";        j += db.loaded ? 1 : 0;
+  j += ",\"bus\":";       j += (uint32_t)(bus + 1);
   j += ",\"bytes\":";     j += (uint32_t)s_dbcUpBytes;
-  j += ",\"messages\":";  j += (uint32_t)g_dbc.msgCount;
-  j += ",\"signals\":";   j += (uint32_t)g_dbc.sigCount;
-  j += ",\"nodes\":";     j += (uint32_t)g_dbc.nodeCount;
-  j += ",\"errors\":";    j += (uint32_t)g_dbc.lineErrors;
-  j += ",\"inexact\":";   j += g_dbc.inexact ? 1 : 0;
+  j += ",\"messages\":";  j += (uint32_t)db.msgCount;
+  j += ",\"signals\":";   j += (uint32_t)db.sigCount;
+  j += ",\"nodes\":";     j += (uint32_t)db.nodeCount;
+  j += ",\"errors\":";    j += (uint32_t)db.lineErrors;
+  j += ",\"inexact\":";   j += db.inexact ? 1 : 0;
   j += ",\"missing\":";   j += (uint32_t)missing;
   j += ",\"dropped\":";   j += (uint32_t)dropped;
-  j += ",\"clipped\":";   j += (uint32_t)g_dbc.nameClipped;
+  j += ",\"clipped\":";   j += (uint32_t)db.nameClipped;
   j += '}';
   s_srv->send(200, "application/json", j);
 }
@@ -487,42 +598,47 @@ static void handleDbcDone() {
  * would be the largest allocation in the program for the sake of a list that
  * is fetched when somebody opens a dialog. */
 static void handleSignals() {
+  const uint8_t bus = argBus();
+  const DbcDb  &db  = g_dbc[bus];
+
   s_srv->sendHeader("Cache-Control", "no-store");
   s_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
   s_srv->send(200, "application/json", "");
 
   String j;
   j.reserve(1400);
-  j = "{\"loaded\":";
-  j += g_dbc.loaded ? 1 : 0;
+  j = "{\"bus\":";
+  j += (uint32_t)(bus + 1);
+  j += ",\"loaded\":";
+  j += db.loaded ? 1 : 0;
 
   /* The BU_ node list, and each message's transmitter further down. A .dbc
    * states who sends what but never which of those nodes is this logger, so
    * the page offers the list and the answer is stored as the role. */
   j += ",\"nodes\":[";
-  for (uint8_t i = 0; i < g_dbc.nodeCount; i++) {
+  for (uint8_t i = 0; i < db.nodeCount; i++) {
     if (i) j += ',';
-    j += '"'; jsonStr(j, g_dbc.node[i]); j += '"';
+    j += '"'; jsonStr(j, db.node[i]); j += '"';
   }
   j += "],\"m\":[";
 
   char num[40];
-  for (uint16_t mi = 0; mi < g_dbc.msgCount; mi++) {
-    const DbcMessage &m = g_dbc.msg[mi];
+  for (uint16_t mi = 0; mi < db.msgCount; mi++) {
+    const DbcMessage &m = db.msg[mi];
     if (mi) j += ',';
 
     snprintf(num, sizeof(num), m.ext ? "0x%08lX" : "0x%03lX", (unsigned long)m.id);
     j += "{\"n\":\""; jsonStr(j, m.name);
     j += "\",\"id\":\""; j += num;
-    j += "\",\"tx\":\""; jsonStr(j, dbcTxNode(g_dbc, m));
+    j += "\",\"tx\":\""; jsonStr(j, dbcTxNode(db, m));
     j += "\",\"mux\":";
     j += (m.muxSignal >= 0) ? 1 : 0;
     j += ",\"s\":[";
 
     for (uint16_t k = 0; k < m.signalCount; k++) {
       const uint16_t si = (uint16_t)(m.firstSignal + k);
-      if (si >= g_dbc.sigCount) break;
-      const DbcSignal &sg = g_dbc.sig[si];
+      if (si >= db.sigCount) break;
+      const DbcSignal &sg = db.sig[si];
       if (k) j += ',';
 
       j += "{\"i\":";   j += si;
@@ -557,10 +673,10 @@ static void handleSignals() {
       j += ",\"v\":[";
       for (uint8_t vi = 0; vi < sg.valCount; vi++) {
         const uint16_t vk = (uint16_t)(sg.valFirst + vi);
-        if (sg.valFirst < 0 || vk >= g_dbc.valCount) break;
+        if (sg.valFirst < 0 || vk >= db.valCount) break;
         if (vi) j += ',';
         j += '"';
-        jsonStr(j, g_dbc.val[vk].label);
+        jsonStr(j, db.val[vk].label);
         j += '"';
       }
       j += "]}";
@@ -626,7 +742,9 @@ static void handleTxSend() {
     for (size_t i = 0; i + 1 < (size_t)hex.length() && len < 8; i += 2) {
       data[len++] = hexPair(hex.c_str() + i);
     }
-    ticket = txSendRaw(id, ext, data, len);
+    /* A typed-in frame names its own bus - there is no setpoint to take it
+     * from - and defaults to CAN1 when the page does not say. */
+    ticket = txSendRaw(argBus(), id, ext, data, len);
   } else if (s_srv->hasArg("cmds")) {
     /* A group: several values that only mean anything in the same frame, sent
      * as "cmds=0,2,3&values=32,1,1380". Every member but the last is queued

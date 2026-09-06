@@ -6,7 +6,7 @@
 
 /* Tables are allocated at load time, so the object itself is just pointers
  * and counters - a few dozen bytes rather than thirty-two kilobytes. */
-DbcDb g_dbc = {};
+DbcDb g_dbc[CAN_BUSES] = {};
 
 /* ==========================================================================
  *  Small text helpers. Everything here works on a mutable line buffer and

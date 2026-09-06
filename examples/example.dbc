@@ -1,4 +1,4 @@
-VERSION "example frame map for can-logger-esp32 - placeholder ids, replace with your own"
+VERSION "example frame map for dual-can-logger-esp32 - placeholder ids, replace with your own"
 
 NS_ :
 

@@ -21,8 +21,8 @@ is the same button the logger itself has.
 
 It opens the logger's real web page in your browser, fed with simulated data.
 Press Export in the page to save the setup you have built, then copy it onto
-the SD card as /dash.cfg alongside your .dbc as /frames.dbc, and the logger
-starts up with your dashboard already on it.
+the SD card as /dash.cfg alongside your frame maps as /frames.dbc (CAN1) and
+/frames2.dbc (CAN2), and the logger starts up with your dashboard already on it.
 
 IT WRITES NO FILES AT ALL. This tool used to pair a .cfg with every .dbc it was
 shown, which left files in whatever directory you had pointed it at and opened
@@ -170,8 +170,14 @@ def main():
         print("  %d. %s" % (n, line))
     print("""
   Then press Export, and copy onto the SD card:
-      your .dbc          ->  /frames.dbc
+      CAN1's .dbc        ->  /frames.dbc
+      CAN2's .dbc        ->  /frames2.dbc   (only if the second bus is mapped)
       the exported file  ->  /dash.cfg
+
+  Two buses, two frame maps: the same identifier usually means different things
+  on each, so they are separate files. A cell or a sendable value remembers
+  which bus it belongs to, and only that bus's map is offered when you pick its
+  signal. Either map may be left off - that bus is then recorded as raw bytes.
 
   Close this window (or press Ctrl-C) when you are done.
 """)

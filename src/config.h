@@ -4,12 +4,14 @@
  *  Everything a user normally changes lives here or in two files on the SD
  *  card:
  *
- *      /frames.dbc   the frame map (optional - without it the logger records
- *                    raw payload bytes and decodes nothing)
+ *      /frames.dbc   the frame map for CAN1 (optional - without it the logger
+ *                    records raw payload bytes and decodes nothing)
+ *      /frames2.dbc  the frame map for CAN2, kept separate because the same
+ *                    identifier routinely means different things on two buses
  *      /config.txt   Wi-Fi credentials and hostname
  *
- *  Nothing below is specific to any particular bus. The defaults describe a
- *  plain 250 kbit/s classical CAN network and a stock ESP32 DevKit v1.
+ *  Nothing below is specific to any particular bus. The defaults describe two
+ *  plain 250 kbit/s classical CAN networks and a stock ESP32 DevKit v1.
  * ==========================================================================*/
 #pragma once
 
@@ -18,23 +20,47 @@
 /* ---------------------------------------------------------------------------
  *  1. PIN MAP  (ESP32 DevKit v1)
  *
- *   MCP2515 CAN module          ESP32            SD card module      ESP32
- *   ------------------          -----            --------------      -----
+ *   MCP2515 #1 - CAN1           ESP32            SD card module      ESP32
+ *   -----------------           -----            --------------      -----
  *     VCC ....................  3V3                VCC ............. 5V (VIN)
  *     GND ....................  GND                GND ............. GND
- *     CS  ....................  D5                 CS  ............. D4
- *     INT ....................  D17                SCK ............. D14
+ *     CS  ....................  D22                CS  ............. D4
+ *     INT ....................  D21                SCK ............. D14
  *     SCK ....................  D18  (VSPI)        MISO ............ D27
  *     MISO ...................  D19                MOSI ............ D13
  *     MOSI ...................  D23                                  (HSPI)
  *
- *  Two independent SPI buses on purpose: the CAN controller is read from a
- *  high-priority task while the SD card is written from a lower one, and
- *  sharing one bus would serialise them - an 8 KB SD write would stall CAN
- *  reads for milliseconds, which at 1000 frames/s is measured in lost frames.
+ *   MCP2515 #2 - CAN2           ESP32
+ *   -----------------           -----
+ *     VCC ....................  3V3
+ *     GND ....................  GND
+ *     CS  ....................  D5
+ *     INT ....................  D17   <- silkscreened TX2 on a DevKit v1
+ *     SCK ....................  D18  (VSPI, shared)
+ *     MISO ...................  D19  (shared)
+ *     MOSI ...................  D23  (shared)
+ *
+ *  BOTH CONTROLLERS SHARE ONE SPI BUS, and that is fine: MISO tri-states while
+ *  CS is high, so only CS and INT have to be unique. They are also driven from
+ *  ONE task, which is what keeps it fine - two tasks would contend for the
+ *  bus mutex on the one path that has a hard deadline. See app.cpp.
+ *
+ *  The SD card is on a SECOND, INDEPENDENT SPI BUS on purpose: it is written
+ *  from a lower-priority task, and sharing one bus would serialise them - a
+ *  32 KB SD write would stall CAN reads for milliseconds, which at thousands
+ *  of frames a second is measured in lost frames.
+ *
+ *  D22 and D21 are the ESP32's default I2C pins, unused in this project.
+ *  Neither is a strapping pin, and unlike GPIO16/17 neither is taken by PSRAM
+ *  on a WROVER module - which is why CAN1 lives there rather than on D16.
  * -------------------------------------------------------------------------*/
-#define PIN_CAN_CS      5
-#define PIN_CAN_INT     17
+#define PIN_CAN1_CS     22
+#define PIN_CAN1_INT    21
+
+#define PIN_CAN2_CS     5
+#define PIN_CAN2_INT    17
+
+/* Shared by both controllers. */
 #define PIN_CAN_SCK     18
 #define PIN_CAN_MISO    19
 #define PIN_CAN_MOSI    23
@@ -54,30 +80,56 @@
  * the board impossible to flash - esptool reports "Wrong boot mode detected".
  * Rewire it active-high, or set this to -1; nothing depends on it.
  *
- * The only other strapping pin in this map is GPIO5 (PIN_CAN_CS), which must be
- * HIGH at reset - an MCP2515 chip-select idles high, so that matches. */
+ * The only other strapping pin in this map is GPIO5 (PIN_CAN2_CS), which must be
+ * HIGH at reset - an MCP2515 chip-select idles high, so that matches.
+ *
+ * One more board quirk, because it costs people an hour: many DevKit v1s have
+ * NO PIN MARKED D17. That board labels UART2 by function - the pin silkscreened
+ * TX2 is GPIO17 and RX2 is GPIO16. CAN2's INT goes to TX2. USB upload and the
+ * serial monitor run on UART0 and are unaffected. */
 #define PIN_STATUS_LED  2
 
 /* ---------------------------------------------------------------------------
- *  2. CAN BUS
+ *  2. CAN BUSES
+ *
+ *  Every setting here is PER BUS. That is not symmetry for its own sake: two
+ *  buses on one machine routinely run at different bit rates, and two MCP2515
+ *  modules out of the same order routinely carry different crystals.
  * -------------------------------------------------------------------------*/
-#define CAN_BITRATE_KBPS    250     /* 100, 125, 250, 500 or 1000            */
+#define CAN_BUSES           2       /* fixed by the pin map above            */
 
-/* Crystal soldered on your MCP2515 board. The common blue "MCP2515 + TJA1050"
- * modules ship with 8 MHz; some clones use 16 MHz. If the logger reports "no
- * CAN traffic" but the bus is alive, this is the first thing to change. */
-#define CAN_CRYSTAL_MHZ     8       /* 8 or 16 */
+#define CAN1_BITRATE_KBPS   250     /* 100, 125, 250, 500 or 1000            */
+#define CAN2_BITRATE_KBPS   250
 
-/* SPI clock for the MCP2515. The datasheet allows 10 MHz; at 10 MHz a full
- * frame read takes ~15 us, which comfortably keeps up with 1000 frames/s. */
-#define CAN_SPI_HZ          10000000UL
+/* Crystal soldered on EACH MCP2515 board - check them separately. The common
+ * blue "MCP2515 + TJA1050" modules ship with 8 MHz; some clones use 16 MHz.
+ * If a bus reports "no CAN traffic" but is alive, this is the first thing to
+ * change, and it is the first thing to change for THAT bus only. */
+#define CAN1_CRYSTAL_MHZ    8       /* 8 or 16 */
+#define CAN2_CRYSTAL_MHZ    8
 
 /* 0 = normal mode: the logger acknowledges frames, which is what you want when
  *     it is the only other node on the bus (otherwise the talker goes
  *     error-passive and eventually bus-off).
  * 1 = listen-only: fully passive, never drives the bus. Correct when another
- *     node is already acknowledging, and the safe choice on a live machine. */
-#define CAN_LISTEN_ONLY     0
+ *     node is already acknowledging, and the safe choice on a live machine.
+ * Independent per bus, because the two buses are often not in the same state:
+ * a diagnostic bus you may drive, a live powertrain bus you may not. */
+#define CAN1_LISTEN_ONLY    0
+#define CAN2_LISTEN_ONLY    0
+
+/* Set to 0 to run this firmware on single-bus hardware - the second controller
+ * is never probed, no interrupt is attached to PIN_CAN2_INT, and the CSV still
+ * carries its bus column (always 1). Useful for a board that has not been
+ * rewired yet, and the control case when measuring what the second bus costs. */
+#define CAN2_ENABLED        1
+
+/* SPI clock for both MCP2515s. The datasheet allows 10 MHz; at 10 MHz a full
+ * frame read is ~13 us of clock, and the driver issues it as one block
+ * transfer so the per-byte call overhead does not multiply that. See the
+ * timing note at the top of mcp2515.cpp - with two controllers on one bus
+ * this is the difference between meeting the deadline and missing it. */
+#define CAN_SPI_HZ          10000000UL
 
 /* ---------------------------------------------------------------------------
  *  3. FRAME MAP  (the DBC file)
@@ -89,13 +141,22 @@
  *
  *  See examples/example.dbc and the README for the supported subset.
  * -------------------------------------------------------------------------*/
+/* One map per bus. They are separate files rather than one shared map because
+ * the same identifier routinely means two different things on two buses - a
+ * shared map would decode bus 2 with bus 1's meanings and be confidently,
+ * silently wrong, which is the worst failure a logger has.
+ *
+ * Either file may be absent. That bus then records raw payload bytes, exactly
+ * as a logger with no map at all does. */
 #define DBC_PATH            "/frames.dbc"
+#define DBC2_PATH           "/frames2.dbc"
 
 /* A frame map uploaded from the web app lands here first and is renamed over
- * DBC_PATH only once the whole file has arrived. A dropped Wi-Fi connection
+ * its DBC path only once the whole file has arrived. A dropped Wi-Fi connection
  * halfway through an upload then costs you the upload, not the map you were
  * already using. */
 #define DBC_TMP_PATH        "/frames.tmp"
+#define DBC2_TMP_PATH       "/frames2.tmp"
 
 /* CEILINGS on the frame map, not its size.
  *
@@ -167,8 +228,13 @@
 #define SD_SPI_HZ           20000000UL
 
 /* CSV rows accumulate in RAM and are handed to the card one full block at a
- * time. 8 KB / ~40 bytes per row = ~200 rows of data per write. */
-#define SD_BLOCK_BYTES      8192
+ * time. 32 KB / ~45 bytes per row = ~700 rows of data per write.
+ *
+ * Raised from 8 KB for the second bus. SD cards are far more efficient with
+ * large writes - the erase-block and wear-levelling work is per write, not per
+ * byte - and two busy buses can ask for several hundred kilobytes a second,
+ * which is the regime where that stops being a nicety. */
+#define SD_BLOCK_BYTES      32768
 
 /* ---- surviving a sudden power cut --------------------------------------
  *
@@ -211,9 +277,16 @@
  *  7. QUEUES / TASKS
  * -------------------------------------------------------------------------*/
 /* Raw frames buffered between the CAN reader task and the decode/write task.
- * 1024 * 24 B = 24 KB = a full second of traffic at 1000 frames/s. If the SD
- * card stalls for a second (cheap cards do), nothing is lost. */
-#define FRAME_QUEUE_LEN     1024
+ *
+ * 2048 * 24 B = 48 KB. Sized against the SD card, not against the bus: a single
+ * write on a healthy card is under 5 ms, but the outliers are ~320 ms, and the
+ * queue exists entirely to absorb those. Two buses at 500 kbit/s and 80 % load
+ * deliver ~6250 frames/s, so 2048 entries is ~330 ms - just past the worst
+ * stall. At 1024 it would be 164 ms, which is not.
+ *
+ * This is the number to raise first if `drop` is ever non-zero while
+ * `maxWr` shows a long write. Each entry costs 24 bytes. */
+#define FRAME_QUEUE_LEN     2048
 
 /* Log lines buffered between any task and the single SD-owning writer task. */
 #define LOG_QUEUE_LEN       48
@@ -246,6 +319,10 @@
 #define DEF_WIFI_MODE       "ap"        /* "ap" = hotspot, "sta" = join Wi-Fi */
 #define DEF_STA_SSID        "MyNetwork"
 #define DEF_STA_PASS        "MyPassword"
+/* Deliberately the same hotspot name and hostname the single-bus logger uses.
+ * This firmware is meant to be flashed onto that logger's hardware and judged
+ * against it, and a bookmark or a saved Wi-Fi network that stops working on
+ * upgrade is friction for no gain. Both are overridable in /config.txt. */
 #define DEF_AP_SSID         "CAN-Logger"
 #define DEF_AP_PASS         "canlogger"     /* >= 8 chars, or "" for open AP  */
 #define DEF_HOSTNAME        "can-logger"
@@ -417,5 +494,5 @@
  * is too low a priority to get on the wire. */
 #define TX_ATTEMPTS         3
 
-#define FIRMWARE_NAME    "CAN Logger ESP32"
-#define FIRMWARE_VERSION "1.2.0"
+#define FIRMWARE_NAME    "Dual CAN Logger ESP32"
+#define FIRMWARE_VERSION "2.0.0"

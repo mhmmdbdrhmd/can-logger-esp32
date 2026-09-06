@@ -1,9 +1,9 @@
 /* ============================================================================
- *  CAN Logger ESP32 - entry point
+ *  Dual CAN Logger ESP32 - entry point
  *
- *  Intentionally almost empty. When this file is copied to CanLogger.ino for
- *  the Arduino IDE the IDE preprocessor rewrites it - so nothing that could be
- *  damaged by that rewrite is allowed to live here. See app.h for the full
+ *  Intentionally almost empty. When this file is copied to DualCanLogger.ino
+ *  for the Arduino IDE the IDE preprocessor rewrites it - so nothing that could
+ *  be damaged by that rewrite is allowed to live here. See app.h for the full
  *  explanation; the application itself is in app.cpp.
  * ==========================================================================*/
 

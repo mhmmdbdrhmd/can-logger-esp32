@@ -8,7 +8,7 @@
 #
 #  Run this once after cloning, and again after editing anything in src/:
 #
-#      ./arduino/sync.sh            # populate arduino/CanLogger/
+#      ./arduino/sync.sh            # populate arduino/DualCanLogger/
 #      ./arduino/sync.sh --check    # verify the script still works (used by CI)
 #
 #  The generated copies are git-ignored on purpose - a second checked-in copy
@@ -18,7 +18,7 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src="$here/../src"
-sketch="CanLogger"
+sketch="DualCanLogger"
 
 check=0
 [ "${1:-}" = "--check" ] && check=1

@@ -17,7 +17,7 @@ mode = ap
 
 # --- hotspot mode (mode = ap) -------------------------------
 # ap_pass must be at least 8 characters, or empty for an open network.
-ap_ssid = CAN-Logger
+ap_ssid = Dual-CAN-Logger
 ap_pass = canlogger
 
 # --- join an existing network (mode = sta) ------------------
@@ -31,5 +31,5 @@ sta_timeout_ms = 15000
 
 # --- both modes ---------------------------------------------
 # Reachable as http://<hostname>.local on networks with mDNS.
-hostname = can-logger
+hostname = dual-can-logger
 http_port = 80

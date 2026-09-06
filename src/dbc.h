@@ -186,7 +186,11 @@ struct DbcDb {
   uint8_t    inexact     = 0; /* at least one signal needs floating point      */
 };
 
-extern DbcDb g_dbc;
+/* One frame map per bus. Separate maps rather than one shared map because the
+ * same identifier routinely means two different things on two buses - decoding
+ * bus 2 with bus 1's meanings would be confidently, silently wrong, which is
+ * the worst failure a logger has. Indexed by CanFrame::bus. */
+extern DbcDb g_dbc[CAN_BUSES];
 
 /* Empties the counters. Keeps whatever tables are allocated, so the usual
  * sequence is dbcAllocate() once and dbcReset() before each re-read. */

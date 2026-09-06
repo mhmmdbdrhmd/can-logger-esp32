@@ -71,7 +71,7 @@ You do **not** need to install Python, git, or anything else yourself.
 **File → Open Folder…** and select exactly this folder:
 
 ```
-can-logger-esp32\platformio
+dual-can-logger-esp32\platformio
 ```
 
 > Open the `platformio` folder **itself** — not its parent, not `src`.
@@ -270,7 +270,7 @@ default, so subsequent uploads go over Wi-Fi.
 
 The firmware lives once, in `src\`. The Arduino IDE needs its own copy next to a
 `.ino` named after the folder, so **double-click `arduino\sync.bat`** first. It
-creates `arduino\CanLogger\` with every source file in it.
+creates `arduino\DualCanLogger\` with every source file in it.
 
 Re-run it whenever you edit anything in `src\`.
 
@@ -296,14 +296,14 @@ Several hundred MB. Let it finish completely before continuing.
 **File → Open…** and select:
 
 ```
-can-logger-esp32\arduino\CanLogger\CanLogger.ino
+dual-can-logger-esp32\arduino\DualCanLogger\DualCanLogger.ino
 ```
 
 The IDE opens a window with many tabs (`app.cpp`, `config.h`, `dbc.cpp`, …). That
 is correct — they are all part of the sketch and all get compiled.
 
 > Do not move or rename files. The Arduino IDE requires the sketch folder and the
-> `.ino` inside it to share a name (`CanLogger\CanLogger.ino`).
+> `.ino` inside it to share a name (`DualCanLogger\DualCanLogger.ino`).
 
 ## B4. Board settings
 
@@ -370,7 +370,8 @@ reformatted), then optionally put two files in the root:
 
 | File | What for |
 |---|---|
-| `frames.dbc` | Your frame map. Without it the logger records raw frames. Start from `examples\example.dbc`. |
+| `frames.dbc` | The frame map for **CAN1**. Without it that bus is recorded as raw frames. Start from `examples\example.dbc`. |
+| `frames2.dbc` | The frame map for **CAN2**. Separate, because the same identifier usually means different things on two buses. Optional, like the first. |
 | `dash.cfg` | Your dashboard and your sendable values. Without it the web app is health cards and controls only. Made by `customize.bat` — see below. |
 | `config.txt` | Wi-Fi settings. If absent, the logger writes a commented default on first boot — easiest to let it do that and then edit it. |
 
@@ -411,8 +412,9 @@ In the page:
 Close the window when you are done, then copy **both** files to the card:
 
 ```
-mine.dbc   ->  frames.dbc
-mine.cfg   ->  dash.cfg
+CAN1's .dbc  ->  frames.dbc
+CAN2's .dbc  ->  frames2.dbc     (only if the second bus is mapped)
+mine.cfg     ->  dash.cfg
 ```
 
 If `customize.bat` closes instantly, Python is not on PATH — reinstall it with
@@ -426,16 +428,23 @@ Press the board's `EN`/`RST` button — the banner only prints at boot. You shou
 see:
 
 ```
-[     0.412] I ==== CAN Logger ESP32 v1.0.0 ====
+[     0.412] I ==== Dual CAN Logger ESP32 v2.0.0 ====
 [     0.690] I SD card OK: SDHC, 15193 MB
-[     0.741] I frame map: 6 messages, 19 signals from /frames.dbc
-[     0.802] I CAN controller OK: 250 kbit/s, normal mode
+[     0.741] I CAN1 frame map: 6 messages, 19 signals from /frames.dbc
+[     0.758] I CAN2: no /frames2.dbc on the card - recording raw payload bytes.
+[     0.802] I CAN1 controller OK: 250 kbit/s, normal mode (not listening yet)
+[     0.844] I CAN2 controller OK: 500 kbit/s, normal mode (not listening yet)
+[     0.881] I CAN1 bus open - listening
+[     0.889] I CAN2 bus open - listening
 [     1.140] I HOTSPOT 'CAN-Logger' is up - open http://192.168.4.1 in a browser
-[     1.201] I RECORDING STARTED -> /1.csv (+ /1.log), decoding via the frame map
+[     1.201] I RECORDING STARTED -> /1.csv (+ /1.log), 1 of 2 buses decoding via a frame map
 ```
 
-Then connect a phone or laptop to the Wi-Fi network **`CAN-Logger`** (password
-`canlogger`) and open **http://192.168.4.1**.
+**Both controllers must report OK.** If only one does, it is almost always that
+module's chip select — the only line the two do not share.
+
+Then connect a phone or laptop to the Wi-Fi network **`CAN-Logger`**
+(password `canlogger`) and open **http://192.168.4.1**.
 
 From then on it is one status line per second:
 
@@ -456,20 +465,23 @@ From then on it is one status line per second:
 | `Sketch too big` / `text section exceeds available space` | Arduino IDE only: partition scheme is wrong — **B4**. |
 | `fatal error: WiFi.h: No such file or directory` | Board is not set to an ESP32 board, or B2 did not finish. |
 | PlatformIO: `Error: Unknown environment names` | You opened the wrong folder. Open `platformio\`, the one containing `platformio.ini` — **A2**. |
-| Arduino IDE: only `CanLogger.ino` in the window | You did not run `arduino\sync.bat` — **B1**. |
+| Arduino IDE: only `DualCanLogger.ino` in the window | You did not run `arduino\sync.bat` — **B1**. |
 | Serial Monitor shows garbage | Baud rate is not 115200. |
 | Serial Monitor is empty | Press `EN`/`RST`; the banner only prints at boot. |
 | `SD CARD NOT FOUND` | Card must be **FAT32**. Re-check wiring: CS=D4, SCK=D14, MISO=D27, MOSI=D13. |
-| `no /frames.dbc on the card` | Expected if you did not put one there — everything is recorded as raw bytes. |
-| `CAN CONTROLLER NOT RESPONDING` | MCP2515 wiring or power. The driver tests the SPI link both ways at boot, so this means CS=D5, MISO/MOSI or 3V3 is wrong. |
-| Boots fine but `NO CAN TRAFFIC` | Check `CAN_CRYSTAL_MHZ` in `config.h` — 8 vs 16 MHz. See the main README. |
+| `CAN2: no /frames2.dbc on the card` | Expected if you did not put one there — that bus is recorded as raw bytes. |
+| `CAN1 CONTROLLER NOT RESPONDING` (or CAN2) | That module's wiring or power. The driver tests the SPI link both ways at boot, and the message names the bus and its pins. |
+| Only one of the two controllers answers | Almost always the chip select — CAN1 is D22, CAN2 is D5, and they are the only lines not shared. Check they are not swapped. |
+| There is no pin marked `D17` on the board | Correct. That DevKit labels UART2 by function: the pin silkscreened **TX2** is GPIO17. CAN2's INT goes there. |
+| Boots fine but `NO CAN TRAFFIC` on one bus | Check `CAN1_CRYSTAL_MHZ` / `CAN2_CRYSTAL_MHZ` in `config.h` — 8 vs 16 MHz, **per module**. Two boards from one order can differ. See the main README. |
 
 ---
 
 # Changing settings later
 
 Do **not** rebuild the firmware to change the Wi-Fi or the frame map. Put the SD
-card in the laptop and edit `config.txt` or `frames.dbc` in Notepad, save, put
+card in the laptop and edit `config.txt`, `frames.dbc` or `frames2.dbc` in
+Notepad, save, put
 the card back, power cycle.
 
 Everything else worth changing is in **`src\config.h`**: pin map, bit rate,

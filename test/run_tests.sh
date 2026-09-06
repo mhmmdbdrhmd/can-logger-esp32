@@ -284,7 +284,13 @@ int main(int argc, char **argv) {
   fclose(d);
   dbcLoadText(db, dtxt.c_str(), dtxt.size());
 
-  const uint16_t missing = dashResolve(cfg, db);
+  /* One map per bus. These desk-tool checks are about a single-bus layout, so
+   * both entries get the same map - which is also what proves such a layout
+   * still resolves exactly as it did before the bus column existed. */
+  DbcDb maps[CAN_BUSES];
+  for (int i = 0; i < CAN_BUSES; i++) maps[i] = db;
+
+  const uint16_t missing = dashResolve(cfg, maps);
 
   /* Serialising twice must produce the same bytes, or the boot rule would
    * decide the card had been edited on every single start. */
@@ -431,7 +437,10 @@ int main(int argc, char **argv) {
   DbcDb db = {};
   dbcLoadText(db, dtext.c_str(), dtext.size());
 
-  printf("dropped\t%u\n", (unsigned)dashDropUnresolved(cfg, db));
+  DbcDb maps[CAN_BUSES];
+  for (int i = 0; i < CAN_BUSES; i++) maps[i] = db;
+
+  printf("dropped\t%u\n", (unsigned)dashDropUnresolved(cfg, maps));
   printf("role\t%s\n", cfg.role);
   for (int i = 0; i < DASH_MAX_CELLS; i++)
     if (dashCellUsed(cfg.cell[i])) printf("cell\t%s\n", cfg.cell[i].ref);

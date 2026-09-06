@@ -206,6 +206,62 @@ private:
   std::vector<uint8_t> out;
 };
 
+/* ---- two controllers on ONE SPI bus ------------------------------------- *
+ *
+ * The dual-bus wiring shares SCK, MISO and MOSI between both MCP2515s; only CS
+ * and INT are unique. Which chip a transaction is talking to is therefore
+ * decided ENTIRELY by which chip select is low, and nothing else about the
+ * protocol changes. This models exactly that: one bus object, two register
+ * files, routed on CS.
+ *
+ * It is worth modelling rather than assuming, because the failure it catches
+ * is silent - a driver that forgot to assert its own CS would talk to whatever
+ * chip was last selected and would look like it was working. */
+class SharedBus : public SPIClass {
+public:
+  FakeMcp dev[2];
+  uint8_t cs[2] = { 0, 0 };
+  int     misroutes = 0;        /* transactions with 0 or 2 chips selected */
+
+  SharedBus(uint8_t cs0, uint8_t cs1) { cs[0] = cs0; cs[1] = cs1; }
+
+  /* Routing is resolved at the FIRST BYTE, not here. The driver applies the
+   * SPI settings and only then pulls CS low - which is the correct order for
+   * real hardware - so at this point no chip is selected yet and asking would
+   * always find none. */
+  void beginTransaction(SPISettings st) override {
+    settings = st;
+    sel      = -1;
+    pending  = true;
+  }
+
+  void endTransaction() override {
+    if (sel >= 0) dev[sel].endTransaction();
+    pending = false;
+    sel     = -1;
+  }
+
+  uint8_t transfer(uint8_t b) override {
+    if (pending) {
+      pending = false;
+      int selected = 0;
+      for (int i = 0; i < 2; i++) {
+        if (g_pinLevel[cs[i]] == 0) { sel = i; selected++; }
+      }
+      /* Exactly one chip must be listening. Two would collide on MISO; none
+       * means the driver is clocking bytes at nothing. */
+      if (selected != 1) { misroutes++; sel = -1; }
+      else               { dev[sel].beginTransaction(settings); }
+    }
+    return (sel >= 0) ? dev[sel].transfer(b) : 0xFF;
+  }
+
+private:
+  SPISettings settings{};
+  bool pending = false;
+  int  sel     = -1;
+};
+
 int main() {
   FakeMcp fake;
   MCP2515 can(fake, 5, 10000000UL);
@@ -428,6 +484,116 @@ int main() {
 
     ck("back to normal mode", can.startReceiving(false));
     ck("and sending works again", can.sendFrame(t) == MCP2515::TX_OK);
+  }
+
+  printf("\n== two controllers sharing one SPI bus ==\n");
+  {
+    /* The real pin map: CAN1 on D22, CAN2 on D5, everything else shared. */
+    SharedBus bus(22, 5);
+    MCP2515   can1(bus, 22, 10000000UL);
+    MCP2515   can2(bus, 5,  10000000UL);
+
+    ck("both controllers come up on the shared bus",
+       can1.begin(250, 8) && can2.begin(500, 16));
+    ck("no transaction reached the wrong number of chips",
+       bus.misroutes == 0, hex((uint8_t)bus.misroutes));
+
+    /* Each controller is configured independently, which is the whole point of
+     * per-bus settings: two modules out of one order carry different crystals,
+     * and two buses on one machine run at different rates.
+     *
+     * Compared as the whole CNF triple rather than CNF1 alone - 250k at 8 MHz
+     * and 500k at 16 MHz genuinely share CNF1=0x00, and an assertion on one
+     * register would be testing a coincidence. */
+    const bool timingDiffers =
+        bus.dev[0].reg[R_CNF1] != bus.dev[1].reg[R_CNF1] ||
+        bus.dev[0].reg[0x29]   != bus.dev[1].reg[0x29]   ||   /* CNF2 */
+        bus.dev[0].reg[0x28]   != bus.dev[1].reg[0x28];       /* CNF3 */
+    char tnote[64];
+    snprintf(tnote, sizeof(tnote), "CAN1 %02X/%02X/%02X  CAN2 %02X/%02X/%02X",
+             bus.dev[0].reg[R_CNF1], bus.dev[0].reg[0x29], bus.dev[0].reg[0x28],
+             bus.dev[1].reg[R_CNF1], bus.dev[1].reg[0x29], bus.dev[1].reg[0x28]);
+    ck("each got its own bit timing", timingDiffers, tnote);
+
+    /* The receive configuration that matters, asserted on BOTH: filters off so
+     * nothing is silently excluded, and rollover on so a full RXB0 spills into
+     * RXB1 instead of overflowing. Getting this right on one controller and
+     * not the other is the exact half-failure that would show up as "bus 2
+     * loses frames under load" months later. */
+    for (int i = 0; i < 2; i++) {
+      const uint8_t b0 = bus.dev[i].reg[R_RXB0CTRL];
+      const uint8_t b1 = bus.dev[i].reg[R_RXB1CTRL];
+      char note[48];
+      snprintf(note, sizeof(note), "CAN%d RXB0=0x%02X RXB1=0x%02X", i + 1, b0, b1);
+      ck("filters off and rollover on", (b0 & 0x60) == 0x60 && (b0 & 0x04) != 0 &&
+                                        (b1 & 0x60) == 0x60, note);
+    }
+
+    ck("both open their bus", can1.startReceiving(false) &&
+                              can2.startReceiving(false));
+
+    /* One-shot is armed by startReceiving(), not by begin() - the chip is
+     * deliberately silent until then. Checked on both: a controller left
+     * retrying forever drives TEC to bus-off in about 30 ms on a bus with
+     * nothing to acknowledge it, and a bus-off controller stops RECEIVING too. */
+    for (int i = 0; i < 2; i++) {
+      char note[32];
+      snprintf(note, sizeof(note), "CAN%d CANCTRL=0x%02X", i + 1,
+               bus.dev[i].reg[R_CANCTRL]);
+      ck("one-shot is armed", (bus.dev[i].reg[R_CANCTRL] & 0x08) != 0, note);
+    }
+
+    /* Frames queued on one controller must come out of that controller only.
+     * This is the assertion the CSV's bus column ultimately rests on. */
+    const uint8_t p1[3] = { 0xA1, 0xA2, 0xA3 };
+    const uint8_t p2[2] = { 0xB1, 0xB2 };
+    bus.dev[0].queueFrame(0x100, p1, 3);
+    bus.dev[1].queueFrame(0x100, p2, 2);
+
+    CanFrame f1, f2;
+    ck("CAN1 has a frame", can1.readFrame(f1));
+    ck("CAN2 has a frame", can2.readFrame(f2));
+    ck("the same identifier arrived on both", f1.id == 0x100 && f2.id == 0x100);
+    ck("but each carries its own payload",
+       f1.len == 3 && f1.data[0] == 0xA1 &&
+       f2.len == 2 && f2.data[0] == 0xB1);
+
+    ck("and each is now empty", !can1.readFrame(f1) && !can2.readFrame(f2));
+
+    /* Interleaving the two, which is what the reader task actually does. */
+    for (int i = 0; i < 4; i++) {
+      const uint8_t d[1] = { (uint8_t)i };
+      bus.dev[i & 1].queueFrame((uint32_t)(0x200 + i), d, 1);
+    }
+    /* Bounded, so a harness that ever misroutes again fails the assertion
+     * instead of spinning forever. */
+    int got1 = 0, got2 = 0;
+    CanFrame f;
+    for (int i = 0; i < 8 && can1.readFrame(f); i++) {
+      got1++; ck("CAN1 frame is even", (f.id & 1) == 0);
+    }
+    for (int i = 0; i < 8 && can2.readFrame(f); i++) {
+      got2++; ck("CAN2 frame is odd",  (f.id & 1) == 1);
+    }
+    ck("each drained its own two frames", got1 == 2 && got2 == 2);
+
+    /* A transmit on one controller must not disturb the other's state - they
+     * share MOSI, so a missing chip select here writes a frame into the wrong
+     * chip's transmit buffer. */
+    bus.dev[0].txSim = FakeMcp::SIM_ACCEPT;
+    bus.dev[1].txSim = FakeMcp::SIM_ACCEPT;
+    bus.dev[1].txAttempts = 0;
+
+    CanFrame t;
+    memset(&t, 0, sizeof(t));
+    t.id = 0x321; t.len = 2; t.data[0] = 0xEE; t.data[1] = 0xFF;
+    ck("CAN1 sends", can1.sendFrame(t) == MCP2515::TX_OK);
+    ck("and CAN2 was never asked to transmit", bus.dev[1].txAttempts == 0);
+    ck("the frame went into CAN1's transmit buffer",
+       bus.dev[0].lastTx.size() == 13 && bus.dev[0].lastTx[5] == 0xEE);
+
+    ck("still no misrouted transaction", bus.misroutes == 0,
+       hex((uint8_t)bus.misroutes));
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);

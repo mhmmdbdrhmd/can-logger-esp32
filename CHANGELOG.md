@@ -1,5 +1,202 @@
 # Changelog
 
+## v2.0.0 — two buses
+
+The logger now records **two CAN buses at once**, on one clock, into one file.
+This is a fork of `can-logger-esp32` and keeps its history; everything below is
+what changed to get the second bus, and what it cost.
+
+Major version because **the CSV schema changed** — see below. Recordings made by
+the single-bus logger are still readable by the desk tools, but a file written
+by this one has an extra column.
+
+### The schema: eight columns, `bus` second
+
+```
+t_us;bus;id;name;signal;value;unit;raw
+0;1;0x100;NodeStatus;Uptime;42;s;
+1500;2;0x100;PumpState;Pressure;3.5;bar;
+```
+
+Those two rows carry **the same identifier on different buses, decoded into
+different messages**. That is the normal case on a real machine, and it is the
+reason the column exists.
+
+`bus` is second, not appended, because it is part of a row's *identity* rather
+than its payload: with two buses an identifier alone no longer names anything.
+Group on `(t_us, bus, id)`. Putting it next to `t_us` and `id` is what makes
+that hard to forget.
+
+The companion `N.meta` now carries `"schema": 2`, so a tool can branch on a
+number instead of counting separators. `tools/parse_log.py` and
+`tools/plot_log.py` read both schemas and report a seven-column recording as
+`CAN1`.
+
+### One frame map per bus
+
+`/frames.dbc` for CAN1, `/frames2.dbc` for CAN2. Separate files, because the
+same identifier routinely means different things on two buses — a shared map
+would decode CAN2 with CAN1's meanings and be confidently, silently wrong. Two
+buses that genuinely share an ID space can be given identical files.
+
+Either may be absent; that bus records raw bytes, exactly as a logger with no
+map at all does. They are fitted to the heap in order, CAN1 first, so a very
+large map on CAN1 is the one that shrinks CAN2's — and the log says so when it
+happens.
+
+### One task drives both controllers
+
+Both MCP2515s share VSPI; only CS and INT are unique. The obvious design — a
+reader task each — is the wrong one: two tasks would contend for the SPI bus
+mutex on the one path that has a hard deadline, adding a priority-inversion
+surface in exchange for nothing, since the work is identical either way.
+
+So there is still one reader task at priority 20. It drains controller 1, then
+controller 2, on every pass. Two ISRs, one per INT line, each pushing into its
+own timestamp ring and notifying that same task.
+
+Both rings are fed from the same `esp_timer`, which is the point: a frame on
+CAN1 and a frame on CAN2 are directly comparable to the microsecond. Two
+recorders with two clocks cannot do that, and it is the whole reason to log two
+buses on one device.
+
+### One block SPI transfer per transaction, instead of one per byte
+
+This is the change the second bus actually turned on, and it would have been
+invisible with one.
+
+A controller holds two frames; at 500 kbit/s a third arrives about **200 µs**
+after the first. `readFrame()` already used the right instructions — `READ
+STATUS` then the burst `READ RX BUFFER`, 16 bytes, ~13 µs of clock at 10 MHz —
+but it clocked them with one `SPIClass::transfer(uint8_t)` per byte, and on
+arduino-esp32 each of those is a complete peripheral round trip costing 2–3 µs.
+
+| | per frame | drain 2 controllers × 2 frames | vs 200 µs |
+|---|---|---|---|
+| per-byte | ~45 µs | ~245 µs | **misses** |
+| block | ~18 µs | ~115 µs | ~40 % margin |
+
+Every register access and both frame paths now go through `MCP2515::xfer`, one
+`transferBytes()` per transaction. `MCP2515::readRegs()` was dead code and is
+gone.
+
+### The margin is measured
+
+`drainMaxUs` — the worst microseconds one pass spent emptying **both**
+controllers — is on the dashboard, in `/api/status` and in the `health:` line.
+Under 120 µs is comfortable; approaching 200 µs means the margin is gone. A
+figure you can read beats a design note you have to trust.
+
+### `CanFrame` gained a bus and did not grow
+
+The struct was exactly 24 bytes with no padding left, so a plain `uint8_t bus`
+would have aligned it to 32 — a third more RAM for a queue thousands of entries
+deep. Packing the flags as bitfields (`ext:1, rtr:1, tx:1, bus:1`) got it for
+free and changed no call site, since those only ever held 0 or 1. A
+`static_assert` now makes adding a field a compile error rather than a silent
+30 % increase.
+
+### Sizing, for the doubled frame rate
+
+| | was | now | why |
+|---|---|---|---|
+| `FRAME_QUEUE_LEN` | 1024 | **2048** | Its old comment claimed "one second of slack". At ~6 250 frames/s those entries are 164 ms — less than the ~320 ms outliers SD cards produce. 2048 is ~330 ms, just past the worst stall. |
+| `SD_BLOCK_BYTES` | 8192 | **32768** | SD cards are far more efficient with large writes, and two busy buses can ask for several hundred KB/s. |
+
+Static RAM went from 24.9 % to 33.2 %. Nearly all of that is the queue.
+
+### Per-bus health, everywhere
+
+`RecStatus` split into `BusHealth` (frames, interrupts, overflows, load, frame
+map, listen-only) and the shared remainder (one queue, one card, one writer).
+Split rather than suffixed, because the interesting failure is asymmetric — one
+bus deaf while the other is fine — and a routine that averaged the two would be
+incapable of saying so.
+
+The status line, the `health:` lines, `/api/status` and the dashboard all report
+per bus. The *Data Integrity* card keeps the floor-vs-exact distinction and now
+breaks the floor down by bus.
+
+### The web app is dual-aware throughout
+
+- **Health strip**: one card per controller — frame rate, interrupt rate, load,
+  INT level — plus a *Capture Path* card showing `drainMaxUs` against its
+  deadline. SD and Data Integrity stay shared, so which numbers are per bus is
+  obvious at a glance.
+- **Bus tab**: a controller selector; live signals and the identifier table show
+  one bus at a time. Both buses' values keep feeding the dashboard regardless of
+  which is on screen.
+- **Dashboard**: a cell remembers its bus, is badged when it is not CAN 1, and
+  resolves against that bus's map. The cell editor has a bus picker above the
+  signal list — changing it clears the signal, because a reference from the
+  other map would produce a cell that looks configured and never updates.
+- **Frame map upload**: the header button reads `Frame map: CAN 1` and follows
+  the Bus tab's selector, so the target is readable *before* the click rather
+  than explained in the toast afterwards.
+- **Send**: setpoints carry a bus, frames are grouped by bus as well as message,
+  and the one-off frame box has its own selector.
+
+`dash.cfg` gained `bus=` on `cell` and `send` lines. It is written only when it
+is not bus 1, so every existing layout round trips to exactly the file it came
+from.
+
+### The hotspot and hostname are unchanged
+
+Still `CAN-Logger` and `can-logger.local`. This firmware is meant to be flashed
+onto the single-bus logger's hardware and compared against it, and a saved
+Wi-Fi network or a bookmark that breaks on upgrade is friction for no gain.
+Both are overridable in `/config.txt`.
+
+### Wiring
+
+CAN1 on **D22/D21** — neither a strapping pin, and unlike GPIO16/17 neither is
+taken by PSRAM on a WROVER. CAN2 keeps the single-bus logger's **D5/D17**, so
+existing hardware needs one module added rather than rewiring.
+
+`docs/make_wiring.py` regenerates the diagram: shared nets are drawn as one run
+with a junction dot, which is what the breadboard looks like. It keeps the note
+that most DevKit v1 boards have **no pin marked D17** — the pin silkscreened
+TX2 is GPIO17.
+
+### One module fitted is a supported build
+
+Wire one MCP2515 and change nothing: a controller that does not answer at boot
+is reported once and then skipped — not read, not interrupt-armed, and shown on
+the dashboard as `NOT DETECTED` rather than as a fault.
+
+That guard is load-bearing rather than cosmetic. With no module on a chip
+select, MISO is left floating, and a float reading back as `0xFF` looks exactly
+like `READ STATUS` reporting a full receive buffer — `readFrame()` would then
+never return false and the drain loop would spin until the watchdog fired. The
+single-bus logger had the same unguarded loop and never met the problem,
+because it never had a second chip select to point at nothing.
+
+`CAN2_ENABLED 0` still exists and now means something narrower: do not even
+probe. It is the difference between "there is no second bus" and "there is
+supposed to be one" — and the dashboard says `OFF` for the first and
+`NOT DETECTED` for the second, because sending somebody to `config.h` when
+their module is unplugged is sending them to the wrong file.
+
+The CSV keeps its bus column either way, always saying `1`. A column that
+appeared and disappeared depending on how the hardware happened to be populated
+would be worse than one that is sometimes constant.
+
+### Removed
+
+- `MCP2515::readRegs()` — dead code, superseded by the block transfer path.
+- `csvHeaderBlock()` — dead since the `.meta` sidecar replaced it, and a second
+  place the column list was written down. Its test went with it.
+
+### Known limit, stated plainly
+
+Doubling the frame rate moved the binding constraint off the capture path and
+onto the **writer**. The CSV is one row per signal, so two fully-mapped busy
+500 kbit/s buses can produce ~1.1 MB/s — beyond what an SPI SD card sustains.
+The capture path closes with margin; the write path may not. It is instrumented
+(`qDrop` is exact) and documented in README §8 rather than hidden.
+
+---
+
 ## v1.2.0
 
 ### The unit is the frame

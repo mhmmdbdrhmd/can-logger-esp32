@@ -56,68 +56,64 @@ MCP2515::MCP2515(SPIClass &spi, int8_t csPin, uint32_t spiHz)
 
 /* -------------------------------------------------------------------------
  *  Low-level register access. Each call is one self-contained SPI
- *  transaction, so the bus can be shared (it is not, here) and so a
- *  higher-priority task preempting us cannot leave CS asserted.
+ *  transaction, so the bus can be shared - it now is, by two controllers -
+ *  and so a higher-priority task preempting us cannot leave CS asserted.
+ *
+ *  Every one of them goes through xfer(), which clocks the whole transaction
+ *  as ONE block rather than a byte at a time. That is not a micro-optimisation
+ *  here, it is the timing budget:
+ *
+ *  On arduino-esp32 each SPIClass::transfer(uint8_t) is a complete peripheral
+ *  round trip - load W0, set the length registers, raise USR, poll for done -
+ *  costing 2-3 us against the 0.8 us the byte actually spends on the wire at
+ *  10 MHz. A frame read is 16 bytes, so the per-byte path spends ~45 us on
+ *  ~13 us of clock.
+ *
+ *  A controller holds exactly two frames. At 500 kbit/s a third arrives about
+ *  200 us after the first, and with two controllers on one SPI bus a worst
+ *  case service pass has four frames to move. Per byte that is ~245 us and the
+ *  deadline is missed; per block it is ~115 us and there is 40 % margin. On
+ *  one bus this was invisible slack. On two it is the whole design.
  * ---------------------------------------------------------------------- */
-void MCP2515::reset() {
+void MCP2515::xfer(const uint8_t *tx, uint8_t *rx, size_t n) {
   _spi.beginTransaction(_cfg);
   select();
-  _spi.transfer(CMD_RESET);
+  _spi.transferBytes(tx, rx, (uint32_t)n);
   deselect();
   _spi.endTransaction();
+}
+
+void MCP2515::reset() {
+  const uint8_t tx[1] = { CMD_RESET };
+  uint8_t rx[1];
+  xfer(tx, rx, 1);
   delay(10);                       /* datasheet: oscillator start-up time */
 }
 
 uint8_t MCP2515::readReg(uint8_t addr) {
-  _spi.beginTransaction(_cfg);
-  select();
-  _spi.transfer(CMD_READ);
-  _spi.transfer(addr);
-  uint8_t v = _spi.transfer(0x00);
-  deselect();
-  _spi.endTransaction();
-  return v;
-}
-
-void MCP2515::readRegs(uint8_t addr, uint8_t *buf, uint8_t n) {
-  _spi.beginTransaction(_cfg);
-  select();
-  _spi.transfer(CMD_READ);
-  _spi.transfer(addr);
-  for (uint8_t i = 0; i < n; i++) buf[i] = _spi.transfer(0x00);
-  deselect();
-  _spi.endTransaction();
+  const uint8_t tx[3] = { CMD_READ, addr, 0x00 };
+  uint8_t rx[3];
+  xfer(tx, rx, 3);
+  return rx[2];
 }
 
 void MCP2515::writeReg(uint8_t addr, uint8_t val) {
-  _spi.beginTransaction(_cfg);
-  select();
-  _spi.transfer(CMD_WRITE);
-  _spi.transfer(addr);
-  _spi.transfer(val);
-  deselect();
-  _spi.endTransaction();
+  const uint8_t tx[3] = { CMD_WRITE, addr, val };
+  uint8_t rx[3];
+  xfer(tx, rx, 3);
 }
 
 void MCP2515::modifyReg(uint8_t addr, uint8_t mask, uint8_t val) {
-  _spi.beginTransaction(_cfg);
-  select();
-  _spi.transfer(CMD_BIT_MODIFY);
-  _spi.transfer(addr);
-  _spi.transfer(mask);
-  _spi.transfer(val);
-  deselect();
-  _spi.endTransaction();
+  const uint8_t tx[4] = { CMD_BIT_MODIFY, addr, mask, val };
+  uint8_t rx[4];
+  xfer(tx, rx, 4);
 }
 
 uint8_t MCP2515::readStatus() {
-  _spi.beginTransaction(_cfg);
-  select();
-  _spi.transfer(CMD_READ_STATUS);
-  uint8_t v = _spi.transfer(0x00);
-  deselect();
-  _spi.endTransaction();
-  return v;
+  const uint8_t tx[2] = { CMD_READ_STATUS, 0x00 };
+  uint8_t rx[2];
+  xfer(tx, rx, 2);
+  return rx[1];
 }
 
 bool MCP2515::setMode(uint8_t mode) {
@@ -246,13 +242,10 @@ bool MCP2515::readFrame(CanFrame &out) {
 
   /* One burst: SIDH, SIDL, EID8, EID0, DLC, D0..D7. Terminating the
    * transaction also clears the matching RXnIF flag in hardware. */
-  uint8_t b[13];
-  _spi.beginTransaction(_cfg);
-  select();
-  _spi.transfer(cmd);
-  for (uint8_t i = 0; i < 13; i++) b[i] = _spi.transfer(0x00);
-  deselect();
-  _spi.endTransaction();
+  uint8_t tx[14] = { cmd };        /* the rest stay zero: we are only reading */
+  uint8_t rx[14];
+  xfer(tx, rx, 14);
+  const uint8_t *b = rx + 1;
 
   const uint8_t sidh = b[0], sidl = b[1], dlc = b[4];
 
@@ -343,18 +336,14 @@ MCP2515::TxResult MCP2515::sendFrame(const CanFrame &f, uint8_t attempts,
      * each one or the second attempt reads the first one's verdict. */
     modifyReg(REG_TXB0CTRL, TXB_ABTF | TXB_MLOA | TXB_TXERR, 0x00);
 
-    _spi.beginTransaction(_cfg);
-    select();
-    _spi.transfer(CMD_LOAD_TX0);
-    for (uint8_t i = 0; i < 13; i++) _spi.transfer(b[i]);
-    deselect();
-    _spi.endTransaction();
+    uint8_t load[14] = { CMD_LOAD_TX0 };
+    uint8_t back[14];
+    memcpy(load + 1, b, 13);
+    xfer(load, back, 14);
 
-    _spi.beginTransaction(_cfg);
-    select();
-    _spi.transfer(CMD_RTS_TX0);
-    deselect();
-    _spi.endTransaction();
+    const uint8_t rts[1] = { CMD_RTS_TX0 };
+    uint8_t rtsBack[1];
+    xfer(rts, rtsBack, 1);
 
     /* Bounded by iterations rather than by a clock: the longest classical CAN
      * frame at the slowest bit rate this driver supports is about 1.5 ms, so

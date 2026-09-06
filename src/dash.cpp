@@ -206,6 +206,13 @@ static bool parseCell(DashConfig &c, char *p) {
       d.widget = (w < 0) ? (uint8_t)DW_NUMBER : (uint8_t)w;
     }
     else if (!strcmp(key, "sig"))   copyBounded(d.ref,   sizeof(d.ref),   val);
+    /* One-based in the file, zero-based in memory, matching the CSV and the
+     * label on the connector. Absent means bus 1, which is what makes every
+     * layout written by the single-bus logger load unchanged. */
+    else if (!strcmp(key, "bus")) {
+      const unsigned long b = strtoul(val, nullptr, 10);
+      d.bus = (b >= 1 && b <= CAN_BUSES) ? (uint8_t)(b - 1) : 0;
+    }
     else if (!strcmp(key, "label")) copyBounded(d.label, sizeof(d.label), val);
     else if (!strcmp(key, "unit"))  copyBounded(d.unit,  sizeof(d.unit),  val);
     else if (!strcmp(key, "lo"))    d.lo = (float)atof(val);
@@ -253,6 +260,10 @@ static bool parseSend(DashConfig &c, char *p) {
   while (nextPair(&p, key, sizeof(key), val, sizeof(val))) {
     if      (!strcmp(key, "label")) copyBounded(t.label, sizeof(t.label), val);
     else if (!strcmp(key, "sig"))   copyBounded(t.ref,   sizeof(t.ref),   val);
+    else if (!strcmp(key, "bus")) {
+      const unsigned long b = strtoul(val, nullptr, 10);
+      t.bus = (b >= 1 && b <= CAN_BUSES) ? (uint8_t)(b - 1) : 0;
+    }
     else if (!strcmp(key, "unit"))  copyBounded(t.unit,  sizeof(t.unit),  val);
     else if (!strcmp(key, "lo"))    t.lo     = (float)atof(val);
     else if (!strcmp(key, "hi"))    t.hi     = (float)atof(val);
@@ -415,7 +426,7 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
   out[0] = '\0';
 
   n = appendStr(out, cap, n,
-      "# CAN Logger dashboard\n"
+      "# Dual CAN Logger dashboard\n"
       "#\n"
       "# Written by the logger, and safe to edit by hand: put this file on the\n"
       "# SD card as " DASH_PATH " and it is picked up at the next boot.\n"
@@ -423,9 +434,12 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       "#   grid <cols> <rows>          the layout\n"
       "#   poll <ms>                   how often the browser asks for values\n"
       "#   role \"<Name>\"               which BU_ node this logger IS, if any\n"
-      "#   cell <slot> widget=.. sig=Message.Signal lo=.. hi=..\n"
-      "#   send <n> label=\"..\" sig=Message.Signal lo=.. hi=..\n"
+      "#   cell <slot> widget=.. sig=Message.Signal bus=1 lo=.. hi=..\n"
+      "#   send <n> label=\"..\" sig=Message.Signal bus=1 lo=.. hi=..\n"
       "#              mux=1            one payload of a multiplexed frame\n"
+      "#\n"
+      "# bus is 1 or 2 and says which CAN bus - and so which frame map - the\n"
+      "# signal belongs to. Omitted means bus 1.\n"
       "#\n"
       "# widget is one of: gauge arc angle compass bar level thermo number\n"
       "#                   spark state\n"
@@ -456,6 +470,11 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
     n = appendStr(out, cap, n, dashWidgetName(d.widget));
     n = appendStr(out, cap, n, " sig=");
     n = appendValue(out, cap, n, d.ref);
+    /* Written only when it is not the default, so a single-bus layout round
+     * trips to exactly the file it came from and the diff of a saved layout
+     * shows what actually changed. */
+    if (d.bus) { n = appendStr(out, cap, n, " bus=");
+                 n = appendInt(out, cap, n, d.bus + 1); }
 
     if (d.label[0]) { n = appendStr(out, cap, n, " label=");
                       n = appendValue(out, cap, n, d.label); }
@@ -486,6 +505,8 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
     n = appendInt(out, cap, n, i);
     n = appendStr(out, cap, n, " label=");
     n = appendValue(out, cap, n, t.label);
+    if (t.bus) { n = appendStr(out, cap, n, " bus=");
+                 n = appendInt(out, cap, n, t.bus + 1); }
 
     if (t.kind == TXK_RAW) {
       char buf[24];
@@ -546,13 +567,19 @@ int16_t txOverrideSelector(const TxCommand &t, const DbcDb &db) {
   return -1;
 }
 
-uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
+/* Both take the ARRAY of frame maps, and every cell and every setpoint is
+ * resolved against the map of ITS OWN bus. Passing one map and letting the
+ * caller pick would mean a layout could only ever describe one bus, which is
+ * the thing a dual-bus dashboard exists not to do. */
+uint16_t dashResolve(DashConfig &c, const DbcDb *db) {
   uint16_t missing = 0;
 
   for (uint8_t i = 0; i < DASH_MAX_CELLS; i++) {
     DashCell &d = c.cell[i];
     if (!dashCellUsed(d)) { d.sig = -1; continue; }
-    d.sig = dbcFindSignalRef(db, d.ref, nullptr);
+    if (d.bus >= CAN_BUSES) d.bus = 0;
+    const DbcDb &dbc = db[d.bus];
+    d.sig = dbcFindSignalRef(dbc, d.ref, nullptr);
     if (d.sig < 0) {
       if (i < dashCellCount(c)) missing++;
       /* Still give it a drawable range. The cell has to render in order to
@@ -564,7 +591,7 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
 
     /* Fill in whatever the cell did not say from what the DBC knows. A cell
      * that names only a signal is a complete cell. */
-    const DbcSignal &s = db.sig[d.sig];
+    const DbcSignal &s = dbc.sig[d.sig];
     if (!d.unit[0]) copyBounded(d.unit, sizeof(d.unit), s.unit);
     if (d.hi <= d.lo) {
       /* The file's own annotation first, because it is what the bus designer
@@ -581,11 +608,13 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
 
   for (uint8_t i = 0; i < TX_MAX_COMMANDS; i++) {
     TxCommand &t = c.tx[i];
+    if (t.bus >= CAN_BUSES) t.bus = 0;
     if (!txCommandUsed(t) || t.kind != TXK_SIGNAL) { continue; }
-    t.sig = dbcFindSignalRef(db, t.ref, &t.msg);
+    const DbcDb &dbc = db[t.bus];
+    t.sig = dbcFindSignalRef(dbc, t.ref, &t.msg);
     if (t.sig < 0) { missing++; continue; }
 
-    const DbcSignal &s = db.sig[t.sig];
+    const DbcSignal &s = dbc.sig[t.sig];
     if (!t.unit[0]) copyBounded(t.unit, sizeof(t.unit), s.unit);
 
     /* A setpoint's range must never exceed what the bits can carry, whatever
@@ -604,7 +633,7 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
      * Left in place it would put a code into bits that are not the selector's,
      * or into a message the file already multiplexes its own way - either of
      * which is a frame that looks sent and is not the one asked for. */
-    if (t.muxSel[0] && txOverrideSelector(t, db) < 0) {
+    if (t.muxSel[0] && txOverrideSelector(t, dbc) < 0) {
       t.muxSel[0] = 0;
       t.muxCode   = -1;
     }
@@ -613,7 +642,7 @@ uint16_t dashResolve(DashConfig &c, const DbcDb &db) {
   return missing;
 }
 
-uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db) {
+uint16_t dashDropUnresolved(DashConfig &c, const DbcDb *db) {
   uint16_t dropped = 0;
 
   /* The role names a node of the OLD map. If the new file has no such node the
@@ -622,16 +651,21 @@ uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db) {
    * stopped separating anything, because nothing transmits under that name.
    * Cleared, so the page asks the question again against the new file. */
   if (c.role[0]) {
+    /* Known if EITHER map names it. The role says which node this logger is
+     * standing in for, and a tester that exists on the diagnostic bus is still
+     * that tester when the other bus has never heard of it. */
     bool known = false;
-    for (uint8_t i = 0; i < db.nodeCount && !known; i++)
-      known = strcmp(db.node[i], c.role) == 0;
+    for (uint8_t b = 0; b < CAN_BUSES && !known; b++)
+      for (uint8_t i = 0; i < db[b].nodeCount && !known; i++)
+        known = strcmp(db[b].node[i], c.role) == 0;
     if (!known) { c.role[0] = 0; dropped++; }
   }
 
   for (uint8_t i = 0; i < DASH_MAX_CELLS; i++) {
     DashCell &d = c.cell[i];
     if (!dashCellUsed(d)) continue;
-    if (dbcFindSignalRef(db, d.ref, nullptr) >= 0) continue;
+    if (d.bus >= CAN_BUSES) d.bus = 0;
+    if (dbcFindSignalRef(db[d.bus], d.ref, nullptr) >= 0) continue;
     memset(&d, 0, sizeof(d));
     d.sig = -1;
     d.dec = 255;
@@ -656,14 +690,15 @@ uint16_t dashDropUnresolved(DashConfig &c, const DbcDb &db) {
     /* A raw-identifier command names no signal, so no frame map can invalidate
      * it. Those are the one thing that survives a map it was not written for. */
     if (t.kind != TXK_SIGNAL) continue;
+    if (t.bus >= CAN_BUSES) t.bus = 0;
     int16_t msgIdx = -1;
-    if (dbcFindSignalRef(db, t.ref, &msgIdx) >= 0) {
+    if (dbcFindSignalRef(db[t.bus], t.ref, &msgIdx) >= 0) {
       /* The value survives, but an override written against the old map may
        * not: its selector has to be a signal of THIS message under THIS file.
        * Counted, so the page can say what stopped being true. */
       if (t.muxSel[0]) {
         t.msg = msgIdx;
-        if (txOverrideSelector(t, db) < 0) {
+        if (txOverrideSelector(t, db[t.bus]) < 0) {
           t.muxSel[0] = 0;
           t.muxCode   = -1;
           dropped++;

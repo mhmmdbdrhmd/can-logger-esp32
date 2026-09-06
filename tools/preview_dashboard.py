@@ -427,6 +427,14 @@ def main():
                          "every message, which is the right answer when you are "
                          "only listening. Changeable in the page afterwards, "
                          "from the Role button in the header.")
+    ap.add_argument("--can2", default="on",
+                    choices=("on", "off", "missing"),
+                    help="what the second controller is doing. 'off' is "
+                         "CAN2_ENABLED 0 - compiled out. 'missing' is the "
+                         "commoner case: the firmware looked for a second "
+                         "MCP2515 and nothing answered. The page has to say "
+                         "something different for each, so this is how that "
+                         "gets looked at without unplugging hardware.")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--run", default="",
                     help="JavaScript to run once the page has loaded. Only for "
@@ -495,6 +503,7 @@ def main():
         cols = rows = None
         poll = 200
         cells = {}
+        buses = {}
         ranges = {}
         for line in text.splitlines():
             line = line.strip()
@@ -510,6 +519,9 @@ def main():
                 if m:
                     ref = m.group(2) or m.group(3)
                     cells[int(p[1])] = ref
+                    # Absent means bus 1, exactly as the firmware reads it.
+                    mb = re.search(r'\bbus=(\d+)', rest)
+                    buses[int(p[1])] = int(mb.group(1)) if mb else 1
                     # The range the operator chose for this cell, which is what
                     # the simulated value has to move within. A gauge narrowed
                     # to 0..10 that still gets a 0..50 sweep just sits pegged,
@@ -521,7 +533,7 @@ def main():
                             ranges[ref] = (float(lo.group(1)), float(hi.group(1)))
                         except ValueError:
                             pass
-        return cols or 4, rows or 2, poll, cells, ranges
+        return cols or 4, rows or 2, poll, cells, buses, ranges
 
     def armed_now():
         return state["armed"] and time.time() < state["arm_until"]
@@ -541,7 +553,7 @@ def main():
 
     def make_dash():
         t = time.time() - t0
-        cols, rows, poll, cells, ranges = parse_cells(state["cfg"])
+        cols, rows, poll, cells, buses, ranges = parse_cells(state["cfg"])
         n = min(cols * rows, 48)  # noqa: F841 - rows is used for the count
         v, f = [], []
         for i in range(n):
@@ -569,16 +581,30 @@ def main():
         # The firmware sends the health counters here as well, so the dashboard
         # is one request rather than two. Mirror that, minus the big tables.
         st = make_status()
-        for k in ("rec", "can", "sd", "sdErr", "sdType", "sdMB", "lost", "fps",
-                  "irq", "intStuck", "intLevel", "load", "risk", "file",
-                  "elapsed", "rows", "kb", "pf", "dbc", "up", "heap", "ap",
-                  "ip", "fw"):
+        for k in ("rec", "sd", "sdErr", "sdType", "sdMB", "lost", "qDrop",
+                  "drain", "risk", "file", "elapsed", "rows", "kb", "pf",
+                  "up", "heap", "ap", "ip", "fw"):
             d[k] = st[k]
+
+        # The per-bus half, trimmed to what the header strip draws - the same
+        # subset the firmware carries here, and for the same reason: the full
+        # id and signal tables belong on /api/status.
+        d["can"] = [{k: b[k] for k in
+                     ("b", "on", "en", "alive", "fps", "irq", "load", "ovf",
+                      "ovfEv", "intStuck", "intLevel", "dbc", "send")}
+                    for b in st["can"]]
+
+        # Which bus each cell reads from, one entry per slot, so the page can
+        # badge it without re-reading the layout on every poll.
+        d["cb"] = [buses.get(i, 1) for i in range(n)]
         return d
+
+    can2_on = 1 if args.can2 == "on" else 0
+    can2_en = 0 if args.can2 == "off" else 1
 
     def make_status():
         t = time.time() - t0
-        _, _, _, _, ranges = parse_cells(state["cfg"])
+        _, _, _, _, _, ranges = parse_cells(state["cfg"])
         sig = []
         for s in flat[:48]:
             ref = s["_msg"] + "." + s["n"]
@@ -589,29 +615,53 @@ def main():
                 "n": int(t * 50), "r": 50, "k": True} for m in dbc["m"]]
         ids.append({"id": "0x3FF", "d": "11223344", "n": int(t * 8), "r": 8,
                     "k": False})
+
+        fps = 50 * max(1, len(dbc["m"])) + 8
+
+        # Two controllers. CAN1 carries the frame map and the invented traffic;
+        # CAN2 is deliberately given a DIFFERENT rate, a different load and no
+        # frame map, because a preview where both buses look identical is a
+        # preview that cannot show whether the page distinguishes them.
+        can = [
+            {"b": 1, "on": 1, "en": 1, "kbps": 250, "send": 1, "alive": 1,
+             "fps": fps, "irq": fps, "intStuck": 0, "intLevel": 1, "load": 14,
+             "ovf": 0, "ovfEv": 0, "sticky": 0,
+             "dbc": dbc["loaded"], "dbcMsg": len(dbc["m"]), "dbcSig": len(flat),
+             "ids": ids, "idMore": 0, "sig": sig, "sigMore": 0},
+            {"b": 2, "on": can2_on, "en": can2_en, "kbps": 500, "send": 1,
+             "alive": can2_on,
+             "fps": int(fps * 0.4), "irq": int(fps * 0.4), "intStuck": 0,
+             "intLevel": 1, "load": 42, "ovf": 0, "ovfEv": 0, "sticky": 0,
+             "dbc": 0, "dbcMsg": 0, "dbcSig": 0,
+             "ids": [{"id": "0x18FF5001", "d": "0A0B0C0D", "n": int(t * 20),
+                      "r": 20, "k": False}],
+             "idMore": 0, "sig": [], "sigMore": 0},
+        ]
+
         return {
             "sd": 1, "sdErr": 0, "sdType": "SDHC", "sdMB": 15193,
             "rec": 1, "file": "1.csv", "elapsed": int(t),
             "rows": int(t * 220), "kb": int(t * 15), "pf": 0, "risk": 1000,
-            "can": 1, "fps": 50 * max(1, len(dbc["m"])) + 8, "lost": 0,
-            "irq": 50 * max(1, len(dbc["m"])) + 8, "intStuck": 0, "intLevel": 1,
-            "load": 14,
-            "dbc": dbc["loaded"], "dbcMsg": len(dbc["m"]), "dbcSig": len(flat),
-            "ids": ids, "idMore": 0, "sig": sig, "sigMore": 0,
+            "lost": 0, "qDrop": 0, "qPeak": 61, "qLen": 2048,
+            "drain": 108, "wrMax": 41200,
+            "can": can,
             "ap": 1, "ip": "192.168.4.1",
             "up": int(t * 1000), "heap": 198744,
-            "fw": "CAN Logger ESP32 v%s  (PREVIEW - every number here is "
+            "fw": "Dual CAN Logger ESP32 v%s  (PREVIEW - every number here is "
                   "invented)" % firmware_version(),
         }
 
     base_log = [
-        "[     0.412] I ==== CAN Logger ESP32 v%s ====" % firmware_version(),
+        "[     0.412] I ==== Dual CAN Logger ESP32 v%s ====" % firmware_version(),
         "[     0.690] I SD card OK: SDHC, 15193 MB",
         (f"[     0.735] I frame map: {len(dbc['m'])} messages, {len(flat)} "
          f"signals from /frames.dbc") if flat else
         "[     0.735] I no /frames.dbc on the card - recording raw payload bytes.",
         "[     0.780] I dashboard layout read from flash",
-        "[     0.802] I CAN controller OK: 250 kbit/s, normal mode",
+        "[     0.802] I CAN1 controller OK: 250 kbit/s, normal mode "
+        "(not listening yet)",
+        "[     0.844] I CAN2 controller OK: 500 kbit/s, normal mode "
+        "(not listening yet)",
         "[     1.140] I HOTSPOT 'CAN-Logger' is up - open http://192.168.4.1",
         "[     1.201] I RECORDING STARTED -> /1.csv (+ /1.log)",
     ]
@@ -643,7 +693,13 @@ def main():
             elif p == "/api/dash/cfg":
                 self._send(state["cfg"], "text/plain")
             elif p == "/api/signals":
-                self._json(dbc)
+                # Only CAN1 has a frame map in this preview, matching what
+                # make_status() reports - a page that offered signals for a bus
+                # it just said had no map would be previewing a lie.
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                bus = int((qs.get("bus") or ["1"])[0])
+                self._json(dict(dbc, bus=bus) if bus == 1
+                           else {"bus": bus, "loaded": 0, "nodes": [], "m": []})
             elif p == "/api/log":
                 m = re.search(r"since=(\d+)", self.path)
                 since = int(m.group(1)) if m else 0

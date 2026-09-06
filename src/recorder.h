@@ -9,39 +9,46 @@
 #pragma once
 
 #include <Arduino.h>
+#include "config.h"
 #include "mcp2515.h"
 
-struct RecStatus {
-  /* ---- storage ---- */
-  bool     sdOk        = false;
-  bool     sdError     = false;   /* a write failed after mounting          */
-  uint64_t sdSizeMB    = 0;
-  const char *sdType   = "-";
+/* ---------------------------------------------------------------------------
+ *  Everything that is true of ONE bus.
+ *
+ *  Split out from RecStatus rather than suffixed onto it, because with two
+ *  controllers the important distinction is which numbers are per bus and
+ *  which are shared - and a reader should not have to know the field names to
+ *  tell them apart. Frames, interrupts, overflows and load belong to a bus.
+ *  The queue, the card and the writer are shared by both, and summing a
+ *  per-bus figure into a global one would hide exactly the fault you are
+ *  looking for: one bus healthy, the other deaf.
+ * -------------------------------------------------------------------------*/
+struct BusHealth {
+  /* Two different kinds of "not there", kept apart on purpose: `enabled` is a
+   * build-time decision, `present` is what the hardware answered. Collapsing
+   * them would make a missing module look like a config choice, which is the
+   * one message that stops somebody checking their wiring. */
+  bool     enabled     = false; /* compiled in at all (see CAN2_ENABLED)    */
+  bool     present     = false; /* the controller answered at boot          */
+  uint16_t bitrateKbps = 0;     /* what this bus was configured for         */
+  bool     listenOnly  = false;
 
-  /* ---- frame map ---- */
+  /* ---- frame map: one per bus, because an identifier means different
+   * things on different buses ---- */
   bool     dbcLoaded   = false;
   uint16_t dbcMessages = 0;
   uint16_t dbcSignals  = 0;
 
-  /* ---- current recording ---- */
-  bool     recording   = false;
-  uint16_t fileIndex   = 0;
-  char     csvName[20] = "";
-  char     logName[20] = "";
-  char     metaName[20] = "";
-  uint32_t startMs     = 0;
-  uint64_t rows        = 0;
-  uint64_t bytes       = 0;
-
-  /* ---- health ---- */
-  uint32_t framesRx      = 0;   /* frames pulled out of the controller      */
-  uint32_t frameRate     = 0;   /* frames/s over the last second            */
-  uint32_t queueDropped  = 0;   /* frame queue was full - data WAS lost     */
+  /* ---- traffic ---- */
+  uint32_t framesRx    = 0;     /* frames pulled out of this controller     */
+  uint32_t frameRate   = 0;     /* frames/s over the last second            */
+  uint32_t lastFrameMs = 0;
+  bool     canOk       = false;
 
   /* Two different things, kept apart because conflating them made the loss
    * figure wrong by about forty percent in ten hours of field recordings.
    *
-   * canOvfEvents counts SERVICE PASSES that found the controller's overflow
+   * canOvfEvents counts SERVICE PASSES that found this controller's overflow
    * flags set. In the wedged state that is one per 20 ms poll, so it converges
    * on a flat ~51/s - a poll rate wearing a loss figure's clothes.
    *
@@ -53,33 +60,72 @@ struct RecStatus {
    * 1.7x this - so treat it as the floor it is, never as the total. */
   uint32_t canOvfEvents    = 0;
   uint32_t canOvfFramesMin = 0;
-  uint32_t queuePeak     = 0;   /* deepest the frame queue has ever been    */
-  uint32_t writeCount    = 0;
-  uint32_t writeMaxUs    = 0;
-  uint32_t lastFrameMs   = 0;
-  bool     canOk         = false;
 
   /* ---- receive-path diagnostics ----
    * Without these, a wedged interrupt is invisible: the logger keeps writing
-   * rows, just ninety percent fewer of them. */
-  uint32_t irqCount      = 0;   /* times the INT line actually fired          */
-  uint32_t irqRate       = 0;   /* per second                                 */
-  uint32_t wakeCount     = 0;   /* reader wake-ups, interrupt or timeout      */
-  uint32_t wakeRate      = 0;
-  uint8_t  intLevel      = 1;   /* current level of the MCP2515 INT pin       */
-  bool     intStuck      = false;/* frames arriving but the line never fires  */
-  uint32_t canIntfSticky = 0;   /* ERRIF/MERRF events cleared                 */
+   * rows, just ninety percent fewer of them. Per bus because one INT line can
+   * die while the other is fine, and a shared counter would hide it. */
+  uint32_t irqCount      = 0;   /* times THIS INT line actually fired        */
+  uint32_t irqRate       = 0;   /* per second                                */
+  uint8_t  intLevel      = 1;   /* current level of this MCP2515's INT pin   */
+  bool     intStuck      = false;/* frames arriving but the line never fires */
+  uint32_t canIntfSticky = 0;   /* ERRIF/MERRF events cleared                */
 
   /* ---- bus load ---- */
   uint64_t rxBits        = 0;   /* bits seen, incl. stuffing and IFS estimate */
-  uint32_t busLoadPct    = 0;   /* percent of CAN_BITRATE_KBPS in use         */
+  uint32_t busLoadPct    = 0;   /* percent of this bus's bit rate in use      */
+
+  uint32_t lifeOverflow  = 0;   /* lifetime, survives across recordings       */
+};
+
+struct RecStatus {
+  /* ---- storage ---- */
+  bool     sdOk        = false;
+  bool     sdError     = false;   /* a write failed after mounting          */
+  uint64_t sdSizeMB    = 0;
+  const char *sdType   = "-";
+
+  /* ---- per bus ----
+   * Indexed 0 = CAN1, 1 = CAN2, matching CanFrame::bus. */
+  BusHealth bus[CAN_BUSES];
+
+  /* ---- current recording ---- */
+  bool     recording   = false;
+  uint16_t fileIndex   = 0;
+  char     csvName[20] = "";
+  char     logName[20] = "";
+  char     metaName[20] = "";
+  uint32_t startMs     = 0;
+  uint64_t rows        = 0;
+  uint64_t bytes       = 0;
+
+  /* ---- health, shared by both buses ----
+   * One queue, one card, one writer task, so these are global by construction.
+   * Anything that belongs to a single controller lives in bus[] above. */
+  uint32_t queueDropped  = 0;   /* frame queue was full - data WAS lost     */
+  uint32_t queuePeak     = 0;   /* deepest the frame queue has ever been    */
+  uint32_t writeCount    = 0;
+  uint32_t writeMaxUs    = 0;
+
+  uint32_t wakeCount     = 0;   /* reader wake-ups, interrupt or timeout      */
+  uint32_t wakeRate      = 0;
+
+  /* Worst time one service pass took to drain BOTH controllers, in
+   * microseconds. This is the number the whole dual-bus design turns on.
+   *
+   * A controller holds two frames. At 500 kbit/s a third arrives roughly
+   * 200 us after the first, so a pass that takes longer than that can lose a
+   * frame the counters above would only report as a floor. Measuring it
+   * directly turns "we believe it keeps up" into something a recording can
+   * show. Expect ~115 us with both buses busy; anything approaching 200 means
+   * the margin is gone. */
+  uint32_t drainMaxUs    = 0;
 
   /* Lifetime totals. The counters above are zeroed when a recording starts so
    * that "lost" describes THAT recording and not something that happened at
    * boot - otherwise one frame lost before any file existed marks every later
    * recording as lossy forever. */
   uint32_t lifeDropped   = 0;
-  uint32_t lifeOverflow  = 0;
   bool     powerFail     = false; /* a recording was closed by a supply loss */
   uint32_t syncCount     = 0;
   uint32_t syncMaxUs     = 0;     /* worst metadata sync - the exposure window*/
@@ -93,9 +139,9 @@ extern QueueHandle_t g_frameQueue;
 /* Mounts the card and reports what it found. Safe to call again to retry. */
 bool recorderBeginSD();
 
-/* Reads DBC_PATH off the card into the global frame map. Call after the card
- * is mounted and before the first recording starts. Absence of the file is not
- * an error: the logger then records raw payload bytes. */
+/* Reads DBC_PATH and DBC2_PATH off the card into the two frame maps. Call
+ * after the card is mounted and before the first recording starts. Absence of
+ * either file is not an error: that bus then records raw payload bytes. */
 void recorderLoadDbc();
 
 /* Reconciles the dashboard layout on the card with the one in flash. Call

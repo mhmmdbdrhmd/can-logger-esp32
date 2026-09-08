@@ -130,9 +130,10 @@ breaks the floor down by bus.
   resolves against that bus's map. The cell editor has a bus picker above the
   signal list — changing it clears the signal, because a reference from the
   other map would produce a cell that looks configured and never updates.
-- **Frame map upload**: the header button reads `Frame map: CAN 1` and follows
-  the Bus tab's selector, so the target is readable *before* the click rather
-  than explained in the toast afterwards.
+- **Frame map upload**: two header buttons, `Frame map: CAN 1` and
+  `Frame map: CAN 2`, so the target is readable *before* the click rather than
+  explained in the toast afterwards — and reachable without first working out
+  which bus some other tab happens to be showing.
 - **Send**: setpoints carry a bus, frames are grouped by bus as well as message,
   and the one-off frame box has its own selector.
 

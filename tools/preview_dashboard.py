@@ -732,6 +732,17 @@ def main():
 
             if p == "/api/dbc":
                 nonlocal dbc, flat, by_ref
+                # This tool holds ONE frame map, the CAN1 one, which is what
+                # /api/signals reports. Accepting a CAN2 upload would replace
+                # that map and then answer the next CAN2 request with nothing -
+                # the page would say it had loaded and show an empty bus. Say
+                # so instead; the logger itself takes both.
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if int((qs.get("bus") or ["1"])[0]) != 1:
+                    self._json({"ok": 0, "err": "this desk tool holds one frame "
+                                               "map, the CAN 1 one - the logger "
+                                               "takes both"})
+                    return
                 name, data = _multipart_file(raw,
                                              self.headers.get("Content-Type", ""))
                 if not data:

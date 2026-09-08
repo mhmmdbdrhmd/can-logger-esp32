@@ -3,7 +3,7 @@
 Set the logger's dashboard and sendable values up at a desk, before going out.
 
     python3 customize.py                  open the page with no frame map, and
-                                          load one from it with Frame map
+                                          load one from it with Frame map: CAN 1
     python3 customize.py path/to/mine.dbc start with this frame map
     python3 customize.py --browse         pick one in your file browser first
     python3 customize.py mine.dbc --role Tester
@@ -16,8 +16,9 @@ Set the logger's dashboard and sendable values up at a desk, before going out.
 Or just double-click this file. On Windows you can also drag a .dbc onto it.
 
 It never asks a question in the terminal. With no argument it opens the page
-empty and the Frame map button loads a .dbc from wherever you keep it, which
-is the same button the logger itself has.
+empty and the Frame map: CAN 1 button loads a .dbc from wherever you keep it,
+which is the same button the logger itself has. This tool holds one map, so the
+CAN 2 button says so rather than loading over it.
 
 It opens the logger's real web page in your browser, fed with simulated data.
 Press Export in the page to save the setup you have built, then copy it onto

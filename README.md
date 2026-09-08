@@ -249,8 +249,8 @@ given identical files.
 Copy [`examples/example.dbc`](examples/example.dbc) to the card as
 `/frames.dbc` and edit it, or export one from your usual CAN tool. The paths are
 `DBC_PATH` and `DBC2_PATH` in `src/config.h`. Either can be uploaded from the
-web app — the **Frame map** button names the bus it will replace before you
-press it.
+web app — there is a **Frame map: CAN 1** and a **Frame map: CAN 2** button in
+the header, so the one you press names the bus it will replace.
 
 > **The two maps share one heap budget.** They are sized to the free heap in
 > order, CAN1 first, so a very large map on CAN1 is the one that shrinks CAN2's.
@@ -707,8 +707,9 @@ needle sits where it is going to sit.
 
 ### Loading a frame map
 
-**Frame map**, in the header, takes a `.dbc` off the phone or laptop you are
-holding and puts it on the card as `/frames.dbc`. The map is rebuilt on the spot
+**Frame map: CAN 1** and **Frame map: CAN 2**, in the header, each take a
+`.dbc` off the phone or laptop you are holding and put it on the card as
+`/frames.dbc` or `/frames2.dbc`. The map is rebuilt on the spot
 — no reboot, no card reader, no laptop cable — and the dashboard re-binds to it
 immediately, saying how many saved cells no longer match if any do not.
 
@@ -895,9 +896,10 @@ python3 customize.py path/to/mine.dbc --role Tester    # if one of them is you
 ```
 
 **It never asks a question in the terminal.** With no argument the page opens
-empty and its own **Frame map** button loads a `.dbc` from wherever you keep it
-— the same button the logger itself has, so there is one way to do this rather
-than two.
+empty and its own **Frame map: CAN 1** button loads a `.dbc` from wherever you
+keep it — the same button the logger itself has, so there is one way to do this
+rather than two. This tool holds one map, so the CAN 2 button says so rather
+than loading over it.
 
 or **double-click `customize.py`** and pick your file — from the list it finds,
 or press **b** to open your computer's own file browser. On Windows,
@@ -923,7 +925,7 @@ asked for.
 Then, in the page:
 
 **1. Load your frame map** if you did not name one on the command line —
-*Frame map*, in the header.
+*Frame map: CAN 1*, in the header.
 
 **2. Say which node you are** — or skip. *Role*, in the header. See [which node
 this logger is](#which-node-this-logger-is); `--role` above answers it before

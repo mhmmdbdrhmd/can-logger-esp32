@@ -471,7 +471,13 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <button data-tab="send">Send</button>
     <button data-tab="log">Log</button>
   </div>
-  <button id="dbcbtn"   class="hbtn">Frame map</button>
+  <!-- One button per bus, rather than one that follows whichever controller
+       some other tab happens to be showing. Uploading replaces THAT bus's
+       frame map and drops every dashboard cell the new map cannot account
+       for, so the target has to be readable at the moment of the click - not
+       inferred from the state of a tab the reader may not have opened. -->
+  <button class="hbtn dbcbtn" data-bus="1">Frame map: CAN 1</button>
+  <button class="hbtn dbcbtn" data-bus="2">Frame map: CAN 2</button>
   <button id="rolebtn"  class="hbtn">Role: none</button>
   <button id="setupbtn" class="hbtn">Setup file</button>
   <span id="conn">connecting...</span>
@@ -3847,15 +3853,21 @@ q('rolesheet').onclick  = function(e){
   if(e.target === q('rolesheet')) q('rolesheet').classList.remove('on');
 };
 
-/* The button carries its target. Uploading replaces one bus's frame map and
-   drops every dashboard cell that map cannot account for, so which bus it is
-   about has to be readable BEFORE the click, not explained in the toast
-   afterwards. It follows the Bus tab's selector. */
-function renderDbcBtn(){
-  q('dbcbtn').textContent = 'Frame map: CAN ' + BUS;
-}
+/* Each button carries its own target. Uploading replaces one bus's frame map
+   and drops every dashboard cell that map cannot account for, so which bus it
+   is about has to be readable BEFORE the click, not explained in the toast
+   afterwards - which is why there is a button per bus instead of one that
+   follows the Bus tab. The file picker is shared, so the bus that was pressed
+   is remembered here for the change handler that fires later. */
+var DBCTARGET = 1;
 
-q('dbcbtn').onclick = function(){ q('dbcpick').click(); };
+Array.prototype.forEach.call(document.querySelectorAll('.dbcbtn'),
+  function(b){
+    b.onclick = function(){
+      DBCTARGET = busOr(b.dataset.bus);
+      q('dbcpick').click();
+    };
+  });
 
 q('dbcpick').onchange = function(){
   var f = q('dbcpick').files[0];
@@ -3868,7 +3880,7 @@ q('dbcpick').onchange = function(){
   var fd = new FormData();
   fd.append('file', f, f.name);
 
-  var target = BUS;
+  var target = DBCTARGET;
   toast('Sending the frame map for CAN ' + target,
         f.name + ' — ' + Math.round(f.size / 1024) + ' KB', 'ok');
 
@@ -3953,7 +3965,6 @@ Array.prototype.forEach.call(q('buspick').querySelectorAll('.bussel'),
       BUS = n;
       Array.prototype.forEach.call(q('buspick').querySelectorAll('.bussel'),
         function(o){ o.classList.toggle('on', +o.dataset.bus === BUS); });
-      renderDbcBtn();
       q('sigs').innerHTML = '<tr><td colspan="4">loading...</td></tr>';
       q('ids').innerHTML  = '<tr><td colspan="5">loading...</td></tr>';
       pollStatus();
@@ -4077,7 +4088,6 @@ q('rebootbtn').onclick = function(){
 window.addEventListener('hashchange', function(){
   showTab(location.hash.slice(1));
 });
-renderDbcBtn();
 loadCfg().then(function(){ showTab(location.hash.slice(1) || 'dash'); });
 </script>
 </body></html>

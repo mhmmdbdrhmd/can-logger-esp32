@@ -195,7 +195,8 @@ is the one place this topology gets fussy.
 Bus side: each module's `CAN_H` and `CAN_L` go to **its own** bus, with `GND` to
 that bus's ground. Bit rates are set per bus (`CAN1_BITRATE_KBPS`,
 `CAN2_BITRATE_KBPS`); 100, 125, 250, 500 and 1000 are supported at either
-crystal frequency, and the two buses do not have to match.
+crystal frequency, and the two buses do not have to match. If you do not know a
+bus's rate, the logger can [work it out by listening](#finding-the-bit-rate-itself).
 
 **Terminate each bus on its own merits.** 120 Ω belongs across `CAN_H`/`CAN_L`
 only where the logger is at that bus's physical end. Being the end node on one
@@ -215,6 +216,37 @@ Set one to **1** when you are tapping a bus that already has two or more live
 nodes. Listen-only never drives that bus at all, which is the safe choice on a
 machine that is actually running — and being independent per bus is the point:
 a diagnostic bus you may drive, sitting next to a powertrain bus you may not.
+
+### Finding the bit rate itself
+
+Set **`CAN1_AUTODETECT`** or **`CAN2_AUTODETECT`** to `1` and that bus works out
+its own bit rate at boot: it listens at each `(bit rate, crystal)` pair the
+driver has timings for and keeps the first one that decodes real frames. A frame
+only reaches a receive buffer after its CRC has passed, so this is not "did the
+line wiggle" — at the wrong bit rate the count stays at zero however busy the
+bus is, and that is what makes it work at all.
+
+The pair already in `config.h` is tried **first**, so a correct configuration
+costs one window and usually far less. Detection is per bus: one bus can be
+detected while the other is pinned.
+
+**It listens in listen-only mode whatever `CAN<n>_LISTEN_ONLY` says.** At the
+wrong bit rate a normal-mode node reads valid traffic as malformed and answers
+with error frames — a diagnostic tool that corrupts the bus while working out
+how to read it would be worse than no tool. Every wrong guess here is silent.
+
+Three things to know before you turn it on:
+
+| | |
+|---|---|
+| **It needs traffic** | A quiet bus is indistinguishable from a wrong bit rate. With nothing talking, detection fails and the `config.h` values are used — it never leaves a bus unconfigured. `CAN_AUTODETECT_MS` is 300 ms per candidate, so a bus carrying roughly 7 frames/s or better is detectable; raise it for a bus that only speaks when spoken to |
+| **A crystal and a bit rate multiply** | The registers for 250 kbit/s on an 8 MHz module produce 500 kbit/s on a 16 MHz one, and both decode the same wire perfectly. Nothing visible over SPI separates them, so detection sweeps the crystal **you configured** first and only then the other. A correct `CAN<n>_CRYSTAL_MHZ` therefore gives a correct bit rate; a wrong one still gets you a working bus, and a warning in the log that the reported rate is scaled by the same factor |
+| **It costs boot time** | Worst case — nothing on the bus — is every pair tried for `CAN_AUTODETECT_MS`, about 3 s per bus. Nothing is recorded during it: detection runs before the reader task exists and the frames it hears are thrown away |
+
+The log says which it was, and so does the Bus tab: `250 kbit/s detected` is a
+rate the bus confirmed, `250 kbit/s assumed` is a search that decoded nothing
+and fell back to `config.h`. Only the second is a reason to go and look at
+`CAN<n>_BITRATE_KBPS`.
 
 ---
 
@@ -880,10 +912,18 @@ python3 tools/preview_dashboard.py --cfg examples/dash.cfg
 
 # a logger with nothing on its card, which is a different page
 python3 tools/preview_dashboard.py --empty --no-dbc
+
+# one frame map per bus, as on the logger. Either can also be uploaded from
+# the page, from its own Frame map button.
+python3 tools/preview_dashboard.py --dbc examples/machine.dbc \
+                                   --dbc2 examples/example.dbc
+
+# what CAN<n>_AUTODETECT looks like on screen, without a bus to detect
+python3 tools/preview_dashboard.py --autodetect found     # or: fallback
 ```
 
-It prints what it loaded — `setup: 12 dashboard cells, 4 sendable values` — so an
-empty page is never a mystery.
+It prints what it loaded — `setup: 12 dashboard cells, 4 sendable values`, then
+a line per bus — so an empty page is never a mystery.
 
 ### Setting it up for your own bus, at a desk
 
@@ -898,8 +938,9 @@ python3 customize.py path/to/mine.dbc --role Tester    # if one of them is you
 **It never asks a question in the terminal.** With no argument the page opens
 empty and its own **Frame map: CAN 1** button loads a `.dbc` from wherever you
 keep it — the same button the logger itself has, so there is one way to do this
-rather than two. This tool holds one map, so the CAN 2 button says so rather
-than loading over it.
+rather than two. It holds one map per bus, as the logger does, so **Frame map:
+CAN 2** loads CAN 2's and neither disturbs the other; `--dbc2` names it on the
+command line.
 
 or **double-click `customize.py`** and pick your file — from the list it finds,
 or press **b** to open your computer's own file browser. On Windows,
@@ -1571,6 +1612,8 @@ run the same way and two MCP2515 modules rarely carry the same crystal:
 |---|---|---|
 | `CAN1_BITRATE_KBPS` / `CAN2_BITRATE_KBPS` | 250 / 250 | 100 / 125 / 250 / 500 / 1000, per bus |
 | `CAN1_CRYSTAL_MHZ` / `CAN2_CRYSTAL_MHZ` | 8 / 8 | Must match **that** MCP2515 board — check them separately |
+| `CAN1_AUTODETECT` / `CAN2_AUTODETECT` | 0 / 0 | 1 = find that bus's bit rate at boot instead of trusting the two settings above. See [Finding the bit rate itself](#finding-the-bit-rate-itself) |
+| `CAN_AUTODETECT_MS` / `CAN_AUTODETECT_FRAMES` | 300 / 2 | How long to listen at each candidate, and how many frames have to decode before it counts |
 | `CAN1_LISTEN_ONLY` / `CAN2_LISTEN_ONLY` | 0 / 0 | 1 = never drive that bus |
 | `CAN2_ENABLED` | 1 | 0 = run on single-bus hardware; the CSV keeps its bus column and always says `1` |
 | `DBC_PATH` / `DBC2_PATH` | `/frames.dbc` / `/frames2.dbc` | Where each bus's frame map lives |
@@ -1613,7 +1656,9 @@ Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 | `CAN1 CONTROLLER NOT RESPONDING` (or CAN2) | That module's wiring or power. The driver verifies the SPI link both ways at boot, so this means **its** CS, the shared MISO/MOSI, or 3V3 is wrong. The message names the bus and its pins. |
 | One controller answers, the other does not | If a second module **is** fitted: almost always the chip select — that is the only line that is not shared. Check the pin the message names, and that the two CS wires are not swapped. If one **is not** fitted, this is expected; see [§1](#running-it-with-one-bus). |
 | `NO CAN TRAFFIC ON EITHER BUS` | Both wrong at once is usually the shared wiring: SCK/MISO/MOSI, or 3V3. |
-| `NO CAN TRAFFIC` on one bus only | Wrong `CAN1_CRYSTAL_MHZ` / `CAN2_CRYSTAL_MHZ` for **that** module (8 vs 16), wrong bit rate for that bus, or that bus's CAN_H/CAN_L swapped. Two modules from one order can carry different crystals. |
+| `NO CAN TRAFFIC` on one bus only | Wrong `CAN1_CRYSTAL_MHZ` / `CAN2_CRYSTAL_MHZ` for **that** module (8 vs 16), wrong bit rate for that bus, or that bus's CAN_H/CAN_L swapped. Two modules from one order can carry different crystals. Set `CAN<n>_AUTODETECT 1` and let it find the rate — see [Finding the bit rate itself](#finding-the-bit-rate-itself). |
+| `CAN2 bit rate not detected` (or CAN1) | Detection heard nothing decodable at any rate. Usually there is simply no traffic — a quiet bus looks exactly like a wrong bit rate — so check a node is talking before doubting the rate. Wiring and the crystal are the other two. The `config.h` values are used meanwhile. |
+| `decoded only with a 16 MHz crystal, not the 8 MHz in config.h` | The bus reads fine, but the reported rate is scaled: a crystal and a bit rate multiply. Fix `CAN<n>_CRYSTAL_MHZ` to the crystal actually on that module and the rate in the log becomes the real one. |
 | `There is no pin marked D17` | Correct — that DevKit labels UART2 by function. CAN2's INT goes to the pin silkscreened **TX2**. |
 | `CAN2 INTERRUPT NOT FIRING` (or CAN1) | That bus's INT wire. Frames still arrive on the 20 ms fallback poll, which caps at ~100 frames/s — so this looks like "it works but slowly", which is why it is called out by name. |
 | `drain` approaching 200 µs in `N.log` | The margin in [§8](#8-why-it-does-not-lose-frames) is gone. Check `CAN_SPI_HZ` is 10 MHz and that nothing has been added to the reader task. |

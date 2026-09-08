@@ -135,6 +135,14 @@ bool MCP2515::setMode(uint8_t mode) {
  *  8 MHz : TQ = 2*(BRP+1)/8 MHz  = 250 ns -> 16 TQ = 4 us = 250 kbit/s
  *  16 MHz: TQ = 2*(BRP+1)/16 MHz = 250 ns -> 16 TQ = 4 us = 250 kbit/s
  * ---------------------------------------------------------------------- */
+/* Most common first: a search that has to try them all should reach the answer
+ * on its first window on most machines. Every entry here must appear in BOTH
+ * switch statements below - test/test_mcp2515.cpp asserts exactly that. */
+const uint16_t MCP_RATES[]      = { 500, 250, 125, 100, 1000 };
+const uint8_t  MCP_RATE_COUNT   = sizeof(MCP_RATES) / sizeof(MCP_RATES[0]);
+const uint8_t  MCP_CRYSTALS[]   = { 8, 16 };
+const uint8_t  MCP_CRYSTAL_COUNT = sizeof(MCP_CRYSTALS) / sizeof(MCP_CRYSTALS[0]);
+
 bool MCP2515::setBitrate(uint16_t kbps, uint8_t crystalMHz) {
   uint8_t cnf1, cnf2, cnf3;
 

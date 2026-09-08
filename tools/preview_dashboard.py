@@ -4,11 +4,14 @@ Run the dashboard in a normal browser, with no ESP32 and no CAN bus.
 
 The page is extracted straight out of src/webpage.cpp, so it can never drift
 from what the firmware actually serves, and every endpoint it talks to is
-simulated here: live signal values, the saved layout, the frame map the editor
-picks signals from, and the transmit path including its failure modes.
+simulated here: live signal values, the saved layout, ONE FRAME MAP PER BUS for
+the editor to pick signals from, and the transmit path including its failure
+modes. Either map can also be uploaded from the page, from its own Frame map
+button, exactly as on the logger.
 
     python3 tools/preview_dashboard.py --dbc examples/machine.dbc
     python3 tools/preview_dashboard.py --dbc examples/machine.dbc --cfg examples/dash.cfg
+    python3 tools/preview_dashboard.py --dbc a.dbc --dbc2 b.dbc   # one per bus
     python3 tools/preview_dashboard.py                    # no frame map at all
 
 Then open http://127.0.0.1:8080 and use it exactly as you would use the real
@@ -104,10 +107,9 @@ def _multipart_file(raw, ctype):
     the boundary and taking what is between the headers and the closing marker
     is enough, and pulling in `email` or `cgi` for it is not.
 
-    The name matters here in a way it does not on the logger, which has exactly
-    one card and calls it /frames.dbc. At a desk you load one map after
-    another, and the setup you build has to land beside the map it was built
-    for rather than in a single file that outlives all of them.
+    The bus the file is for comes from the query string, not from here - see
+    the /api/dbc handler, which keeps one map per bus just as the logger keeps
+    /frames.dbc and /frames2.dbc.
     """
     m = re.search(r'boundary=(?:"([^"]+)"|([^;]+))', ctype or "")
     if not m:
@@ -129,6 +131,15 @@ def _sig_of(line):
     """The Message.Signal a cell or sendable line names, or None."""
     m = re.search(r'sig=("([^"]*)"|(\S+))', line)
     return (m.group(2) or m.group(3)) if m else None
+
+
+def _bus_of(line):
+    """Which bus a cell or sendable line is about. Absent means CAN1, exactly
+    as src/dash.cpp reads it, so every layout written before the second bus
+    existed still means what it meant."""
+    m = re.search(r"\bbus=(\d+)", line)
+    b = int(m.group(1)) if m else 1
+    return b if 1 <= b <= 2 else 1
 
 
 def _override_ok(line, ref, by_ref):
@@ -159,8 +170,14 @@ def _strip_override(line):
     return re.sub(r"\s+(?:msel=(?:\"[^\"]*\"|\S+)|mxc=\S+)", "", line)
 
 
-def prune_cfg(text, by_ref, nodes):
-    """Everything in a setup that this frame map cannot account for, removed.
+def prune_cfg(text, byrefs, nodes):
+    """Everything in a setup that the frame maps cannot account for, removed.
+
+    `byrefs` is one Message.Signal index per bus, and a line is held to the map
+    of the bus it names - not to some union of the two. A cell reading CAN2 is
+    not made valid by CAN1's map happening to contain a signal of that name,
+    which is exactly the mistake that would put a cell on screen that never
+    updates.
 
     The same rule as dashDropUnresolved() in src/dash.cpp, and it has to STAY
     the same rule: a setup built here is copied onto the card, so a preview
@@ -175,6 +192,7 @@ def prune_cfg(text, by_ref, nodes):
         s = line.strip()
         if s.startswith("cell "):
             ref = _sig_of(s)
+            by_ref = byrefs[_bus_of(s) - 1]
             if not ref or ref not in by_ref:
                 dropped += 1
                 continue
@@ -182,6 +200,7 @@ def prune_cfg(text, by_ref, nodes):
             cells += 1
         elif s.startswith("send "):
             ref = _sig_of(s)
+            by_ref = byrefs[_bus_of(s) - 1]
             # A one-off frame names an identifier, not a signal, so no frame
             # map can invalidate it.
             if ref and ref not in by_ref:
@@ -311,8 +330,12 @@ def simulate(sig, t, over, shown=None):
     the layout being built is what this tool exists to show.
     """
     name = sig["n"]
-    if name in over:
-        return over[name]
+    # Keyed by bus as well as name: the two frame maps are different machines'
+    # worth of signals and both are free to call something "EngineSpeed". A
+    # value written on CAN2's Send tab must not appear in CAN1's gauge.
+    key = "%d:%s" % (sig.get("_bus", 1), name)
+    if key in over:
+        return over[key]
 
     lo = sig["lo"] if sig["r"] else sig["blo"]
     hi = sig["hi"] if sig["r"] else sig["bhi"]
@@ -411,6 +434,10 @@ def main():
     ap.add_argument("--dbc", default=str(ROOT / "examples" / "machine.dbc"),
                     help="frame map to show in the signal picker "
                          "(default: examples/machine.dbc)")
+    ap.add_argument("--dbc2", default=None,
+                    help="frame map for CAN2. The logger holds one per bus and "
+                         "so does this tool; leave it out to start with CAN2 "
+                         "unmapped and upload one from the page")
     ap.add_argument("--no-dbc", action="store_true",
                     help="show the page as it looks with no frame map at all")
     ap.add_argument("--cfg",
@@ -435,6 +462,13 @@ def main():
                          "MCP2515 and nothing answered. The page has to say "
                          "something different for each, so this is how that "
                          "gets looked at without unplugging hardware.")
+    ap.add_argument("--autodetect", default="off",
+                    choices=("off", "found", "fallback"),
+                    help="what CANn_AUTODETECT did, for looking at how the page "
+                         "reports it: 'found' is a bit rate the bus confirmed, "
+                         "'fallback' is a search that decoded nothing and used "
+                         "the config.h value. Only affects the words next to "
+                         "the rate.")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--run", default="",
                     help="JavaScript to run once the page has loaded. Only for "
@@ -463,9 +497,24 @@ def main():
         if seed.exists():
             seed_text = seed.read_text()
 
-    dbc = load_dbc(args.dbc)
-    flat = [s for m in dbc["m"] for s in m["s"]]
-    by_ref = {s["_msg"] + "." + s["n"]: s for s in flat}
+    # One frame map per bus, indexed 0 = CAN1, 1 = CAN2 - the same shape the
+    # firmware holds in g_dbc[]. This tool used to hold ONE, which made a CAN2
+    # upload either a lie (it replaced CAN1's map and then reported CAN2 as
+    # unmapped) or a refusal, and neither let anybody lay out a CAN2 cell at a
+    # desk. Every signal is tagged with the bus it came from, so a value can be
+    # attributed without carrying the index alongside it everywhere.
+    maps   = [load_dbc(args.dbc), load_dbc(args.dbc2)]
+    flats  = [[], []]
+    byrefs = [{}, {}]
+
+    def rebind(b):
+        flats[b] = [sg for m in maps[b]["m"] for sg in m["s"]]
+        for sg in flats[b]:
+            sg["_bus"] = b + 1
+        byrefs[b] = {sg["_msg"] + "." + sg["n"]: sg for sg in flats[b]}
+
+    rebind(0)
+    rebind(1)
 
     if args.cfg and Path(args.cfg).exists():
         start_cfg = Path(args.cfg).read_text()
@@ -474,7 +523,9 @@ def main():
     else:
         start_cfg = DEFAULT_CFG
     if args.role:
-        known = [n for n in dbc.get("nodes", [])]
+        # A role is the logger's identity, not a bus's, so it may be named by
+        # either map.
+        known = [n for m in maps for n in m.get("nodes", [])]
         if known and args.role not in known:
             sys.exit("--role %s is not a node in %s.  It names: %s"
                      % (args.role, args.dbc, ", ".join(known) or "(none)"))
@@ -530,7 +581,11 @@ def main():
                     hi = re.search(r'\bhi=(-?[\d.eE+-]+)', rest)
                     if lo and hi:
                         try:
-                            ranges[ref] = (float(lo.group(1)), float(hi.group(1)))
+                            # Keyed by bus as well, for the same reason the
+                            # overrides are: the same Message.Signal name can
+                            # exist on both buses with different ranges.
+                            ranges["%d:%s" % (buses[int(p[1])], ref)] = (
+                                float(lo.group(1)), float(hi.group(1)))
                         except ValueError:
                             pass
         return cols or 4, rows or 2, poll, cells, buses, ranges
@@ -558,16 +613,21 @@ def main():
         v, f = [], []
         for i in range(n):
             ref = cells.get(i)
+            bus = buses.get(i, 1)
+            by_ref = byrefs[bus - 1]
             if ref is None:
                 v.append(None)
                 f.append(0)
             elif ref not in by_ref:
-                v.append(False)          # configured, but not in this frame map
+                # Configured, but not in THAT BUS's frame map. Checked against
+                # the cell's own bus rather than either map, because a cell the
+                # logger would draw as unknown has to look unknown here too.
+                v.append(False)
                 f.append(0)
             else:
                 sg = by_ref[ref]
                 v.append(render(sg, simulate(sg, t, state["over"],
-                                             ranges.get(ref))))
+                                             ranges.get("%d:%s" % (bus, ref)))))
                 f.append(1)
         d = {
             "gen": state["gen"], "poll": poll,
@@ -605,37 +665,60 @@ def main():
     def make_status():
         t = time.time() - t0
         _, _, _, _, _, ranges = parse_cells(state["cfg"])
-        sig = []
-        for s in flat[:48]:
-            ref = s["_msg"] + "." + s["n"]
-            sig.append({"m": s["_msg"], "s": s["n"], "u": s["u"],
-                        "v": render(s, simulate(s, t, state["over"],
-                                                ranges.get(ref)))})
-        ids = [{"id": m["id"], "d": "%016X" % (random.getrandbits(64)),
-                "n": int(t * 50), "r": 50, "k": True} for m in dbc["m"]]
-        ids.append({"id": "0x3FF", "d": "11223344", "n": int(t * 8), "r": 8,
-                    "k": False})
 
-        fps = 50 * max(1, len(dbc["m"])) + 8
+        def bus_sig(b):
+            """The live-signal list for one bus, out of that bus's own map."""
+            out = []
+            for sg in flats[b][:48]:
+                ref = sg["_msg"] + "." + sg["n"]
+                out.append({"m": sg["_msg"], "s": sg["n"], "u": sg["u"],
+                            "v": render(sg, simulate(
+                                sg, t, state["over"],
+                                ranges.get("%d:%s" % (b + 1, ref))))})
+            return out
 
-        # Two controllers. CAN1 carries the frame map and the invented traffic;
-        # CAN2 is deliberately given a DIFFERENT rate, a different load and no
-        # frame map, because a preview where both buses look identical is a
-        # preview that cannot show whether the page distinguishes them.
+        def bus_ids(b, rate, extra):
+            """Identifiers seen on one bus: the ones its map describes, plus one
+            it does not - a logger that only ever showed known identifiers
+            would be hiding the thing you go to this table to find."""
+            out = [{"id": m["id"], "d": "%016X" % (random.getrandbits(64)),
+                    "n": int(t * rate), "r": rate, "k": True}
+                   for m in maps[b]["m"]]
+            out.append(extra)
+            return out
+
+        # Deliberately different rates and loads on the two controllers: a
+        # preview where both buses look identical is a preview that cannot show
+        # whether the page distinguishes them.
+        fps  = 50 * max(1, len(maps[0]["m"])) + 8
+        fps2 = int(fps * 0.4)
+
+        # What CANn_AUTODETECT would have reported. Same two flags the firmware
+        # sends, because "500 kbit/s" the bus confirmed and "500 kbit/s"
+        # somebody typed read the same on screen unless the page says otherwise.
+        auto   = 0 if args.autodetect == "off" else 1
+        autoOk = 1 if args.autodetect == "found" else 0
+
         can = [
-            {"b": 1, "on": 1, "en": 1, "kbps": 250, "send": 1, "alive": 1,
+            {"b": 1, "on": 1, "en": 1, "kbps": 250, "xtal": 8,
+             "auto": auto, "autoOk": autoOk, "send": 1, "alive": 1,
              "fps": fps, "irq": fps, "intStuck": 0, "intLevel": 1, "load": 14,
              "ovf": 0, "ovfEv": 0, "sticky": 0,
-             "dbc": dbc["loaded"], "dbcMsg": len(dbc["m"]), "dbcSig": len(flat),
-             "ids": ids, "idMore": 0, "sig": sig, "sigMore": 0},
-            {"b": 2, "on": can2_on, "en": can2_en, "kbps": 500, "send": 1,
+             "dbc": maps[0]["loaded"], "dbcMsg": len(maps[0]["m"]),
+             "dbcSig": len(flats[0]),
+             "ids": bus_ids(0, 50, {"id": "0x3FF", "d": "11223344",
+                                    "n": int(t * 8), "r": 8, "k": False}),
+             "idMore": 0, "sig": bus_sig(0), "sigMore": 0},
+            {"b": 2, "on": can2_on, "en": can2_en, "kbps": 500, "xtal": 8,
+             "auto": auto, "autoOk": autoOk, "send": 1,
              "alive": can2_on,
-             "fps": int(fps * 0.4), "irq": int(fps * 0.4), "intStuck": 0,
+             "fps": fps2, "irq": fps2, "intStuck": 0,
              "intLevel": 1, "load": 42, "ovf": 0, "ovfEv": 0, "sticky": 0,
-             "dbc": 0, "dbcMsg": 0, "dbcSig": 0,
-             "ids": [{"id": "0x18FF5001", "d": "0A0B0C0D", "n": int(t * 20),
-                      "r": 20, "k": False}],
-             "idMore": 0, "sig": [], "sigMore": 0},
+             "dbc": maps[1]["loaded"], "dbcMsg": len(maps[1]["m"]),
+             "dbcSig": len(flats[1]),
+             "ids": bus_ids(1, 20, {"id": "0x18FF5001", "d": "0A0B0C0D",
+                                    "n": int(t * 20), "r": 20, "k": False}),
+             "idMore": 0, "sig": bus_sig(1), "sigMore": 0},
         ]
 
         return {
@@ -654,8 +737,8 @@ def main():
     base_log = [
         "[     0.412] I ==== Dual CAN Logger ESP32 v%s ====" % firmware_version(),
         "[     0.690] I SD card OK: SDHC, 15193 MB",
-        (f"[     0.735] I frame map: {len(dbc['m'])} messages, {len(flat)} "
-         f"signals from /frames.dbc") if flat else
+        (f"[     0.735] I frame map: {len(maps[0]['m'])} messages, "
+         f"{len(flats[0])} signals from /frames.dbc") if flats[0] else
         "[     0.735] I no /frames.dbc on the card - recording raw payload bytes.",
         "[     0.780] I dashboard layout read from flash",
         "[     0.802] I CAN1 controller OK: 250 kbit/s, normal mode "
@@ -693,20 +776,21 @@ def main():
             elif p == "/api/dash/cfg":
                 self._send(state["cfg"], "text/plain")
             elif p == "/api/signals":
-                # Only CAN1 has a frame map in this preview, matching what
-                # make_status() reports - a page that offered signals for a bus
-                # it just said had no map would be previewing a lie.
+                # Each bus answers out of its own map, and an unmapped bus
+                # answers empty rather than borrowing the other one's - the
+                # page has to be able to show a logger with a map on one bus
+                # only, which is the normal case on a real machine.
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 bus = int((qs.get("bus") or ["1"])[0])
-                self._json(dict(dbc, bus=bus) if bus == 1
-                           else {"bus": bus, "loaded": 0, "nodes": [], "m": []})
+                bus = bus if 1 <= bus <= 2 else 1
+                self._json(dict(maps[bus - 1], bus=bus))
             elif p == "/api/log":
                 m = re.search(r"since=(\d+)", self.path)
                 since = int(m.group(1)) if m else 0
                 tick = int(time.time() - t0)
                 lines = base_log + [
                     f"[{i:10.3f}] I REC 1.csv 00:00:{i:02d} | {i*220} rows "
-                    f"{i*15} KB | 220 f/s | {len(dbc['m'])+1} ids | lost 0"
+                    f"{i*15} KB | 220 f/s | {len(maps[0]['m'])+1} ids | lost 0"
                     for i in range(2, tick + 2)
                 ]
                 self._json({"seq": len(lines), "lines": lines[since:]})
@@ -731,24 +815,21 @@ def main():
             form = dict(urllib.parse.parse_qsl(body))
 
             if p == "/api/dbc":
-                nonlocal dbc, flat, by_ref
-                # This tool holds ONE frame map, the CAN1 one, which is what
-                # /api/signals reports. Accepting a CAN2 upload would replace
-                # that map and then answer the next CAN2 request with nothing -
-                # the page would say it had loaded and show an empty bus. Say
-                # so instead; the logger itself takes both.
+                # Which bus's map this replaces. The page puts it in the query
+                # string, and the logger reads it the same way; a request
+                # without one means CAN1, so nothing that predates the second
+                # bus changes meaning.
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                if int((qs.get("bus") or ["1"])[0]) != 1:
-                    self._json({"ok": 0, "err": "this desk tool holds one frame "
-                                               "map, the CAN 1 one - the logger "
-                                               "takes both"})
-                    return
+                bus = int((qs.get("bus") or ["1"])[0])
+                bus = bus if 1 <= bus <= 2 else 1
+
                 name, data = _multipart_file(raw,
                                              self.headers.get("Content-Type", ""))
                 if not data:
                     self._json({"ok": 0, "err": "the upload did not finish"})
                     return
-                tmp = Path(tempfile.gettempdir()) / "preview-frames.dbc"
+                tmp = (Path(tempfile.gettempdir())
+                       / ("preview-frames%d.dbc" % bus))
                 tmp.write_bytes(data)
                 try:
                     new = load_dbc(str(tmp))
@@ -758,32 +839,43 @@ def main():
                 if not new["m"]:
                     self._json({"ok": 0, "err": "no BO_ messages in that file"})
                     return
-                dbc = new
-                flat = [sg for m in dbc["m"] for sg in m["s"]]
-                by_ref = {sg["_msg"] + "." + sg["n"]: sg for sg in flat}
-                args.dbc = str(tmp)
-                print("frame map replaced from the web app: "
-                      "%d messages, %d signals" % (len(dbc["m"]), len(flat)),
-                      flush=True)
 
-                # Whatever setup is in hand is held to the new map, by the same
-                # rule the firmware applies in dashDropUnresolved(). Nothing is
-                # WRITTEN: loading a frame map is not a decision to keep the
-                # result, and a tool that pairs a .cfg with every .dbc it is
-                # shown leaves files in the directories it was pointed at and
-                # opens on a setup nobody asked for. Save from the page when
+                maps[bus - 1] = new
+                rebind(bus - 1)
+                if bus == 1:
+                    args.dbc = str(tmp)
+                else:
+                    args.dbc2 = str(tmp)
+                print("CAN%d frame map replaced from the web app: "
+                      "%d messages, %d signals"
+                      % (bus, len(new["m"]), len(flats[bus - 1])), flush=True)
+
+                # Whatever setup is in hand is held to the new maps, by the same
+                # rule the firmware applies in dashDropUnresolved(). Both are
+                # passed, not just the one that changed: the other bus's cells
+                # are still valid and must survive, which is precisely what a
+                # single-map version of this tool got wrong.
+                #
+                # Nothing is WRITTEN: loading a frame map is not a decision to
+                # keep the result, and a tool that pairs a .cfg with every .dbc
+                # it is shown leaves files in the directories it was pointed at
+                # and opens on a setup nobody asked for. Save from the page when
                 # the result is worth keeping.
-                state["cfg"], gone = prune_cfg(state["cfg"], by_ref,
-                                               dbc.get("nodes", []))
+                nodes = [n for m in maps for n in m.get("nodes", [])]
+                state["cfg"], gone = prune_cfg(state["cfg"], byrefs, nodes)
                 state["gen"] += 1
-                state["over"] = {}       # overrides named the old map's signals
+                # Only this bus's overrides: a value written on the OTHER bus
+                # still names a signal its own map describes.
+                state["over"] = {k: v for k, v in state["over"].items()
+                                 if not k.startswith("%d:" % bus)}
                 if gone:
                     print("held to the new map: %d item(s) it does not describe "
                           "removed - nothing written" % gone, flush=True)
 
                 self._json({"ok": 1, "bytes": len(data),
-                            "messages": len(dbc["m"]), "signals": len(flat),
-                            "nodes": len(dbc.get("nodes", [])),
+                            "messages": len(new["m"]),
+                            "signals": len(flats[bus - 1]),
+                            "nodes": len(new.get("nodes", [])),
                             "errors": 0, "inexact": 0, "missing": 0,
                             "dropped": gone, "clipped": 0})
                 return
@@ -826,19 +918,20 @@ def main():
                     ids = [int(x) for x in form["cmds"].split(",") if x != ""]
                     vals = [float(x or 0) for x in form.get("values", "").split(",")]
                     for cmd, val in zip(ids, vals):
-                        ref = self._ref_for(cmd)
-                        if ref and ref in by_ref:
-                            state["over"][by_ref[ref]["n"]] = val
+                        ref, bus = self._ref_for(cmd)
+                        if ref and ref in byrefs[bus - 1]:
+                            state["over"]["%d:%s" % (bus, ref.split(".")[-1])] = val
                     self._json({"ticket": add_result(0, "0x110",
                                                      cmd=ids[0] if ids else 0),
                                 "n": state["ticket"]})
                     return
                 cmd = int(form.get("cmd", 0))
                 val = float(form.get("value", 0) or 0)
-                ref = self._ref_for(cmd)
-                if ref and ref in by_ref:
-                    # Show the effect: the simulated bus now reports what was set.
-                    state["over"][by_ref[ref]["n"]] = val
+                ref, bus = self._ref_for(cmd)
+                if ref and ref in byrefs[bus - 1]:
+                    # Show the effect: the simulated bus now reports what was
+                    # set - on the bus the setpoint names, and only there.
+                    state["over"]["%d:%s" % (bus, ref.split(".")[-1])] = val
                 self._json({"ticket": add_result(0, "0x110", cmd=cmd),
                             "n": state["ticket"]})
 
@@ -854,26 +947,33 @@ def main():
                 self._json({"ok": 1})
 
         def _ref_for(self, cmd):
+            """(Message.Signal, bus) for one sendable value, or (None, 1)."""
             for line in state["cfg"].splitlines():
                 if line.startswith(f"send {cmd} "):
                     m = re.search(r'sig=("([^"]*)"|(\S+))', line)
                     if m:
-                        return m.group(2) or m.group(3)
-            return None
+                        return (m.group(2) or m.group(3)), _bus_of(line)
+            return None, 1
 
         def log_message(self, *a):
             pass
 
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("127.0.0.1", args.port), H) as srv:
-        mode = f"frame map: {args.dbc}" if flat else "no frame map"
+        mode = f"frame map: {args.dbc}" if flats[0] else "no frame map"
         print(f"dashboard preview ({mode}) -> http://127.0.0.1:{args.port}", flush=True)
         cells = sum(1 for l in state["cfg"].splitlines() if l.startswith("cell "))
         sends = sum(1 for l in state["cfg"].splitlines() if l.startswith("send "))
         print(f"setup: {cells} dashboard cells, {sends} sendable values", flush=True)
-        if flat:
-            msgs = len(dbc["m"])
-            print(f"frame map: {msgs} messages, {len(flat)} signals")
+        # Named per bus, because "frame map: 7 messages" with two buses in play
+        # does not say which bus is mapped - and that is the question.
+        for b in (0, 1):
+            if flats[b]:
+                print("CAN%d frame map: %d messages, %d signals"
+                      % (b + 1, len(maps[b]["m"]), len(flats[b])))
+            else:
+                print("CAN%d has no frame map - upload one from the page"
+                      % (b + 1))
         if args.cfg:
             print(f"changes are written back to {args.cfg}")
         if own_dbc and not cells:

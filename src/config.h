@@ -108,6 +108,54 @@
 #define CAN1_CRYSTAL_MHZ    8       /* 8 or 16 */
 #define CAN2_CRYSTAL_MHZ    8
 
+/* Find this bus's bit rate and crystal at boot instead of trusting the two
+ * settings above.
+ *
+ *  1 = listen at each (bit rate, crystal) pair the driver has timings for and
+ *      keep the first one that decodes real frames. The pair configured above
+ *      is tried FIRST, so a correct config.h costs one window and usually far
+ *      less - a busy bus answers in a few milliseconds.
+ *  0 = use the settings above, unconditionally.
+ *
+ * Detection is done in LISTEN-ONLY mode whatever CANn_LISTEN_ONLY says: a
+ * wrong bit rate on a live bus would otherwise make this logger flood it with
+ * error frames while it guesses, which is exactly the damage a diagnostic tool
+ * must not do. It also needs TRAFFIC - a quiet bus is indistinguishable from a
+ * wrong bit rate, and on a quiet bus detection fails and the settings above
+ * are used. That is the whole failure mode: it never leaves the bus
+ * unconfigured.
+ *
+ * WHAT IT CAN GET WRONG. A crystal and a bit rate multiply: the registers for
+ * 250 kbit/s on an 8 MHz module produce 500 kbit/s on a 16 MHz one. Both
+ * decode the same wire perfectly, so detection cannot tell them apart, and it
+ * would report the pair it happened to try first. It therefore sweeps the
+ * crystal set HERE first and only then the other one - which means a correct
+ * CANn_CRYSTAL_MHZ above gives a correct bit rate in the log, and a wrong one
+ * still gets you a working bus with a warning that the reported rate is scaled
+ * by the same factor. If the reported rate is not the rate you expect, the
+ * crystal setting is what to fix.
+ *
+ * The cost is boot time: worst case (nothing on the bus) is every pair tried
+ * for CAN_AUTODETECT_MS, about 3 s per bus. Nothing is recorded during that
+ * time - detection runs before the reader task exists and the frames it hears
+ * are thrown away. */
+#define CAN1_AUTODETECT     0
+#define CAN2_AUTODETECT     0
+
+/* How long to listen at each candidate pair, and how many frames have to
+ * decode before it counts as the answer.
+ *
+ * Two frames, not one: at a wrong bit rate the CRC check makes a whole valid
+ * frame essentially impossible, but "essentially" is not "never", and a single
+ * fluke would otherwise pick the wrong rate for the entire recording.
+ *
+ * 300 ms therefore needs a bus carrying roughly 7 frames/s or better to be
+ * detectable, which covers any machine with a running controller on it. Raise
+ * it for a bus that only speaks when spoken to; that multiplies the worst-case
+ * boot delay above by the same factor. */
+#define CAN_AUTODETECT_MS   300
+#define CAN_AUTODETECT_FRAMES 2
+
 /* 0 = normal mode: the logger acknowledges frames, which is what you want when
  *     it is the only other node on the bus (otherwise the talker goes
  *     error-passive and eventually bus-off).

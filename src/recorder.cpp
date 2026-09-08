@@ -650,10 +650,15 @@ static void statusTick() {
     for (uint8_t b = 0; b < CAN_BUSES; b++) if (g_rec.bus[b].present) live++;
 
     if (live > 1) {
+      /* The rates each bus is RUNNING at, not the ones in config.h: with
+       * CANn_AUTODETECT those differ, and a warning that names a rate the
+       * controller is not using sends somebody to change a setting that was
+       * never in play. */
       LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC ON EITHER BUS - check the "
                          "wiring, the bit rates (%u / %u kbit/s) and the "
                          "crystal setting of each module", state,
-               (unsigned)CAN1_BITRATE_KBPS, (unsigned)CAN2_BITRATE_KBPS);
+               (unsigned)g_rec.bus[0].bitrateKbps,
+               (unsigned)g_rec.bus[1].bitrateKbps);
     } else if (live == 1) {
       const uint8_t only = g_rec.bus[0].present ? 0 : 1;
       LOG_LIVE(LVL_WARN, "%s | NO CAN TRAFFIC on CAN%u (the only controller "

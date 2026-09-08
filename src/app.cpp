@@ -86,10 +86,16 @@ static MCP2515  s_can2(s_canSpi, PIN_CAN2_CS, CAN_SPI_HZ);
  * cores have shipped. */
 static MCP2515 *const s_can[CAN_BUSES]      = { &s_can1, &s_can2 };
 static const uint8_t  s_intPin[CAN_BUSES]   = { PIN_CAN1_INT, PIN_CAN2_INT };
-static const uint16_t s_bitrate[CAN_BUSES]  = { CAN1_BITRATE_KBPS, CAN2_BITRATE_KBPS };
-static const uint8_t  s_crystal[CAN_BUSES]  = { CAN1_CRYSTAL_MHZ, CAN2_CRYSTAL_MHZ };
+/* Not const: with CANn_AUTODETECT these hold what the search found, and every
+ * later user of them - the log line, the health card, the "no traffic" hint -
+ * has to see the rate the bus is actually running at rather than the guess it
+ * started from. */
+static uint16_t s_bitrate[CAN_BUSES]        = { CAN1_BITRATE_KBPS, CAN2_BITRATE_KBPS };
+static uint8_t  s_crystal[CAN_BUSES]        = { CAN1_CRYSTAL_MHZ, CAN2_CRYSTAL_MHZ };
 static const bool     s_listen[CAN_BUSES]   = { CAN1_LISTEN_ONLY, CAN2_LISTEN_ONLY };
 static const bool     s_enabled[CAN_BUSES]  = { true, CAN2_ENABLED ? true : false };
+static const bool     s_autoDet[CAN_BUSES]  = { CAN1_AUTODETECT ? true : false,
+                                                CAN2_AUTODETECT ? true : false };
 
 static TaskHandle_t s_canTask = nullptr;
 
@@ -142,6 +148,91 @@ static inline uint64_t popTimestamp(uint8_t b) {
     return t;
   }
   return (uint64_t)esp_timer_get_time();
+}
+
+/* ---- finding a bus's bit rate ------------------------------------------- */
+/* Listen at one (bit rate, crystal) pair and report how many whole frames
+ * decoded. A frame only reaches a receive buffer after its CRC has passed, so
+ * this is not "did the line wiggle" - at the wrong bit rate the count stays at
+ * zero however busy the bus is, which is what makes the search possible at
+ * all.
+ *
+ * LISTEN-ONLY, always, whatever this bus is configured for: at the wrong bit
+ * rate a normal-mode node reads valid traffic as malformed and answers with
+ * error frames, and a diagnostic logger that corrupts the bus while it works
+ * out how to read it would be worse than no logger. Listen-only never drives
+ * the wire, so every wrong guess here is silent.
+ *
+ * Runs during setup, before the reader task and the interrupts exist, so
+ * draining the controller by hand here cannot race anything - and the frames
+ * it hears are discarded rather than recorded, which is honest: nobody asked
+ * to log a bus at a bit rate that had not been established yet. */
+static uint16_t autoListen(MCP2515 &can, uint16_t kbps, uint8_t crystalMHz) {
+  /* begin() reprograms the timing and leaves the chip silent in configuration
+   * mode; it fails only for a pair the driver has no timings for, which the
+   * caller's tables already exclude. */
+  if (!can.begin(kbps, crystalMHz))  return 0;
+  if (!can.startReceiving(true))     return 0;
+
+  uint16_t   frames = 0;
+  CanFrame   f;
+  const uint32_t deadline = millis() + CAN_AUTODETECT_MS;
+
+  while ((int32_t)(millis() - deadline) < 0) {
+    while (can.readFrame(f)) {
+      if (++frames >= CAN_AUTODETECT_FRAMES) return frames;
+    }
+    /* At a wrong bit rate this is where the evidence piles up - overflow and
+     * message-error flags, sticky and interrupt-latching. Cleared so the next
+     * candidate starts from a clean chip rather than inheriting the last one's
+     * complaints. */
+    can.clearErrorInterrupts();
+    can.takeRxOverflow();
+    delay(1);
+  }
+  return frames;
+}
+
+/* Walk the pairs and keep the first that decodes. Returns true and writes back
+ * through `kbps`/`crystalMHz`; leaves both alone when nothing decoded, so the
+ * caller's config.h values survive a failed search untouched.
+ *
+ * Order matters and is not arbitrary. The configured pair goes first, so a
+ * correct config.h is confirmed in one window instead of paying for the whole
+ * sweep. Then the rest of the CONFIGURED crystal's rates, and only then the
+ * other crystal - because a crystal and a bit rate multiply, and 250 kbit/s
+ * timings on an 8 MHz part decode a 500 kbit/s bus on a 16 MHz one perfectly.
+ * Nothing visible over SPI separates those two cases, so the search cannot
+ * discover the crystal; what it can do is trust the one in config.h first, and
+ * say so when it had to fall back to the other. */
+static bool autoDetect(MCP2515 &can, uint8_t b,
+                       uint16_t *kbps, uint8_t *crystalMHz) {
+  const uint16_t wantKbps = *kbps;
+  const uint8_t  wantXtal = *crystalMHz;
+
+  /* Both loops run one extra step, with index 0 meaning "what config.h says"
+   * and the rest walking the driver's tables while skipping that same value.
+   * Written the same way twice so the two orderings read as one rule. */
+  for (uint8_t ci = 0; ci <= MCP_CRYSTAL_COUNT; ci++) {
+    const uint8_t x = (ci == 0) ? wantXtal : MCP_CRYSTALS[ci - 1];
+    if (ci && x == wantXtal) continue;           /* already tried, first */
+
+    for (uint8_t ri = 0; ri <= MCP_RATE_COUNT; ri++) {
+      const uint16_t r = (ri == 0) ? wantKbps : MCP_RATES[ri - 1];
+      if (ri && r == wantKbps) continue;         /* already tried, first */
+
+      const uint16_t got = autoListen(can, r, x);
+      LOG_FILE(LVL_DEBUG, "CAN%u autodetect: %u kbit/s @ %u MHz -> %u frame(s)",
+               (unsigned)(b + 1), (unsigned)r, (unsigned)x, (unsigned)got);
+
+      if (got >= CAN_AUTODETECT_FRAMES) {
+        *kbps = r;
+        *crystalMHz = x;
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /* ---- CAN reader task ---------------------------------------------------- */
@@ -432,7 +523,9 @@ void appSetup() {
     BusHealth &h = g_rec.bus[b];
     h.enabled     = s_enabled[b];
     h.bitrateKbps = s_bitrate[b];
+    h.crystalMHz  = s_crystal[b];
     h.listenOnly  = s_listen[b];
+    h.autoDetect  = s_enabled[b] && s_autoDet[b];
 
     if (!s_enabled[b]) {
       LOG_LIVE(LVL_INFO, "CAN%u disabled in config.h - running single-bus",
@@ -446,6 +539,63 @@ void appSetup() {
      * startReceiving() below, once the reader task and the ISRs exist. */
     if (s_can[b]->begin(s_bitrate[b], s_crystal[b])) {
       h.present = true;
+
+      /* Only now, with the controller proven to answer, is it worth listening
+       * for the bus's own bit rate - a search against a chip that is not there
+       * would just be ten silent windows and a misleading warning. */
+      if (h.autoDetect) {
+        uint16_t kbps = s_bitrate[b];
+        uint8_t  xtal = s_crystal[b];
+        const uint8_t cfgXtal = s_crystal[b];   /* before the search moves it */
+
+        LOG_LIVE(LVL_INFO, "CAN%u listening for its bit rate (up to %u ms per "
+                           "candidate, listen-only)...",
+                 (unsigned)(b + 1), (unsigned)CAN_AUTODETECT_MS);
+
+        h.autoFound = autoDetect(*s_can[b], b, &kbps, &xtal);
+
+        if (h.autoFound) {
+          s_bitrate[b] = kbps;
+          s_crystal[b] = xtal;
+          LOG_LIVE(LVL_INFO, "CAN%u detected: %u kbit/s (%u MHz crystal)",
+                   (unsigned)(b + 1), (unsigned)kbps, (unsigned)xtal);
+          if (xtal != cfgXtal) {
+            /* The one case where the number above is a working setting rather
+             * than a measurement: a crystal and a bit rate multiply, so if
+             * this module's crystal is really the configured one, the true
+             * rate is this rate scaled by the ratio between them. Said out
+             * loud, because a CSV labelled with the wrong bit rate is the kind
+             * of quiet error that survives into a report. */
+            LOG_LIVE(LVL_WARN, "CAN%u decoded only with a %u MHz crystal, not "
+                               "the %u MHz in config.h. The bus is readable "
+                               "either way, but if this module really carries "
+                               "%u MHz then the real rate is not %u kbit/s - "
+                               "fix CAN%u_CRYSTAL_MHZ and the rate will be "
+                               "right too.",
+                     (unsigned)(b + 1), (unsigned)xtal,
+                     (unsigned)cfgXtal, (unsigned)cfgXtal,
+                     (unsigned)kbps, (unsigned)(b + 1));
+          }
+        } else {
+          LOG_LIVE(LVL_WARN, "CAN%u bit rate not detected - nothing decoded at "
+                             "any rate this driver knows. Using config.h: %u "
+                             "kbit/s, %u MHz crystal. A bus with no traffic on "
+                             "it looks exactly like this, so check there is a "
+                             "node talking before doubting the rate.",
+                   (unsigned)(b + 1), (unsigned)s_bitrate[b],
+                   (unsigned)s_crystal[b]);
+        }
+
+        /* Back to configuration mode, programmed with the pair that will
+         * actually be used. The search left the chip listening, and the boot
+         * sequence's whole point is that no bus is open until the reader task
+         * and the ISRs exist. */
+        s_can[b]->begin(s_bitrate[b], s_crystal[b]);
+
+        h.bitrateKbps = s_bitrate[b];
+        h.crystalMHz  = s_crystal[b];
+      }
+
       LOG_LIVE(LVL_INFO, "CAN%u controller OK: %u kbit/s, %s mode "
                          "(not listening yet)",
                (unsigned)(b + 1), (unsigned)s_bitrate[b],

@@ -26,6 +26,7 @@
 
 #include "Arduino.h"
 #include "SPI.h"
+#include "config.h"
 #include "mcp2515.h"
 
 static int failures = 0;
@@ -594,6 +595,49 @@ int main() {
 
     ck("still no misrouted transaction", bus.misroutes == 0,
        hex((uint8_t)bus.misroutes));
+  }
+
+  printf("\n== the bit rates a search may try ==\n");
+  {
+    /* MCP_RATES / MCP_CRYSTALS are what CANn_AUTODETECT sweeps. Every pair in
+     * them must be a pair setBitrate() will actually program: a candidate the
+     * driver quietly rejects is a candidate never listened at, and a bus
+     * running at that rate would be reported as undetectable while the tables
+     * still claimed to cover it. Nothing else in the firmware would notice, so
+     * it is asserted here. */
+    FakeMcp fakeR;
+    MCP2515 can(fakeR, 5, 10000000UL);
+
+    ck("the tables are not empty",
+       MCP_RATE_COUNT > 0 && MCP_CRYSTAL_COUNT > 0);
+
+    bool allProgram = true;
+    for (uint8_t c = 0; c < MCP_CRYSTAL_COUNT; c++) {
+      for (uint8_t r = 0; r < MCP_RATE_COUNT; r++) {
+        if (!can.begin(MCP_RATES[r], MCP_CRYSTALS[c])) {
+          char note[64];
+          snprintf(note, sizeof(note), "%u kbit/s @ %u MHz",
+                   (unsigned)MCP_RATES[r], (unsigned)MCP_CRYSTALS[c]);
+          ck("this pair has no timings", false, note);
+          allProgram = false;
+        }
+      }
+    }
+    ck("every advertised pair programs", allProgram);
+
+    /* And the negative case, so the check above is not passing because
+     * begin() accepts anything. */
+    ck("a rate with no timings is refused", !can.begin(333, 8));
+    ck("a crystal with no timings is refused", !can.begin(500, 12));
+
+    /* The configured pair is tried first by the search, so the pair a correct
+     * config.h names has to be in the table too - otherwise the fast path is
+     * the one path that never runs. */
+    bool defaultsCovered = false;
+    for (uint8_t r = 0; r < MCP_RATE_COUNT; r++) {
+      if (MCP_RATES[r] == CAN1_BITRATE_KBPS) defaultsCovered = true;
+    }
+    ck("config.h's own default rate is one of them", defaultsCovered);
   }
 
   printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASSED", failures);

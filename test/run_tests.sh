@@ -430,15 +430,20 @@ static std::string slurp(const char *path) {
 int main(int argc, char **argv) {
   if (argc < 3) return 1;
   const std::string ctext = slurp(argv[1]), dtext = slurp(argv[2]);
+  /* A third path gives CAN2 a DIFFERENT map, which is the case where per-bus
+   * resolution can go wrong: a cell reading CAN2 must be held to CAN2's map
+   * and not rescued by CAN1's happening to describe a signal of that name. */
+  const std::string dtext2 = (argc > 3) ? slurp(argv[3]) : dtext;
 
   DashConfig cfg;
   dashReset(cfg);
   dashParse(cfg, ctext.data(), ctext.size());
-  DbcDb db = {};
-  dbcLoadText(db, dtext.c_str(), dtext.size());
+  DbcDb db = {}, db2 = {};
+  dbcLoadText(db,  dtext.c_str(),  dtext.size());
+  dbcLoadText(db2, dtext2.c_str(), dtext2.size());
 
   DbcDb maps[CAN_BUSES];
-  for (int i = 0; i < CAN_BUSES; i++) maps[i] = db;
+  for (int i = 0; i < CAN_BUSES; i++) maps[i] = (i == 0) ? db : db2;
 
   printf("dropped\t%u\n", (unsigned)dashDropUnresolved(cfg, maps));
   printf("role\t%s\n", cfg.role);
@@ -453,15 +458,22 @@ PRUNE
 
 for f in "$here"/../examples/*.dbc; do
     "$out/t_prune" "$here/../examples/dash.cfg" "$f" > "$out/prune.txt" 2>/dev/null
-    python3 - "$here/../examples/dash.cfg" "$f" "$out/prune.txt" <<'SAME' || fail=1
+    python3 - "$here/../examples/dash.cfg" "$f" "$out/prune.txt" "$f" <<'SAME' || fail=1
 import os, sys
 sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
 from preview_dashboard import load_dbc, prune_cfg, _sig_of
 
 cfg_path, dbc_path, cdump = sys.argv[1], sys.argv[2], sys.argv[3]
-db = load_dbc(dbc_path)
-by_ref = {m["n"] + "." + s["n"]: s for m in db["m"] for s in m["s"]}
-text, gone = prune_cfg(open(cfg_path).read(), by_ref, db.get("nodes", []))
+dbc2_path = sys.argv[4] if len(sys.argv) > 4 else dbc_path
+
+
+def index(db):
+    return {m["n"] + "." + s["n"]: s for m in db["m"] for s in m["s"]}
+
+
+db, db2 = load_dbc(dbc_path), load_dbc(dbc2_path)
+nodes = list(db.get("nodes", [])) + list(db2.get("nodes", []))
+text, gone = prune_cfg(open(cfg_path).read(), [index(db), index(db2)], nodes)
 
 mine = ["dropped\t%d" % gone]
 role = [l.split(None, 1)[1].strip('"') for l in text.splitlines()
@@ -489,6 +501,69 @@ for a, b in zip(mine + [""] * len(theirs), theirs + [""] * len(mine)):
 sys.exit(1)
 SAME
 done
+
+# The same rule again, but with a DIFFERENT map on each bus and a layout that
+# reads from both. This is the case the desk tool used to get wrong: it held one
+# frame map, so a CAN2 cell was judged against CAN1's signals - which either
+# kept a cell that will never update, or dropped one that was fine. Half the
+# cells are retagged to CAN2 here, against a map that does not describe them, so
+# an implementation that consults the wrong bus disagrees loudly.
+python3 - "$here/../examples/dash.cfg" "$out/cross.cfg" <<'RETAG'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+out, n = [], 0
+for line in open(src).read().splitlines():
+    if line.startswith("cell "):
+        if n % 2:
+            line += " bus=2"
+        n += 1
+    out.append(line)
+open(dst, "w").write("\n".join(out) + "\n")
+RETAG
+
+"$out/t_prune" "$out/cross.cfg" "$here/../examples/machine.dbc" \
+               "$here/../examples/example.dbc" > "$out/prune2.txt" 2>/dev/null
+python3 - "$out/cross.cfg" "$here/../examples/machine.dbc" "$out/prune2.txt" \
+         "$here/../examples/example.dbc" <<'SAME2' || fail=1
+import os, sys
+sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
+from preview_dashboard import load_dbc, prune_cfg, _sig_of
+
+cfg_path, dbc_path, cdump, dbc2_path = sys.argv[1:5]
+
+
+def index(db):
+    return {m["n"] + "." + s["n"]: s for m in db["m"] for s in m["s"]}
+
+
+db, db2 = load_dbc(dbc_path), load_dbc(dbc2_path)
+nodes = list(db.get("nodes", [])) + list(db2.get("nodes", []))
+text, gone = prune_cfg(open(cfg_path).read(), [index(db), index(db2)], nodes)
+
+mine = ["dropped\t%d" % gone]
+role = [l.split(None, 1)[1].strip('"') for l in text.splitlines()
+        if l.startswith("role ")]
+mine.append("role\t%s" % (role[0] if role else ""))
+for line in text.splitlines():
+    if line.startswith("cell "):
+        mine.append("cell\t%s" % _sig_of(line))
+    elif line.startswith("send "):
+        mine.append("send\t%s" % (_sig_of(line) or "-raw-"))
+theirs = [l for l in open(cdump).read().splitlines() if l]
+
+if mine == theirs:
+    print("  ok   a different map on each bus     %s dropped, both agree" % gone)
+    sys.exit(0)
+print("  FAIL a different map on each bus - prune_cfg and dashDropUnresolved "
+      "disagree")
+for a, b in zip(mine + [""] * len(theirs), theirs + [""] * len(mine)):
+    if a != b:
+        print("       python: %s" % a)
+        print("       c     : %s" % b)
+        break
+sys.exit(1)
+SAME2
+
 echo
 echo "=== the Arduino sketch folder regenerates from src/ ==="
 if "$here/../arduino/sync.sh" --check; then

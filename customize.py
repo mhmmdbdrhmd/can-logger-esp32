@@ -17,8 +17,8 @@ Or just double-click this file. On Windows you can also drag a .dbc onto it.
 
 It never asks a question in the terminal. With no argument it opens the page
 empty and the Frame map: CAN 1 button loads a .dbc from wherever you keep it,
-which is the same button the logger itself has. This tool holds one map, so the
-CAN 2 button says so rather than loading over it.
+which is the same button the logger itself has. One map per bus, as on the
+logger: the CAN 2 button loads CAN 2's, and neither disturbs the other.
 
 It opens the logger's real web page in your browser, fed with simulated data.
 Press Export in the page to save the setup you have built, then copy it onto

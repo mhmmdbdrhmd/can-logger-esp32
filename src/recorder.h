@@ -30,8 +30,17 @@ struct BusHealth {
    * one message that stops somebody checking their wiring. */
   bool     enabled     = false; /* compiled in at all (see CAN2_ENABLED)    */
   bool     present     = false; /* the controller answered at boot          */
-  uint16_t bitrateKbps = 0;     /* what this bus was configured for         */
+  uint16_t bitrateKbps = 0;     /* what this bus ended up running at        */
+  uint8_t  crystalMHz  = 0;     /* and the crystal that rate was figured on */
   bool     listenOnly  = false;
+
+  /* Where those two came from. Reported separately because "500 kbit/s" the
+   * machine told us and "500 kbit/s" somebody typed into config.h are worth
+   * different amounts of trust, and because a detection that FAILED and fell
+   * back is the case where the number on screen may be wrong - which is
+   * exactly when a reader needs to be told. */
+  bool     autoDetect  = false; /* CANn_AUTODETECT asked for a search       */
+  bool     autoFound   = false; /* and a pair decoded real frames           */
 
   /* ---- frame map: one per bus, because an identifier means different
    * things on different buses ---- */

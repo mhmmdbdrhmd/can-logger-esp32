@@ -1870,7 +1870,12 @@ function pollStatus(){
       : 'every identifier seen on CAN ' + b.b + ' since the recording started';
 
     q('s_buspick').textContent = all.map(function(x){
-      return 'CAN ' + x.b + ': ' + (x.on ? (x.kbps + ' kbit/s, ' +
+      /* Where the bit rate came from, when it was not simply configured: a
+         rate the bus confirmed and a rate nothing confirmed are worth
+         different amounts of trust, and only the second one is a reason to go
+         and look at CANn_BITRATE_KBPS. */
+      var how = !x.auto ? '' : (x.autoOk ? ' detected' : ' assumed');
+      return 'CAN ' + x.b + ': ' + (x.on ? (x.kbps + ' kbit/s' + how + ', ' +
              (x.alive ? x.fps.toLocaleString() + ' frames/s' : 'quiet'))
              : (x.en ? 'not detected' : 'off'));
     }).join('   \u00b7   ');

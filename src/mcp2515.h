@@ -46,6 +46,19 @@ struct CanFrame {
  * a silent 30 % increase in the frame queue. */
 static_assert(sizeof(CanFrame) == 24, "CanFrame must stay 24 bytes");
 
+/* The bit rates and crystals this driver holds timings for.
+ *
+ * Exposed rather than kept private because a bit-rate search has to walk
+ * exactly the pairs setBitrate() will accept: a candidate the driver rejects
+ * is a candidate silently skipped, and a bus running at that rate would then
+ * be reported as undetectable. Ordered most-likely-first, so a search spends
+ * its first windows where the answer usually is. Kept beside the timing table
+ * in mcp2515.cpp, and asserted against it in test/test_mcp2515.cpp. */
+extern const uint16_t MCP_RATES[];
+extern const uint8_t  MCP_RATE_COUNT;
+extern const uint8_t  MCP_CRYSTALS[];
+extern const uint8_t  MCP_CRYSTAL_COUNT;
+
 class MCP2515 {
 public:
   MCP2515(SPIClass &spi, int8_t csPin, uint32_t spiHz);

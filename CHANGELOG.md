@@ -32,6 +32,37 @@ number instead of counting separators. `tools/parse_log.py` and
 `tools/plot_log.py` read both schemas and report a seven-column recording as
 `CAN1`.
 
+### Each bus can find its own bit rate
+
+`CAN1_AUTODETECT` / `CAN2_AUTODETECT`, off by default. Set one to `1` and that
+bus listens at each `(bit rate, crystal)` pair the driver has timings for and
+keeps the first that decodes real frames. The pair already in `config.h` is
+tried first, so a correct configuration costs one 300 ms window and usually far
+less.
+
+It listens in **listen-only mode whatever `CAN<n>_LISTEN_ONLY` says**. At the
+wrong bit rate a normal-mode node reads valid traffic as malformed and answers
+with error frames; a tool that corrupts the bus while it works out how to read
+it would be worse than no tool.
+
+Two honest limits, both in the log and in the README:
+
+- **It needs traffic.** A quiet bus is indistinguishable from a wrong bit rate.
+  Detection then fails and the `config.h` values are used — it never leaves a
+  bus unconfigured.
+- **A crystal and a bit rate multiply.** The registers for 250 kbit/s on an
+  8 MHz module produce 500 kbit/s on a 16 MHz one, and both decode the same wire
+  perfectly. Nothing over SPI separates them, so the configured crystal is swept
+  first and a fallback to the other one is warned about: the bus is readable
+  either way, but the reported *rate* is scaled by the same factor.
+
+The Bus tab says which it was — `250 kbit/s detected` versus
+`250 kbit/s assumed` — because a rate the machine confirmed and a rate somebody
+typed are worth different amounts of trust. `MCP_RATES` / `MCP_CRYSTALS` are
+exported from the driver and asserted against its own timing table in
+`test/test_mcp2515.cpp`, so a candidate the search tries can never be one the
+driver would quietly refuse.
+
 ### One frame map per bus
 
 `/frames.dbc` for CAN1, `/frames2.dbc` for CAN2. Separate files, because the
@@ -140,6 +171,22 @@ breaks the floor down by bus.
 `dash.cfg` gained `bus=` on `cell` and `send` lines. It is written only when it
 is not bus 1, so every existing layout round trips to exactly the file it came
 from.
+
+### The desk tool holds a frame map per bus too
+
+`customize.py` / `tools/preview_dashboard.py` used to hold **one**, which made a
+CAN 2 upload from the page a quiet lie: it replaced CAN 1's map and then reported
+CAN 2 as unmapped. So a CAN 2 cell could not be laid out at a desk at all — the
+one thing this tool exists for.
+
+Now there is one map per bus, `--dbc2` names CAN 2's on the command line, and
+`/api/signals?bus=`, the live-signal lists and the identifier tables all answer
+out of the bus's own map. A cell is held to the map of the bus **it** names, not
+to either map that happens to be loaded: a CAN 2 cell is not rescued by CAN 1's
+map containing a signal of that name. `test/run_tests.sh` now runs the
+firmware's `dashDropUnresolved()` and the tool's `prune_cfg()` against a layout
+that reads from both buses with a *different* map on each, and requires them to
+drop exactly the same items — which is the assertion this bug slipped past.
 
 ### The hotspot and hostname are unchanged
 

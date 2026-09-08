@@ -58,6 +58,12 @@ static void statusBus(String &j, uint8_t b) {
    * check. */
   j += ",\"en\":";       j += h.enabled ? 1 : 0;
   j += ",\"kbps\":";     j += (uint32_t)h.bitrateKbps;
+  j += ",\"xtal\":";     j += (uint32_t)h.crystalMHz;
+  /* Where the rate above came from. A detected rate is what the machine said;
+   * a fallen-back one is what somebody typed and the bus never confirmed, and
+   * the page has to be able to tell a reader which they are looking at. */
+  j += ",\"auto\":";     j += h.autoDetect ? 1 : 0;
+  j += ",\"autoOk\":";   j += h.autoFound ? 1 : 0;
   j += ",\"send\":";     j += h.listenOnly ? 0 : 1;
   j += ",\"alive\":";    j += h.canOk ? 1 : 0;
   j += ",\"fps\":";      j += h.frameRate;

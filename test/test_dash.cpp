@@ -156,7 +156,11 @@ int main() {
       "send 5 label=\"Opcode arg\" sig=Cmd.Arg lo=0 hi=255 msel=Cmd_Op mxc=16\n");
 
     ck("the node this logger is survives a round trip",
-       strcmp(a.role, "Tester") == 0, a.role);
+       strcmp(a.role[0], "Tester") == 0, a.role[0]);
+    /* An untagged role line is CAN1's, and says nothing about CAN2. A shared
+       answer is what the two-button header exists to stop: the logger is
+       routinely a node on one bus and a listener on the other. */
+    ck("and it is CAN1's alone, not both buses'", a.role[1][0] == 0, a.role[1]);
 
     /* The manual override is carried BY the value, not looked up in the frame
        map, because the page needs it with no map loaded at all - the desk tool
@@ -188,7 +192,7 @@ int main() {
       const char *old = "grid 4 2\nnode Tester\n";
       ck("a setup file written when it was called `node` still sets the role",
          dashParse(legacy, old, strlen(old)) == 0 &&
-         strcmp(legacy.role, "Tester") == 0, legacy.role);
+         strcmp(legacy.role[0], "Tester") == 0, legacy.role[0]);
       /* Anchored to a line start: the header comment this file writes explains
          what the role is and contains the word "node" in that sentence, so an
          unanchored search finds the documentation and calls it a config line. */
@@ -339,12 +343,12 @@ int main() {
        half-described command the grouping exists to prevent. */
     {
       DashConfig d = c;
-      snprintf(d.role, sizeof(d.role), "%s", "Vehicle");
+      snprintf(d.role[0], sizeof(d.role[0]), "%s", "Vehicle");
       const uint16_t gone = dashDropUnresolved(d, both(db));
       ck("loading a new map drops what it cannot account for", gone == 1,
          std::to_string(gone) + " dropped");
       ck("a role the new map still names is left alone",
-         strcmp(d.role, "Vehicle") == 0, d.role);
+         strcmp(d.role[0], "Vehicle") == 0, d.role[0]);
       ck("and closes the gap rather than leaving a hole",
          dashCellUsed(d.cell[0]) && dashCellUsed(d.cell[1]) &&
          !dashCellUsed(d.cell[2]), "two cells, contiguous");
@@ -362,7 +366,7 @@ int main() {
         " SG_ Cmd_Op : 0|8@1+ (1,0) [0|255] \"\" ABS_ECU\n";
       dbcLoadText(other, unrelated, strlen(unrelated));
       DashConfig e = c;
-      snprintf(e.role, sizeof(e.role), "%s", "Vehicle");
+      snprintf(e.role[0], sizeof(e.role[0]), "%s", "Vehicle");
       const uint16_t all = dashDropUnresolved(e, both(other));
       ck("an unrelated frame map clears the setup", all == 6,
          std::to_string(all) + " dropped");
@@ -371,14 +375,46 @@ int main() {
       /* The role went with it. Nothing in the new file transmits under that
          name, so keeping it would leave the header asserting a role while both
          Fill buttons quietly stopped separating anything by it. */
-      ck("including a role no node of the new map answers to", e.role[0] == 0,
-         e.role);
+      ck("including a role no node of the new map answers to",
+         e.role[0][0] == 0, e.role[0]);
 
       DashConfig f = c;
-      snprintf(f.role, sizeof(f.role), "%s", "Tester");
+      snprintf(f.role[0], sizeof(f.role[0]), "%s", "Tester");
       dashDropUnresolved(f, both(other));
       ck("a role the new map DOES name survives it",
-         strcmp(f.role, "Tester") == 0, f.role);
+         strcmp(f.role[0], "Tester") == 0, f.role[0]);
+
+      /* Each role held to ITS OWN bus's map, which is the whole point of one
+         per bus - and this is the case that separates that from the union rule
+         it replaced. Both roles below ARE named, but each by the OTHER bus's
+         map: "Vehicle" transmits in `db` and is set on the bus carrying
+         `other`, and vice versa. Per-bus resolution clears both. A union rule
+         keeps both, and leaves each bus's Fill split on a node that does not
+         exist there - which is invisible until somebody presses Fill. */
+      {
+        DashConfig g = c;
+        snprintf(g.role[0], sizeof(g.role[0]), "%s", "Vehicle");
+        snprintf(g.role[1], sizeof(g.role[1]), "%s", "Tester");
+        DbcDb crossed[CAN_BUSES];
+        crossed[0] = other;   /* names Tester,  not Vehicle */
+        crossed[1] = db;      /* names Vehicle, not Tester  */
+        dashDropUnresolved(g, crossed);
+        ck("a role named only by the OTHER bus's map is cleared",
+           g.role[0][0] == 0 && g.role[1][0] == 0,
+           std::string(g.role[0]) + "/" + g.role[1]);
+
+        /* And the same two names, each on the bus that does name them, are
+           both left alone - so the assertion above is about the wrong bus and
+           not about roles being dropped indiscriminately. */
+        DashConfig h = c;
+        snprintf(h.role[0], sizeof(h.role[0]), "%s", "Tester");
+        snprintf(h.role[1], sizeof(h.role[1]), "%s", "Vehicle");
+        dashDropUnresolved(h, crossed);
+        ck("and each survives on the bus whose map does name it",
+           strcmp(h.role[0], "Tester") == 0 &&
+           strcmp(h.role[1], "Vehicle") == 0,
+           std::string(h.role[0]) + "/" + h.role[1]);
+      }
       dbcFree(other);
     }
 

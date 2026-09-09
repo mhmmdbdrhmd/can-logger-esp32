@@ -352,7 +352,22 @@ bool dashParseLine(DashConfig &c, char *line) {
   if (!strcmp(kw, "role") || !strcmp(kw, "node")) {
     char v[DASH_ROLE_MAX + 8];
     if (!nextToken(&p, v, sizeof(v))) return false;
-    copyBounded(c.role, sizeof(c.role), v);
+
+    /* Which bus this role is about, in the same `bus=` form and with the same
+     * default as a cell or a setpoint: absent means bus 1. That is what makes
+     * every `role "Tester"` line ever written by the single-bus logger still
+     * mean exactly what it meant. */
+    uint8_t bus = 0;
+    char key[24], val[DASH_LINE_MAX];
+    while (nextPair(&p, key, sizeof(key), val, sizeof(val))) {
+      if (!strcmp(key, "bus")) {
+        const unsigned long b = strtoul(val, nullptr, 10);
+        bus = (b >= 1 && b <= CAN_BUSES) ? (uint8_t)(b - 1) : 0;
+      }
+      /* anything else is from a newer version: skip it, do not fail */
+    }
+
+    copyBounded(c.role[bus], sizeof(c.role[bus]), v);
     return true;
   }
   if (!strcmp(kw, "cell")) return parseCell(c, p);
@@ -433,7 +448,8 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
       "#\n"
       "#   grid <cols> <rows>          the layout\n"
       "#   poll <ms>                   how often the browser asks for values\n"
-      "#   role \"<Name>\"               which BU_ node this logger IS, if any\n"
+      "#   role \"<Name>\" bus=1        which BU_ node this logger IS on that\n"
+      "#                               bus, if any - one line per bus\n"
       "#   cell <slot> widget=.. sig=Message.Signal bus=1 lo=.. hi=..\n"
       "#   send <n> label=\"..\" sig=Message.Signal bus=1 lo=.. hi=..\n"
       "#              mux=1            one payload of a multiplexed frame\n"
@@ -452,9 +468,17 @@ size_t dashSerialize(const DashConfig &c, char *out, size_t cap) {
   n = appendStr(out, cap, n, "\npoll ");
   n = appendInt(out, cap, n, c.pollMs);
   n = appendStr(out, cap, n, "\n");
-  if (c.role[0]) {
+  /* One line per bus that has an answer, and the bus= token written only when
+   * it is not bus 1 - the same rule the cells and setpoints follow, so a
+   * single-bus setup round trips to exactly the file it came from. */
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    if (!c.role[b][0]) continue;
     n = appendStr(out, cap, n, "role ");
-    n = appendValue(out, cap, n, c.role);
+    n = appendValue(out, cap, n, c.role[b]);
+    if (b) {
+      n = appendStr(out, cap, n, " bus=");
+      n = appendInt(out, cap, n, (uint32_t)(b + 1));
+    }
     n = appendStr(out, cap, n, "\n");
   }
   const uint8_t cells = dashCellCount(c);
@@ -645,20 +669,24 @@ uint16_t dashResolve(DashConfig &c, const DbcDb *db) {
 uint16_t dashDropUnresolved(DashConfig &c, const DbcDb *db) {
   uint16_t dropped = 0;
 
-  /* The role names a node of the OLD map. If the new file has no such node the
+  /* A role names a node of the OLD map. If the new file has no such node the
    * answer is not merely stale, it is unanswerable - and left alone the header
-   * would go on asserting "Role: Tester" while both Fill buttons quietly
+   * would go on asserting "Role: Tester" while that bus's Fill buttons quietly
    * stopped separating anything, because nothing transmits under that name.
-   * Cleared, so the page asks the question again against the new file. */
-  if (c.role[0]) {
-    /* Known if EITHER map names it. The role says which node this logger is
-     * standing in for, and a tester that exists on the diagnostic bus is still
-     * that tester when the other bus has never heard of it. */
+   * Cleared, so the page asks the question again against the new file.
+   *
+   * Held to THAT BUS's map only. It used to be enough for either map to name
+   * it, on the reasoning that a tester is still a tester when the other bus
+   * has never heard of it - but with a role per bus that reasoning inverts: a
+   * name CAN1's file knows nothing about cannot be the node this logger is on
+   * CAN1, and keeping it would leave CAN1's Fill split on a node that does not
+   * exist there. */
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    if (!c.role[b][0]) continue;
     bool known = false;
-    for (uint8_t b = 0; b < CAN_BUSES && !known; b++)
-      for (uint8_t i = 0; i < db[b].nodeCount && !known; i++)
-        known = strcmp(db[b].node[i], c.role) == 0;
-    if (!known) { c.role[0] = 0; dropped++; }
+    for (uint8_t i = 0; i < db[b].nodeCount && !known; i++)
+      known = strcmp(db[b].node[i], c.role[b]) == 0;
+    if (!known) { c.role[b][0] = 0; dropped++; }
   }
 
   for (uint8_t i = 0; i < DASH_MAX_CELLS; i++) {

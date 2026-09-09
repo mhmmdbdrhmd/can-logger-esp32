@@ -172,6 +172,60 @@ breaks the floor down by bus.
 is not bus 1, so every existing layout round trips to exactly the file it came
 from.
 
+### One role per bus, and a header column for each
+
+`Role` said which `BU_` node of the frame map this logger IS — the fact that
+separates a reading from a command, and the thing both **Fill** buttons split
+on. There was one of them, for two buses. It could not be read: the button said
+`Role: Tester` without saying which bus that was about, and its sheet listed
+whichever map the cell editor happened to be pointed at.
+
+Now one per bus. The header carries a **column per controller** — that bus's
+frame map above, that bus's role below — because both are facts about one bus
+and nothing else, and a column with the bus named over it says so in less width
+than four buttons each spelling it out:
+
+```
+        CAN 1          CAN 2
+     [Frame map]    [Frame map]
+     [Role: Host]   [Role: none]
+```
+
+Two buses have separate frame maps and therefore separate `BU_` node lists, so a
+name identifying this logger on one usually does not appear in the other's file.
+More importantly the logger is routinely **a node on one bus and a listener on
+the other** — driving a diagnostic bus while only watching the powertrain — and
+one shared answer forced those two situations to give the same reply.
+
+`dash.cfg` gains a `bus=` token on `role`, with bus 1 implicit, so every
+`role "Tester"` line ever written still means exactly what it meant:
+
+```
+role "Tester"
+role "Logger" bus=2
+```
+
+`dashDropUnresolved()` now holds each role to **that bus's** node list. It used
+to accept a name either map knew, on the reasoning that a tester is still a
+tester when the other bus has never heard of it — with a role per bus that
+reasoning inverts: a name CAN1's file knows nothing about cannot be the node
+this logger is on CAN1, and keeping it leaves CAN1's Fill split on a node absent
+from CAN1.
+
+Two things this turned up while it was being tested:
+
+- **`Fill from bus` had silently stopped ordering by anything.** It read the
+  live-signal list from a top-level `sig` in `/api/status` — which moved inside
+  `can[]` when the second bus arrived. The lookup found nothing, so the button
+  that exists to put the signals *actually arriving* first was placing them in
+  plain file order and capping nothing. It reads its own bus's element now.
+- **The `.meta` sidecar stated the bit rate from `config.h`.** With
+  `CANn_AUTODETECT` that is not the rate the controller used, so a recording
+  could be labelled with a rate its bus never ran at. `metaJson()` is now given
+  what each controller ended up doing, and every entry carries
+  `"bitrate_from": "detected" | "config"`, `"crystal_mhz"` and `"present"` — a
+  reader with only the file can tell a measured rate from an assumed one.
+
 ### The desk tool holds a frame map per bus too
 
 `customize.py` / `tools/preview_dashboard.py` used to hold **one**, which made a

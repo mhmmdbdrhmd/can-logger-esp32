@@ -259,7 +259,15 @@ int main() {
     both[0] = db;
     dbcReset(both[1]);
 
-    const size_t n = metaJson(meta, sizeof(meta), "1.csv", "1.log", both);
+    /* CAN1 running at a rate the bus confirmed, CAN2 at one nothing did. The
+       sidecar has to distinguish them: with CANn_AUTODETECT the rate in
+       config.h and the rate the controller used are different numbers, and a
+       reader a year later has only this file to go on. */
+    MetaBus mb[CAN_BUSES];
+    mb[0] = { 500, 8,  false, true,  false };
+    mb[1] = { 125, 16, true,  true,  true  };
+
+    const size_t n = metaJson(meta, sizeof(meta), "1.csv", "1.log", both, mb);
     const std::string m(meta, n);
     ck("meta fits", n > 0, std::to_string(n) + " bytes");
     ck("declares schema 2", m.find("\"schema\": 2") != std::string::npos);
@@ -274,8 +282,24 @@ int main() {
     ck("tells a reader to group on the bus too",
        m.find("t_us, bus and id") != std::string::npos);
 
+    /* The rate each bus RAN at, not the one config.h asked for - and where
+       that number came from. Without the second half an assumed rate and a
+       measured one are the same string to anybody reading the file. */
+    ck("states the rate each bus actually ran at",
+       m.find("\"bitrate_kbps\": 500") != std::string::npos &&
+       m.find("\"bitrate_kbps\": 125") != std::string::npos);
+    ck("and says which was measured and which assumed",
+       m.find("\"bitrate_from\": \"detected\"") != std::string::npos &&
+       m.find("\"bitrate_from\": \"config\"") != std::string::npos);
+    ck("carries each bus's crystal",
+       m.find("\"crystal_mhz\": 8") != std::string::npos &&
+       m.find("\"crystal_mhz\": 16") != std::string::npos);
+    ck("and whether that controller was even there",
+       m.find("\"present\": 1") != std::string::npos);
+
     /* A buffer that is too small must report failure, not truncate silently. */
-    ck("refuses to truncate", metaJson(meta, 200, "3.csv", "3.log", both) == 0);
+    ck("refuses to truncate",
+       metaJson(meta, 200, "3.csv", "3.log", both, mb) == 0);
   }
 
   /* ================================================================== */

@@ -173,6 +173,9 @@ def _strip_override(line):
 def prune_cfg(text, byrefs, nodes):
     """Everything in a setup that the frame maps cannot account for, removed.
 
+    `nodes` is one BU_ name list per bus, for the same reason `byrefs` is: the
+    role is per bus too.
+
     `byrefs` is one Message.Signal index per bus, and a line is held to the map
     of the bus it names - not to some union of the two. A cell reading CAN2 is
     not made valid by CAN1's map happening to contain a signal of that name,
@@ -217,9 +220,11 @@ def prune_cfg(text, byrefs, nodes):
         elif s.startswith(("role ", "node ")):
             m = re.match(r'(?:role|node)\s+("([^"]*)"|(\S+))', s)
             name = (m.group(2) or m.group(3)) if m else ""
-            # No BU_ node of this name means the answer is not stale but
-            # unanswerable: nothing in the new file transmits under it.
-            if name and name in nodes:
+            # Held to THAT BUS's node list, the same as dashDropUnresolved().
+            # A role is per bus, so a name only the other bus's file transmits
+            # under cannot be the node this logger is on this one - and keeping
+            # it would leave this bus's Fill split on a node absent from it.
+            if name and name in nodes[_bus_of(s) - 1]:
                 out.append(line)
             else:
                 dropped += 1
@@ -448,7 +453,7 @@ def main():
                     help="start with no setup at all - the page as it looks on a "
                          "logger with nothing on its card")
     ap.add_argument("--role", default="",
-                    help="which BU_ node of the frame map this logger IS, so "
+                    help="which BU_ node of CAN1's frame map this logger IS, so "
                          "Fill can tell a reading from a command. Leave it out "
                          "and nothing is separated - both Fill buttons offer "
                          "every message, which is the right answer when you are "
@@ -523,9 +528,11 @@ def main():
     else:
         start_cfg = DEFAULT_CFG
     if args.role:
-        # A role is the logger's identity, not a bus's, so it may be named by
-        # either map.
-        known = [n for m in maps for n in m.get("nodes", [])]
+        # CAN1's, and checked against CAN1's map: the role is per bus, because
+        # each bus has its own frame map and its own BU_ node list, and this
+        # logger is routinely a node on one bus and a listener on the other.
+        # Set CAN2's from the page - it is one button per bus there.
+        known = list(maps[0].get("nodes", []))
         if known and args.role not in known:
             sys.exit("--role %s is not a node in %s.  It names: %s"
                      % (args.role, args.dbc, ", ".join(known) or "(none)"))
@@ -861,7 +868,7 @@ def main():
                 # it is shown leaves files in the directories it was pointed at
                 # and opens on a setup nobody asked for. Save from the page when
                 # the result is worth keeping.
-                nodes = [n for m in maps for n in m.get("nodes", [])]
+                nodes = [list(m.get("nodes", [])) for m in maps]
                 state["cfg"], gone = prune_cfg(state["cfg"], byrefs, nodes)
                 state["gen"] += 1
                 # Only this bus's overrides: a value written on the OTHER bus

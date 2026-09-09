@@ -199,10 +199,28 @@ private:
  * workflow. The CSV is now pure data. */
 size_t csvColumnHeader(char *buf, size_t cap);
 
+/* What one bus was actually doing when the recording started, for the meta to
+ * STATE rather than assume.
+ *
+ * Passed in rather than read out of config.h inside metaJson(), because with
+ * CANn_AUTODETECT the two are not the same number: the sidecar would have
+ * labelled the recording with the rate somebody typed while the controller ran
+ * at the rate the bus confirmed. A CSV whose sidecar names the wrong bit rate
+ * is the kind of quiet error that survives into a report - and `from_config`
+ * is here so a reader can tell a measured rate from an assumed one instead of
+ * having to trust either equally. */
+struct MetaBus {
+  uint16_t bitrateKbps;
+  uint8_t  crystalMHz;
+  bool     listenOnly;
+  bool     present;
+  bool     fromConfig;   /* true = nothing on the bus confirmed this rate */
+};
+
 /* The companion <n>.meta: everything needed to interpret the CSV, including
  * the frame map that was active when the recording was made, as JSON so a tool
  * can read it directly instead of parsing prose. Needs ~4 KB plus roughly
  * 120 bytes per mapped signal. */
 size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
-                const DbcDb *db);
+                const DbcDb *db, const MetaBus *bus);
 

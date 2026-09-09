@@ -446,7 +446,10 @@ int main(int argc, char **argv) {
   for (int i = 0; i < CAN_BUSES; i++) maps[i] = (i == 0) ? db : db2;
 
   printf("dropped\t%u\n", (unsigned)dashDropUnresolved(cfg, maps));
-  printf("role\t%s\n", cfg.role);
+  /* One line per bus. Printing only bus 1's would leave the CAN2 role
+   * uncompared, which is where the two implementations could quietly part. */
+  for (int b = 0; b < CAN_BUSES; b++)
+    printf("role%d\t%s\n", b + 1, cfg.role[b]);
   for (int i = 0; i < DASH_MAX_CELLS; i++)
     if (dashCellUsed(cfg.cell[i])) printf("cell\t%s\n", cfg.cell[i].ref);
   for (int i = 0; i < TX_MAX_COMMANDS; i++)
@@ -461,7 +464,8 @@ for f in "$here"/../examples/*.dbc; do
     python3 - "$here/../examples/dash.cfg" "$f" "$out/prune.txt" "$f" <<'SAME' || fail=1
 import os, sys
 sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
-from preview_dashboard import load_dbc, prune_cfg, _sig_of
+import re
+from preview_dashboard import load_dbc, prune_cfg, _sig_of, _bus_of
 
 cfg_path, dbc_path, cdump = sys.argv[1], sys.argv[2], sys.argv[3]
 dbc2_path = sys.argv[4] if len(sys.argv) > 4 else dbc_path
@@ -472,13 +476,21 @@ def index(db):
 
 
 db, db2 = load_dbc(dbc_path), load_dbc(dbc2_path)
-nodes = list(db.get("nodes", [])) + list(db2.get("nodes", []))
+nodes = [list(db.get("nodes", [])), list(db2.get("nodes", []))]
 text, gone = prune_cfg(open(cfg_path).read(), [index(db), index(db2)], nodes)
 
 mine = ["dropped\t%d" % gone]
-role = [l.split(None, 1)[1].strip('"') for l in text.splitlines()
-        if l.startswith("role ")]
-mine.append("role\t%s" % (role[0] if role else ""))
+# One entry per bus, matching the C dump: a bus whose role was dropped prints
+# empty rather than shifting the other bus's answer up a line.
+roles = ["", ""]
+for l in text.splitlines():
+    if not l.startswith("role "):
+        continue
+    m = re.match(r'role\s+("([^"]*)"|(\S+))', l)
+    if m:
+        roles[_bus_of(l) - 1] = m.group(2) if m.group(2) is not None else m.group(3)
+for b in (0, 1):
+    mine.append("role%d\t%s" % (b + 1, roles[b]))
 for line in text.splitlines():
     if line.startswith("cell "):
         mine.append("cell\t%s" % _sig_of(line))
@@ -518,6 +530,18 @@ for line in open(src).read().splitlines():
             line += " bus=2"
         n += 1
     out.append(line)
+
+# Two roles, and neither is decoration. examples/dash.cfg carries no role line
+# at all, so every comparison above comes down to ""=="" - a passing assertion
+# about nothing. These two make it mean something against machine.dbc (BU_
+# Drive Chassis Hydraulic Host) on CAN1 and example.dbc (BU_ NodeA NodeB Host)
+# on CAN2:
+#   NodeA on CAN1 is named ONLY by CAN2's map, so per-bus resolution must clear
+#     it - and a rule that accepts either map keeps it. That is the discriminator.
+#   NodeB on CAN2 is named by CAN2's own map and must survive, so the line above
+#     is about consulting the wrong bus and not about dropping roles freely.
+out.insert(1, 'role "NodeA"')
+out.insert(2, 'role "NodeB" bus=2')
 open(dst, "w").write("\n".join(out) + "\n")
 RETAG
 
@@ -527,7 +551,8 @@ python3 - "$out/cross.cfg" "$here/../examples/machine.dbc" "$out/prune2.txt" \
          "$here/../examples/example.dbc" <<'SAME2' || fail=1
 import os, sys
 sys.path.insert(0, os.path.join(os.getcwd(), "tools"))
-from preview_dashboard import load_dbc, prune_cfg, _sig_of
+import re
+from preview_dashboard import load_dbc, prune_cfg, _sig_of, _bus_of
 
 cfg_path, dbc_path, cdump, dbc2_path = sys.argv[1:5]
 
@@ -537,13 +562,21 @@ def index(db):
 
 
 db, db2 = load_dbc(dbc_path), load_dbc(dbc2_path)
-nodes = list(db.get("nodes", [])) + list(db2.get("nodes", []))
+nodes = [list(db.get("nodes", [])), list(db2.get("nodes", []))]
 text, gone = prune_cfg(open(cfg_path).read(), [index(db), index(db2)], nodes)
 
 mine = ["dropped\t%d" % gone]
-role = [l.split(None, 1)[1].strip('"') for l in text.splitlines()
-        if l.startswith("role ")]
-mine.append("role\t%s" % (role[0] if role else ""))
+# One entry per bus, matching the C dump: a bus whose role was dropped prints
+# empty rather than shifting the other bus's answer up a line.
+roles = ["", ""]
+for l in text.splitlines():
+    if not l.startswith("role "):
+        continue
+    m = re.match(r'role\s+("([^"]*)"|(\S+))', l)
+    if m:
+        roles[_bus_of(l) - 1] = m.group(2) if m.group(2) is not None else m.group(3)
+for b in (0, 1):
+    mine.append("role%d\t%s" % (b + 1, roles[b]))
 for line in text.splitlines():
     if line.startswith("cell "):
         mine.append("cell\t%s" % _sig_of(line))

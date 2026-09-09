@@ -48,7 +48,7 @@ SHOTS = [
     # one message and NodeA sends four - the shape that makes the answer
     # obvious. Skip is first because on a working machine it is the answer.
     ("role",           "dash", None,      "example",  (1160,  900),
-     "openRole()"),
+     "openRole(1)"),
     # The three shapes a frame comes in, in one shot, against
     # examples/example.dbc which carries one of each. HostCommand: multiplexed,
     # one signal per code - two frames, a button each. Diagnostics: multiplexed,

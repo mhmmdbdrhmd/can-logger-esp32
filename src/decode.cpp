@@ -392,18 +392,26 @@ static bool mStr(char *buf, size_t cap, int *n, const char *s) {
   return mAppend(buf, cap, n, "\"");
 }
 
-/* The frame map of ONE bus, as it was when this recording was made. */
-static bool metaBus(char *buf, size_t cap, int *n, uint8_t b, const DbcDb &db) {
+/* The frame map of ONE bus, and what that bus was running at, as they were
+ * when this recording was made. */
+static bool metaBus(char *buf, size_t cap, int *n, uint8_t b, const DbcDb &db,
+                    const MetaBus &h) {
   static const char *const kPath[CAN_BUSES] = { DBC_PATH, DBC2_PATH };
-  static const uint16_t    kRate[CAN_BUSES] = { CAN1_BITRATE_KBPS, CAN2_BITRATE_KBPS };
-  static const uint8_t     kListen[CAN_BUSES] = { CAN1_LISTEN_ONLY, CAN2_LISTEN_ONLY };
 
+  /* Every number here comes from `h` - what the controller ended up doing -
+   * and not from config.h. With CANn_AUTODETECT those differ, and the sidecar
+   * is the thing a reader trusts a year later when nobody remembers which
+   * settings the firmware was built with. `bitrate_from` says which of the two
+   * it is, so an assumed rate cannot be mistaken for a measured one. */
   if (!mAppend(buf, cap, n,
-      "    { \"bus\": %u, \"bitrate_kbps\": %u, \"listen_only\": %d,\n"
+      "    { \"bus\": %u, \"present\": %d, \"bitrate_kbps\": %u, "
+      "\"bitrate_from\": \"%s\", \"crystal_mhz\": %u, \"listen_only\": %d,\n"
       "      \"dbc\": { \"loaded\": %d, \"path\": \"%s\", \"messages\": %u, "
       "\"signals\": %u, \"line_errors\": %u, \"overflow\": %d, \"inexact\": %d,\n"
       "        \"version\": ",
-      (unsigned)(b + 1), (unsigned)kRate[b], kListen[b] ? 1 : 0,
+      (unsigned)(b + 1), h.present ? 1 : 0, (unsigned)h.bitrateKbps,
+      h.fromConfig ? "config" : "detected", (unsigned)h.crystalMHz,
+      h.listenOnly ? 1 : 0,
       db.loaded ? 1 : 0, kPath[b],
       (unsigned)db.msgCount, (unsigned)db.sigCount,
       (unsigned)db.lineErrors, db.overflow ? 1 : 0, db.inexact ? 1 : 0)) return false;
@@ -435,7 +443,7 @@ static bool metaBus(char *buf, size_t cap, int *n, uint8_t b, const DbcDb &db) {
 }
 
 size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
-                const DbcDb *db) {
+                const DbcDb *db, const MetaBus *bus) {
   int n = 0;
 
   /* "schema" is the field a tool should branch on. Recordings from the
@@ -474,7 +482,7 @@ size_t metaJson(char *buf, size_t cap, const char *csvName, const char *logName,
 
   if (!mAppend(buf, cap, &n, "  \"can\": [\n")) return 0;
   for (uint8_t b = 0; b < CAN_BUSES; b++) {
-    if (!metaBus(buf, cap, &n, b, db[b])) return 0;
+    if (!metaBus(buf, cap, &n, b, db[b], bus[b])) return 0;
     if (!mAppend(buf, cap, &n, "%s\n", (b + 1 < CAN_BUSES) ? "," : "")) return 0;
   }
   if (!mAppend(buf, cap, &n, "  ],\n")) return 0;

@@ -747,11 +747,12 @@ immediately, saying how many saved cells no longer match if any do not.
 
 **Loading a map clears what the new one cannot account for.** A different frame
 map means a different bus, so every cell and every sendable value naming a
-signal the new file does not have is removed and the gaps closed. The role goes
-the same way if the new file has no `BU_` node of that name — it is not merely
-stale then, it is unanswerable, and the header would go on claiming a role while
-both Fill buttons quietly stopped separating anything by it, so the question is
-asked again. Load an unrelated `.dbc` and you get an empty setup, which is the
+signal the new file does not have is removed and the gaps closed. That bus's
+role goes the same way if the new file has no `BU_` node of that name — it is not
+merely stale then, it is unanswerable, and the header would go on claiming a role
+while that bus's Fill buttons quietly stopped separating anything by it, so the
+question is asked again. The other bus's role is untouched; it was never about
+this file. Load an unrelated `.dbc` and you get an empty setup, which is the
 honest result; reload a corrected version of the same one and your layout
 survives, because its signals are still there. One-off frames named by
 identifier are never touched: they name no signal, so no frame map can
@@ -792,11 +793,36 @@ BO_ 800 ABS_Cmd:         8 Tester      the tester sends it -> a command
 ```
 
 Answer it and **Fill from frame map** puts what your node sends on the **Send**
-tab and everything else on the dashboard. The answer lives on the **Role**
-button in the header — visible from every tab, because a wrong answer does not
-announce itself, it just fills the wrong half of the map into the wrong screen.
-It opens by itself the first time after you load a frame map, which is the
-moment it is worth answering and the only moment it costs nothing.
+tab and everything else on the dashboard. The answer lives on a **Role** button
+in the header — visible from every tab, because a wrong answer does not announce
+itself, it just fills the wrong half of the map into the wrong screen. It opens
+by itself the first time after you load a frame map, which is the moment it is
+worth answering and the only moment it costs nothing.
+
+**The answer is per bus, and there is a button for each.** The header carries a
+column per controller — its frame map above, its role below — because both are
+facts about one bus and nothing else:
+
+|  | CAN 1 | CAN 2 |
+|---|---|---|
+| | `Frame map` | `Frame map` |
+| | `Role: Host` | `Role: none` |
+
+The two buses have separate frame maps and therefore separate `BU_` node lists,
+so a name that identifies this logger on one of them usually does not appear in
+the other's file at all. More to the point, the logger is routinely **a node on
+one bus and a pure listener on the other** — a tester driving a diagnostic bus
+while only watching the powertrain. One shared answer forced those two
+situations to give the same reply, and could not be read either: the button said
+`Role: Tester` without saying which bus that was about.
+
+In `dash.cfg` each is its own line, tagged the way cells and setpoints are, with
+bus 1 left implicit — so a file written before this still means what it meant:
+
+```
+role "Tester"
+role "Logger" bus=2
+```
 
 **Skip is a real answer, and usually the right one.** On a machine that already
 works, none of the nodes in the file is you — you are a bystander with a clip
@@ -933,6 +959,8 @@ No logger, no wiring, no traffic. All you need is your `.dbc` and Python.
 python3 customize.py                                   # load the .dbc in the page
 python3 customize.py path/to/mine.dbc                  # or start with it
 python3 customize.py path/to/mine.dbc --role Tester    # if one of them is you
+                                                      # (CAN 1's; CAN 2's is a
+                                                      #  button in the page)
 ```
 
 **It never asks a question in the terminal.** With no argument the page opens
@@ -968,9 +996,10 @@ Then, in the page:
 **1. Load your frame map** if you did not name one on the command line —
 *Frame map: CAN 1*, in the header.
 
-**2. Say which node you are** — or skip. *Role*, in the header. See [which node
-this logger is](#which-node-this-logger-is); `--role` above answers it before
-the page opens, and the button changes it afterwards. Skip if you are only
+**2. Say which node you are** — or skip. *Role: CAN 1* / *Role: CAN 2*, in the
+header, one per bus. See [which node this logger is](#which-node-this-logger-is);
+`--role` above answers CAN 1's before the page opens, and the buttons change
+either afterwards. Skip if you are only
 listening, and both Fill buttons will offer everything.
 
 **3. Build the dashboard.** *Customize dashboard* → **Fill from frame map**. Every

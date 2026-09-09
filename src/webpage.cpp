@@ -39,6 +39,15 @@ header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14p
 /* An answered role is worth seeing without reading it, because the wrong one
    quietly fills the wrong half of the frame map into the wrong screen. */
 .hbtn.set{border-color:var(--acc);color:var(--txt)}
+/* The per-bus pair, two columns of two. The grid is what carries the meaning:
+   a button sits under the bus it acts on, so neither has to repeat it in its
+   own label. Columns share a width so the pairing survives one label being
+   longer than the other. */
+.busgrp{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:6px 8px;align-items:center}
+.bushdr{font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--dim);text-align:center;padding-bottom:1px}
+.busgrp .hbtn{width:100%;padding:7px 10px;text-align:center}
 #rolelist button{width:100%;margin:0 0 8px;text-align:left}
 #rolelist button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
@@ -471,14 +480,21 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <button data-tab="send">Send</button>
     <button data-tab="log">Log</button>
   </div>
-  <!-- One button per bus, rather than one that follows whichever controller
-       some other tab happens to be showing. Uploading replaces THAT bus's
-       frame map and drops every dashboard cell the new map cannot account
-       for, so the target has to be readable at the moment of the click - not
-       inferred from the state of a tab the reader may not have opened. -->
-  <button class="hbtn dbcbtn" data-bus="1">Frame map: CAN 1</button>
-  <button class="hbtn dbcbtn" data-bus="2">Frame map: CAN 2</button>
-  <button id="rolebtn"  class="hbtn">Role: none</button>
+  <!-- One COLUMN per bus, and the two things that are per bus stacked in it:
+       which frame map that bus decodes through, and which node of that map
+       this logger is. Both replace something belonging to one bus only, so the
+       target has to be readable at the moment of the click rather than
+       inferred from a tab the reader may not have opened - and a column with
+       the bus named above it says that in less width than four buttons each
+       spelling it out. The setup file covers both buses and stays outside. -->
+  <div class="busgrp">
+    <span class="bushdr">CAN 1</span>
+    <span class="bushdr">CAN 2</span>
+    <button class="hbtn dbcbtn" data-bus="1">Frame map</button>
+    <button class="hbtn dbcbtn" data-bus="2">Frame map</button>
+    <button class="hbtn rolebtn" data-bus="1">Role: none</button>
+    <button class="hbtn rolebtn" data-bus="2">Role: none</button>
+  </div>
   <button id="setupbtn" class="hbtn">Setup file</button>
   <span id="conn">connecting...</span>
 </header>
@@ -798,12 +814,15 @@ static const char PAGE_2[] PROGMEM = R"HTML(
      what both Fill buttons need in order to be useful -->
 <div class="sheet" id="rolesheet">
   <div class="sheetbox">
-    <h3>Which of these is this logger?</h3>
+    <h3 id="roletitle">Which of these is this logger?</h3>
     <div class="sub" style="margin-bottom:14px">A <code>.dbc</code> says who
       <b>sends</b> each message, but not which of those nodes is the box you are
       holding &mdash; and that is the whole difference between a reading and a
       command. Answer it and <b>Fill</b> puts what your node sends on the
       <b>Send</b> tab and everything else on the <b>dashboard</b>.
+      <br><br>The answer is <b>per bus</b>: this logger is often a node on one
+      bus and only a listener on the other, and the two frame maps name
+      different nodes anyway.
       <br><br>Recording never changes: every frame that arrives is logged
       whoever the file says sends it.</div>
 
@@ -867,7 +886,12 @@ function hms(s){
  *  first. The device re-serialises whatever it receives, so its writer stays
  *  the one that decides the canonical form.
  * -------------------------------------------------------------------------*/
-var CFG = { cols:4, rows:2, poll:200, role:'', cells:{}, tx:{} };
+/* roles[] is indexed 0-based by bus, like DBCS[]. One per bus and not one
+   shared answer: each bus has its own frame map and so its own BU_ node list,
+   and this logger is very often a node on one bus and a pure listener on the
+   other. A single role could not even be read - the button said "Role: Tester"
+   without saying which bus that was about. */
+var CFG = { cols:4, rows:2, poll:200, roles:['',''], cells:{}, tx:{} };
 /* How many cells this firmware can store. Told to us by /api/dash rather than
    written down here, so the two cannot drift apart. */
 var MAXCELLS = 48, MAXSEND = 32;
@@ -943,7 +967,7 @@ function busOr(v){
 }
 
 function parseCfg(text){
-  var c = { cols:4, rows:2, poll:200, role:'', cells:{}, tx:{} };
+  var c = { cols:4, rows:2, poll:200, roles:['',''], cells:{}, tx:{} };
   text.split(/\r?\n/).forEach(function(line){
     line = line.replace(/^\s+/, '');
     if(!line || line[0] === '#') return;
@@ -959,8 +983,16 @@ function parseCfg(text){
       c.poll = Math.max(100, Math.min(5000, parseInt(rest, 10) || 200));
     } else if(kw === 'role' || kw === 'node'){
       /* 'node' is what this was called in an earlier version. Reading both
-         means a setup file from any of them keeps its answer. */
-      c.role = rest.trim().replace(/^"|"$/g, '');
+         means a setup file from any of them keeps its answer.
+
+         The name comes first and an optional bus= follows, in the same form
+         and with the same default as a cell: absent means bus 1. So every
+         `role "Tester"` line ever written still means what it meant. */
+      var rm = rest.match(/^\s*("([^"]*)"|\S+)\s*(.*)$/);
+      if(rm){
+        c.roles[busOr(pairs(rm[3] || '').bus) - 1] =
+          (rm[2] !== undefined ? rm[2] : rm[1]);
+      }
     } else if(kw === 'cell' || kw === 'send'){
       var sp2 = rest.indexOf(' ');
       if(sp2 < 0) return;
@@ -1016,7 +1048,12 @@ function trimNum(v){
 
 function dumpCfg(){
   var out = ['version 1', 'grid ' + CFG.cols + ' ' + CFG.rows, 'poll ' + CFG.poll];
-  if(CFG.role) out.push('role ' + quote(CFG.role));
+  /* One line per bus with an answer, bus= only when it is not bus 1 - the
+     rule the cells and setpoints follow, and the firmware writes it the same
+     way. */
+  CFG.roles.forEach(function(r, i){
+    if(r) out.push('role ' + quote(r) + (i ? ' bus=' + (i + 1) : ''));
+  });
   Object.keys(CFG.cells).map(Number).sort(function(a,b){return a-b;}).forEach(function(i){
     var c = CFG.cells[i];
     if(!c || !c.sig) return;
@@ -2074,7 +2111,13 @@ function fillCells(source){
   return Promise.all(jobs).then(function(res){
     var live = {};
     if(source === 'bus'){
-      (res[1].sig || []).forEach(function(s){ live[s.m + '.' + s.s] = 1; });
+      /* Out of THIS bus's element of the status payload. There is no top-level
+         "sig" any more - the live-signal list moved inside can[] when the
+         second bus arrived, and reading the old place silently produced an
+         empty set: "Fill from bus" then ordered by nothing and capped nothing,
+         which is exactly the button's whole reason to exist. */
+      var me = (res[1].can || []).filter(function(b){ return b.b === EDBUS; })[0];
+      ((me && me.sig) || []).forEach(function(s){ live[s.m + '.' + s.s] = 1; });
     }
 
     if(!DBC.m.length){
@@ -2087,10 +2130,14 @@ function fillCells(source){
     Object.keys(CFG.cells).forEach(function(k){ taken[CFG.cells[k].sig] = 1; });
 
     var pick = [], skipped = 0;
+    /* The role of the bus whose map this is - DBC always belongs to EDBUS -
+       because a role is per bus and filling CAN2's signals against CAN1's
+       answer would split the wrong list. */
+    var role = roleOf(EDBUS);
     DBC.m.forEach(function(m){
       /* A message this logger is the one transmitting is a command, not a
          reading: its "value" is whatever we last wrote. */
-      if(CFG.role && m.tx === CFG.role){ skipped++; return; }
+      if(role && m.tx === role){ skipped++; return; }
       m.s.forEach(function(s){
         var ref = m.n + '.' + s.n;
         if(!taken[ref]) pick.push({ref:ref, s:s, live:live[ref] ? 1 : 0});
@@ -2129,7 +2176,7 @@ function fillCells(source){
             + 'change how it is drawn', 'ok');
     } else {
       toast('Filled from the frame map', added + ' cell(s) added'
-            + (skipped ? ', ' + skipped + ' message(s) ' + CFG.role
+            + (skipped ? ', ' + skipped + ' message(s) ' + role
                        + ' sends left for the Send tab' : '')
             + ' — drag them around, or tap one to change how it is drawn', 'ok');
     }
@@ -3570,14 +3617,14 @@ function txFillFromMap(){
 
   /* With a role set, only what this logger transmits: writing a frame the ECU
      is the one sending means two nodes talking over each other on one id. */
-  var list;
+  var list, role = roleOf(EDBUS);
   if(pick === 'all'){
     list = DBC.m.filter(function(m){
-      return (!CFG.role || m.tx === CFG.role) && m.s.length;
+      return (!role || m.tx === role) && m.s.length;
     });
     if(!list.length){
-      toast('Nothing to add', CFG.role
-        ? 'Nothing in the frame map is sent by ' + CFG.role
+      toast('Nothing to add', role
+        ? 'Nothing in CAN ' + EDBUS + "'s frame map is sent by " + role
         : 'The frame map has no messages', 'bad');
       return;
     }
@@ -3688,11 +3735,12 @@ function openTxEditBody(){
       /* The whole lot in one press, which is what most people want: a bus
          usually has one or two command frames and no reason to add them one
          at a time. */
+      var role = roleOf(EDBUS);
       var usable = DBC.m.filter(function(m){
-        return (!CFG.role || m.tx === CFG.role) && m.s.length;
+        return (!role || m.tx === role) && m.s.length;
       });
-      var all = el('option', null, CFG.role
-        ? 'every message ' + CFG.role + ' sends  (' + usable.length + ')'
+      var all = el('option', null, role
+        ? 'every message ' + role + ' sends  (' + usable.length + ')'
         : 'every message in the frame map  (' + usable.length + ')');
       all.value = 'all';
       sel.appendChild(all);
@@ -3702,13 +3750,13 @@ function openTxEditBody(){
          mistake - and blocking it outright would be wrong on a bus where the
          node is simply not powered. */
       var order = DBC.m.map(function(m, i){ return {m:m, i:i}; });
-      if(CFG.role){
+      if(role){
         order.sort(function(a, b){
-          return (b.m.tx === CFG.role ? 1 : 0) - (a.m.tx === CFG.role ? 1 : 0);
+          return (b.m.tx === role ? 1 : 0) - (a.m.tx === role ? 1 : 0);
         });
       }
       order.forEach(function(e2){
-        var m = e2.m, mine = !CFG.role || m.tx === CFG.role;
+        var m = e2.m, mine = !role || m.tx === role;
         var o = el('option', null, m.n + '  ' + m.id + '  ('
                    + m.s.length + ' signal' + (m.s.length === 1 ? '' : 's') + ')'
                    + (mine ? '' : '  — sent by ' + (m.tx || 'someone else')));
@@ -3721,7 +3769,7 @@ function openTxEditBody(){
       sel.onchange = function(){
         q('txfill').textContent =
           sel.value !== 'all'  ? 'Add every signal in this message' :
-          CFG.role             ? 'Add every signal ' + CFG.role + ' sends'
+          role                 ? 'Add every signal ' + role + ' sends'
                                : 'Add every signal in every message';
       };
       sel.onchange();
@@ -3783,76 +3831,108 @@ document.querySelectorAll('.cfgimport').forEach(function(b){ b.onclick = importS
    a way that is not obvious: they quietly offer the wrong half. It sat in the
    setup-file sheet once, which is the last thing anyone opens, so by the time
    you met it the work it would have saved was already done by hand. */
-function roleName(){ return CFG.role || ''; }
+/* Which node this logger is on one bus, 1-based in, '' for none. */
+function roleOf(bus){ return CFG.roles[(bus || 1) - 1] || ''; }
+
+/* The bus the open role sheet is answering for. Held here rather than read
+   back off the sheet, so a sheet opened for CAN 2 cannot be answered into
+   CAN 1 by a poll repainting something underneath it. */
+var ROLEBUS = 1;
 
 function renderRoleBtn(){
-  q('rolebtn').textContent = 'Role: ' + (CFG.role || 'none');
-  q('rolebtn').classList.toggle('set', !!CFG.role);
+  Array.prototype.forEach.call(document.querySelectorAll('.rolebtn'),
+    function(b){
+      var r = roleOf(+b.dataset.bus);
+      b.textContent = 'Role: ' + (r || 'none');
+      b.classList.toggle('set', !!r);
+    });
 }
 
-function setRole(v){
-  CFG.role = v || '';
+function setRole(bus, v){
+  CFG.roles[bus - 1] = v || '';
   renderRoleBtn();
-  renderRoleSheet();
+  renderRoleSheet(bus);
   renderSend();          /* the Send tab's Fill list depends on it */
   markDirty();
 }
 
-function renderRoleSheet(){
+function renderRoleSheet(bus){
   var list = q('rolelist'), note = q('rolenote');
   list.innerHTML = '';
+  ROLEBUS = bus;
+  q('roletitle').textContent =
+    'Which of these is this logger on CAN ' + bus + '?';
+
+  /* THIS bus's map, whatever the cell editor happens to be pointed at: the
+     sheet was opened for one bus, and a node list out of the other one is a
+     different machine's. */
+  var db = DBCS[bus - 1] || { m: [], nodes: [] };
+  var have = roleOf(bus);
 
   var counts = {};
-  DBC.m.forEach(function(m){ if(m.tx) counts[m.tx] = (counts[m.tx] || 0) + 1; });
-  var nodes = DBC.nodes || [];
+  db.m.forEach(function(m){ if(m.tx) counts[m.tx] = (counts[m.tx] || 0) + 1; });
+  var nodes = db.nodes || [];
 
   /* Skip first and always available. On a machine that already works, none of
-     the nodes in the file IS this logger, and that is the common case. */
-  var skip = el('button', CFG.role ? null : 'pri',
-                'Skip — I am only listening');
-  skip.onclick = function(){ setRole(''); };
+     the nodes in the file IS this logger - and that stays the right answer for
+     ONE of the two buses even when the other one has a node to name. */
+  var skip = el('button', have ? null : 'pri',
+                'Skip \u2014 on CAN ' + bus + ' I am only listening');
+  skip.onclick = function(){ setRole(bus, ''); };
   list.appendChild(skip);
 
   nodes.forEach(function(n){
     var k = counts[n] || 0;
-    var b = el('button', CFG.role === n ? 'pri' : null,
+    var b = el('button', have === n ? 'pri' : null,
                n + '  (sends ' + k + ' message' + (k === 1 ? '' : 's') + ')');
-    b.onclick = function(){ setRole(n); };
+    b.onclick = function(){ setRole(bus, n); };
     list.appendChild(b);
   });
 
   if(!nodes.length){
-    note.innerHTML = 'This frame map names no nodes in a <code>BU_</code> line, '
-      + 'so there is nothing to choose from — both Fill buttons will offer '
-      + 'everything.';
+    note.innerHTML = 'CAN ' + bus + "'s frame map names no nodes in a "
+      + '<code>BU_</code> line, so there is nothing to choose from \u2014 both '
+      + 'Fill buttons will offer everything on this bus.';
     return;
   }
-  if(CFG.role){
-    var mine = DBC.m.filter(function(m){ return m.tx === CFG.role; })
-                    .map(function(m){ return m.n; });
+  if(have){
+    var mine = db.m.filter(function(m){ return m.tx === have; })
+                   .map(function(m){ return m.n; });
     note.innerHTML = mine.length
-      ? 'Fill on the Send tab offers <b>' + mine.join('</b>, <b>')
+      ? 'On CAN ' + bus + ', Fill on the Send tab offers <b>'
+        + mine.join('</b>, <b>')
         + '</b>. Fill on the dashboard offers everything else.'
-      : 'Nothing in this frame map is sent by <b>' + CFG.role + '</b>, so there '
-        + 'is nothing for this logger to write.';
+      : "Nothing in CAN " + bus + "'s frame map is sent by <b>" + have
+        + '</b>, so there is nothing for this logger to write on that bus.';
   } else {
-    note.innerHTML = 'Skipped — both Fill buttons offer every message, and you '
-      + 'sort out which is which. That is the right answer when you are '
-      + 'recording a machine that already works.';
+    note.innerHTML = 'Skipped \u2014 on CAN ' + bus + ' both Fill buttons offer '
+      + 'every message, and you sort out which is which. That is the right '
+      + 'answer when you are recording a machine that already works.';
   }
 }
 
-function openRole(){
-  /* Returns the promise: the sheet is only correct once the frame map has
-     arrived, and callers - including the screenshot tool - have to be able to
-     wait for that rather than catching it half-built. */
-  return loadDbc().then(function(){
-    renderRoleSheet();
+function openRole(bus){
+  /* Returns the promise: the sheet is only correct once THAT bus's frame map
+     has arrived, and callers - including the screenshot tool - have to be able
+     to wait for that rather than catching it half-built.
+
+     EDBUS is put back deliberately. loadDbc() moves it as a side effect, and
+     answering a question about CAN 2's role must not silently repoint the cell
+     editor at CAN 2 - that is a different piece of state, and the operator did
+     not touch it. */
+  bus = busOr(bus);
+  var keep = EDBUS;
+  return loadDbc(bus).then(function(){
+    EDBUS = keep;
+    renderRoleSheet(bus);
     q('rolesheet').classList.add('on');
   });
 }
 
-q('rolebtn').onclick   = openRole;
+Array.prototype.forEach.call(document.querySelectorAll('.rolebtn'),
+  function(b){
+    b.onclick = function(){ openRole(+b.dataset.bus); };
+  });
 q('role_close').onclick = function(){ q('rolesheet').classList.remove('on'); };
 q('rolesheet').onclick  = function(e){
   if(e.target === q('rolesheet')) q('rolesheet').classList.remove('on');
@@ -3912,8 +3992,9 @@ q('dbcpick').onchange = function(){
               + (d.dropped ? ' — ' + d.dropped + ' item(s) from the old map '
                         + 'removed' : ''), 'ok');
         /* Straight into the question that has to be answered before either
-           Fill button is worth pressing. */
-        return openRole();
+           Fill button is worth pressing - for the bus whose map just changed,
+           since that is the one whose node list is now different. */
+        return openRole(target);
       });
     })
     .catch(function(){

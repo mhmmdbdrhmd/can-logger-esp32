@@ -405,8 +405,24 @@ static void startRecording() {
       LOG_LIVE(LVL_WARN, "cannot create %s - the CSV will have no legend",
                g_rec.metaName);
     } else {
+      /* What each controller ENDED UP doing, not what config.h asked for -
+       * with CANn_AUTODETECT they differ, and the sidecar is what a reader
+       * trusts long after nobody remembers the build settings. */
+      MetaBus mb[CAN_BUSES];
+      for (uint8_t b = 0; b < CAN_BUSES; b++) {
+        const BusHealth &h = g_rec.bus[b];
+        mb[b].bitrateKbps = h.bitrateKbps;
+        mb[b].crystalMHz  = h.crystalMHz;
+        mb[b].listenOnly  = h.listenOnly;
+        mb[b].present     = h.present;
+        /* Assumed unless a search actually confirmed it. A detection that ran
+         * and FAILED counts as assumed, which is the whole point of the
+         * distinction. */
+        mb[b].fromConfig  = !(h.autoDetect && h.autoFound);
+      }
       const size_t mn = metaJson(s_buf, sizeof(s_buf),
-                                 g_rec.csvName + 1, g_rec.logName + 1, g_dbc);
+                                 g_rec.csvName + 1, g_rec.logName + 1, g_dbc,
+                                 mb);
       if (mn) meta.write((const uint8_t *)s_buf, mn);
       else    LOG_LIVE(LVL_WARN, "meta did not fit the buffer - frame map too "
                                  "large for %u bytes", (unsigned)sizeof(s_buf));

@@ -197,7 +197,7 @@ struct DashConfig {
   uint8_t   rows;
   uint16_t  pollMs;      /* how often the browser asks for values            */
 
-  /* Which BU_ node of the frame map this logger IS, or "" for no role.
+  /* Which BU_ node of that bus's frame map this logger IS, or "" for no role.
    *
    * A .dbc states who transmits each message but never which of those nodes
    * is the box running this firmware, and that one missing fact is the whole
@@ -206,10 +206,19 @@ struct DashConfig {
    * dashboard. With no role - the honest answer whenever the logger is just
    * listening to a working machine - both offer everything.
    *
+   * ONE PER BUS, indexed like everything else here: 0 = CAN1, 1 = CAN2. Not
+   * one shared answer, because the two buses have their own frame maps and so
+   * their own BU_ node lists: a name that identifies this logger on the
+   * diagnostic bus usually does not appear in the powertrain bus's file at
+   * all, and the logger is very often a NODE on one bus while being a pure
+   * listener on the other. One shared role forced those two situations to give
+   * the same answer, and could not even be read: the button said "Role:
+   * Tester" without saying which bus that was about.
+   *
    * Authoring only. The firmware never filters on it: a frame that arrives is
    * recorded whoever the file says sends it, and a frame that is sent is
    * built from the frame map alone. */
-  char      role[DASH_ROLE_MAX];
+  char      role[CAN_BUSES][DASH_ROLE_MAX];
 
   DashCell  cell[DASH_MAX_CELLS];
   TxCommand tx[TX_MAX_COMMANDS];

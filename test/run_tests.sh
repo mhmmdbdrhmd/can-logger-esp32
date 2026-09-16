@@ -344,12 +344,15 @@ int main(int argc, char **argv) {
   if (argc < 2) return 1;
   FILE *fp = fopen(argv[1], "r");
   if (!fp) return 1;
+  if (argc > 2) dbcSetNameMax((uint16_t)atoi(argv[2]));
   DbcDb db = {};
   std::string text;
   char line[DBC_LINE_MAX];
   while (fgets(line, sizeof(line), fp)) text += line;
   fclose(fp);
   dbcLoadText(db, text.c_str(), text.size());
+  fprintf(stderr, "clipped %u errors %u\n", (unsigned)db.nameClipped,
+          (unsigned)db.lineErrors);
   for (uint16_t mi = 0; mi < db.msgCount; mi++) {
     const DbcMessage &m = db.msg[mi];
     printf("M\t%s\t%lu\t%s\t%d\n", m.name, (unsigned long)m.id,
@@ -413,6 +416,84 @@ sys.exit(1)
 AGREE
 done
 
+echo
+echo "=== names shortened for name_max 16 / 32 lose nothing ==="
+# tools/dbc_abbrev.py shortens names so the firmware never has to cut them.
+# Read back through src/dbc.cpp at that name_max, a shortened map must hold the
+# same messages, signals and value labels in the same order, clip nothing, and
+# keep every Message.Signal distinct - two signals sharing a name is the one
+# thing this exists to prevent.
+cat > "$out/longnames.dbc" <<'LONG'
+BU_: SteeringControllerUnit Vector__XXX
+BO_ 100 EngineTemperatureInformation: 8 SteeringControllerUnit
+ SG_ EngineCoolantTemperatureMeasured : 0|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ EngineCoolantTemperatureDesired : 8|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ AccelerometerLongitudinalAxis_X : 16|8@1- (0.1,0) [-12.8|12.7] "g" Vector__XXX
+ SG_ AccelerometerLongitudinalAxis_Y : 24|8@1- (0.1,0) [-12.8|12.7] "g" Vector__XXX
+BO_ 200 TransmissionOilTemperatureInformation: 8 SteeringControllerUnit
+ SG_ TransmissionOilTemperature1 : 0|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ TransmissionOilTemperature2 : 8|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+ SG_ EngineCoolantTemperatureMeasured : 16|8@1+ (1,-40) [-40|215] "degC" Vector__XXX
+CM_ SG_ 100 EngineCoolantTemperatureMeasured "the one the gauge shows";
+BA_ "GenSigStartValue" SG_ 200 TransmissionOilTemperature1 40;
+VAL_ 100 EngineCoolantTemperatureDesired 255 "not available" ;
+VAL_ 200 TransmissionOilTemperature2 254 "error" 255 "not available" ;
+LONG
+for f in "$here"/../examples/*.dbc "$out/longnames.dbc"; do
+  for nm in 16 32; do
+    python3 "$here/../tools/dbc_abbrev.py" "$f" --name-max "$nm" -o "$out/ab.dbc" > /dev/null || fail=1
+    "$out/t_dump" "$f" 64 > "$out/orig.txt" 2>/dev/null
+    "$out/t_dump" "$out/ab.dbc" "$nm" > "$out/ab.txt" 2> "$out/ab.err"
+    python3 - "$out/orig.txt" "$out/ab.txt" "$out/ab.err" "$nm" "$(basename "$f")" <<'ABBR' || fail=1
+import sys
+orig, short, err, nm, name = sys.argv[1:6]
+nm = int(nm)
+o = [l.split("\t") for l in open(orig).read().splitlines() if l]
+a = [l.split("\t") for l in open(short).read().splitlines() if l]
+problems = []
+if [r[0] for r in o] != [r[0] for r in a]:
+    problems.append("a different number of messages or signals")
+for x, y in zip(o, a):
+    if x[0] == "M" and x[2] != y[2]:
+        problems.append("message %s changed id" % x[1])
+    if x[0] == "S" and (x[3:] != y[3:]):
+        problems.append("signal %s.%s changed: %s -> %s" % (x[1], x[2], x[3:], y[3:]))
+for r in a:
+    for n in (r[1:3] if r[0] == "S" else r[1:2]):
+        if len(n) > nm - 1:
+            problems.append("%s is longer than %d" % (n, nm - 1))
+refs = ["%s.%s" % (r[1], r[2]) for r in a if r[0] == "S"]
+orefs = ["%s.%s" % (r[1], r[2]) for r in o if r[0] == "S"]
+if len(set(refs)) != len(set(orefs)):
+    problems.append("two signals became one name")
+e = open(err).read().split()
+if e[1] != "0":
+    problems.append("the firmware still clipped %s name(s)" % e[1])
+if e[3] != "0":
+    problems.append("the shortened map has %s unparsable line(s)" % e[3])
+if problems:
+    print("  FAIL %-18s at %d: %s" % (name, nm, "; ".join(problems[:3])))
+    sys.exit(1)
+print("  ok   %-18s at %d: %d names checked, nothing clipped or merged"
+      % (name, nm, len(refs) + sum(1 for r in a if r[0] == "M")))
+ABBR
+  done
+done
+python3 - "$here/../tools" <<'SHORT' || fail=1
+import sys
+sys.path.insert(0, sys.argv[1])
+from dbc_abbrev import shorten
+cases = [("EngineCoolantTemperature", 15, "EngineCoolTemp"),
+         ("IMU_Accelerometer_X", 15, "IMU_Accel_X"),
+         ("TransmissionOilTemperature1", 15, "TransOilTemp1"),
+         ("ShortName", 15, "ShortName")]
+bad = [(n, want, shorten(n, lim)) for n, lim, want in cases if shorten(n, lim) != want]
+for n, want, got in bad:
+    print("  FAIL shorten(%s) gave %s, wanted %s" % (n, got, want))
+if not bad:
+    print("  ok   abbreviations read the way an engineer would write them")
+sys.exit(1 if bad else 0)
+SHORT
 
 if python3 "$here/../tools/check_dbc.py" "$here/../examples/example.dbc" > "$out/chk" 2>&1; then
     echo "  ok   check_dbc.py reports a clean file as clean"

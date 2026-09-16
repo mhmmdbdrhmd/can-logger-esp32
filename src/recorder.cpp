@@ -1063,6 +1063,11 @@ static void statusTick() {
     (unsigned long)g_rec.loopRate, "");
 
   /* ---- the detail that only the .log file gets -------------------------- */
+  g_rec.stackFreeWriter = uxTaskGetStackHighWaterMark(nullptr);
+  LOG_FILE(LVL_DEBUG, "stack free: can=%lu of %u writer=%lu of %u loop=%lu B",
+           (unsigned long)g_rec.stackFreeCan, (unsigned)TASK_STACK_CAN,
+           (unsigned long)g_rec.stackFreeWriter, (unsigned)TASK_STACK_WRITER,
+           (unsigned long)g_rec.stackFreeLoop);
   /* Sized to the line the logger actually writes. The old 240-byte buffer only
    * ever bought truncation somewhere less visible: LOG_LINE_CHARS is the real
    * limit and everything past it is dropped by vsnprintf in logger.cpp. */

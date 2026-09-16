@@ -319,6 +319,9 @@ static void canTaskFn(void *arg) {
      * interrupt is dead and this poll is all that is left. */
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
     g_rec.wakeCount++;
+    if ((g_rec.wakeCount & 0x3FF) == 0) {
+      g_rec.stackFreeCan = uxTaskGetStackHighWaterMark(nullptr);
+    }
 
     /* Measured across BOTH controllers, because that is what the deadline is
      * about: a frame arriving on CAN2 does not care that the task was busy
@@ -897,6 +900,9 @@ void appLoop() {
    * recorder.h for why it is worth a global. */
   g_rec.loopCount++;
   const uint32_t loopStart = micros();
+  if ((g_rec.loopCount & 0x3FF) == 0) {
+    g_rec.stackFreeLoop = uxTaskGetStackHighWaterMark(nullptr);
+  }
 
 #if ENABLE_OTA
   ArduinoOTA.handle();

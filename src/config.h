@@ -358,10 +358,15 @@
  * that decides whether the dashboard stays reachable. If you log two busy buses
  * and `qPeak` climbs towards this, raise it and accept a tighter dashboard.
  * Each entry costs 24 bytes. */
+#ifndef FRAME_QUEUE_LEN
 #define FRAME_QUEUE_LEN     512
+#endif
 
-/* Log lines buffered between any task and the single SD-owning writer task. */
+/* Log lines buffered between any task and the single SD-owning writer task.
+ * Each is 168 bytes of heap. */
+#ifndef LOG_QUEUE_LEN
 #define LOG_QUEUE_LEN       48
+#endif
 #define LOG_LINE_CHARS      160
 
 /* Lines of "live" log kept in RAM for the web terminal. */
@@ -372,8 +377,14 @@
 #define TASK_CORE_CAN       1       /* app core; core 0 is left to Wi-Fi      */
 #define TASK_CORE_WRITER    1
 
+/* Heap, both of them. The .log file reports how much of each was never
+ * touched (`stack free`), which is the figure to size these against. */
+#ifndef TASK_STACK_CAN
 #define TASK_STACK_CAN      4096
+#endif
+#ifndef TASK_STACK_WRITER
 #define TASK_STACK_WRITER   8192
+#endif
 
 /* ---------------------------------------------------------------------------
  *  8. LOGGING CADENCE

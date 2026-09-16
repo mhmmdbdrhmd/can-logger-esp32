@@ -165,6 +165,12 @@ struct RecStatus {
   uint32_t loopPermille  = 0;
   uint32_t sdPermille    = 0;
 
+  /* Bytes of each task's stack never used so far - the high-water mark, read
+   * by each task about itself. */
+  uint32_t stackFreeCan    = 0;
+  uint32_t stackFreeWriter = 0;
+  uint32_t stackFreeLoop   = 0;
+
   uint32_t rowRate       = 0;   /* CSV rows a second                        */
   uint32_t frameRateAll  = 0;   /* frames a second, both buses              */
   uint32_t rowsPerFrame10= 0;   /* tenths - the map's multiplier            */

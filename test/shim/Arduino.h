@@ -177,6 +177,7 @@ static inline size_t uxQueueMessagesWaiting(QueueHandle_t h) { return h ? h->q.s
 
 typedef void *TaskHandle_t;
 static inline void vTaskDelay(int) {}
+static inline unsigned uxTaskGetStackHighWaterMark(TaskHandle_t) { return 0; }
 
 typedef void *SemaphoreHandle_t;
 static inline SemaphoreHandle_t xSemaphoreCreateMutex() { return (void *)1; }

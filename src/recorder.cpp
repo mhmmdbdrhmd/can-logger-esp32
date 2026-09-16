@@ -517,11 +517,29 @@ void recorderLoadDbc() {
   }
 }
 
+/* Empties the frame queue without recording anything, still counting each
+ * frame for the dashboard. Called between the card operations that start a
+ * recording: the writer is the queue's only reader, and those operations are
+ * slow enough to fill it. On a card holding a few dozen files the start took
+ * 1.5 s - 512 frames at 350/s - and what arrived after that was dropped. A
+ * frame taken here belongs to no recording, so nothing is lost: a recording
+ * begins when its file is ready, not when it was asked for. */
+static void drainUnrecorded() {
+  if (!g_frameQueue) return;
+  CanFrame f;
+  while (xQueueReceive(g_frameQueue, &f, 0) == pdTRUE) {
+    const uint8_t fb = (f.bus < CAN_BUSES) ? f.bus : 0;
+    if (!f.tx) busObserve(g_bus[fb], f, &g_dbc[fb]);
+  }
+}
+
 /* Lowest free index: 1.csv, 2.csv, ... A slot counts as taken if either the
- * .csv or the .log exists, so the pair always shares a number. */
+ * .csv or the .log exists, so the pair always shares a number. Every lookup is
+ * a directory search on the card, so the queue is drained between them. */
 static uint16_t nextFileIndex() {
   char a[20], b[20], c[20];
   for (uint16_t i = 1; i < 10000; i++) {
+    drainUnrecorded();
     snprintf(a, sizeof(a), "/%u.csv",  i);
     snprintf(b, sizeof(b), "/%u.log",  i);
     snprintf(c, sizeof(c), "/%u.meta", i);
@@ -589,8 +607,10 @@ static void startRecording() {
 
   s_csv = SD.open(g_rec.csvName, FILE_WRITE);
   if (!s_csv) { LOG_LIVE(LVL_ERROR, "cannot create %s", g_rec.csvName); return; }
+  drainUnrecorded();
 
   s_log = SD.open(g_rec.logName, FILE_WRITE);
+  drainUnrecorded();
   if (!s_log) {
     LOG_LIVE(LVL_WARN, "cannot create %s - continuing without the detailed log",
              g_rec.logName);
@@ -637,6 +657,7 @@ static void startRecording() {
       meta.close();
     }
   }
+  drainUnrecorded();
 
   const size_t hdr = csvColumnHeader(s_buf, sizeof(s_buf));
   if (hdr) {
@@ -650,6 +671,7 @@ static void startRecording() {
                        "into rows - read it against %s", g_rec.csvName,
              g_rec.metaName);
   }
+  drainUnrecorded();
 
   s_dec.reset(g_dbc);
   for (uint8_t b = 0; b < CAN_BUSES; b++) {

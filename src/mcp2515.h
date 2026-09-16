@@ -144,9 +144,34 @@ public:
     TX_BAD_FRAME      /* identifier or length out of range                   */
   };
 
+  /* ---- WHILE A TRANSMIT IS WAITING, SOMEBODY MUST STILL BE RECEIVING -----
+   *
+   * sendFrame() waits for the controller to finish with the frame, and that
+   * wait is bounded at 200 x 100 us PER ATTEMPT - up to 20 ms, and up to 60 ms
+   * across three attempts when arbitration keeps being lost. It runs in the
+   * CAN task, which is the only task allowed to touch these chips, so for the
+   * whole of that wait NOTHING IS DRAINING THE RECEIVE BUFFERS.
+   *
+   * An MCP2515 holds two frames. At 250 kbit/s a third arrives about 5.8 ms
+   * after the first on a bus running 343 frames/s, so a single 20 ms wait is
+   * three lost frames - reported as a controller overflow, with no hint that a
+   * transmit caused it. Any Send from the dashboard during a recording - or a
+   * cyclic setpoint - lands in exactly that window.
+   *
+   * The hook is called between register polls inside that wait - never inside
+   * an SPI transaction - and is expected to drain every controller. It is
+   * static because it belongs to the bus, not to one chip: a transmit on CAN1
+   * must not stall CAN2 either.
+   *
+   * Set it once at start-up. Passing nullptr restores the plain wait, which is
+   * what the host tests use. */
+  typedef void (*BusyHook)(void *ctx);
+  static void setBusyHook(BusyHook hook, void *ctx);
+
   /* Sends one frame and waits for the controller to finish with it. Blocks for
    * at most a few milliseconds - it is called from the CAN task, which is the
-   * only task allowed to touch this chip.
+   * only task allowed to touch this chip. See setBusyHook() above: without a
+   * hook installed that wait is time in which no frame is being received.
    *
    * `tecDelta`, when given, receives the change in the transmit error counter,
    * which is the evidence behind a TX_NO_ACK: an unacknowledged frame moves it

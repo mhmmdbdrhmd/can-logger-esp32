@@ -257,7 +257,7 @@ def load_dbc(path):
             if tx and tx not in nodes:
                 nodes.append(tx)
             cur = {"n": p[2].rstrip(":"), "id": "0x%03X" % (int(p[1]) & 0x1FFFFFFF),
-                   "tx": tx, "mux": 0, "s": []}
+                   "tx": tx, "mux": 0, "s": [], "_raw": p[1]}
             msgs.append(cur)
         elif s.startswith("SG_ ") and cur is not None:
             m = SG_RE.match(line)
@@ -296,11 +296,17 @@ def load_dbc(path):
             p = s.split(None, 3)
             if len(p) >= 4:
                 labels = re.findall(r'"([^"]*)"', p[3])
-                vals.setdefault(p[2], []).extend(labels)
+                # Keyed by (message id, signal) - a VAL_ line names both, and
+                # J1939 files reuse one signal name across dozens of messages.
+                # Keyed by name alone, every one of those tables was merged and
+                # hung off all of them: wrong labels, and a heap estimate 2.3x
+                # the firmware's own.
+                vals.setdefault((p[1], p[2]), []).extend(labels)
 
     for msg in msgs:
         for sg in msg["s"]:
-            sg["v"] = vals.get(sg["n"], [])
+            sg["v"] = vals.get((msg["_raw"], sg["n"]), [])
+        del msg["_raw"]
 
     return {"loaded": 1 if msgs else 0, "nodes": nodes, "m": msgs}
 

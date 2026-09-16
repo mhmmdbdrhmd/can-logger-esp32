@@ -1,4 +1,6 @@
 #include "dbc.h"
+#include "decode.h"   /* LIVE_TEXT_MAX - the live slots are part of a signal's cost */
+#include "psram.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -216,9 +218,9 @@ bool dbcAllocate(DbcDb &db, const DbcCounts &want) {
   for (int attempt = 0; attempt < 5; attempt++) {
     if (m == 0 && g == 0 && v == 0) break;
 
-    DbcMessage *pm = m ? (DbcMessage *)calloc(m, sizeof(DbcMessage)) : nullptr;
-    DbcSignal  *pg = g ? (DbcSignal  *)calloc(g, sizeof(DbcSignal))  : nullptr;
-    DbcValDesc *pv = v ? (DbcValDesc *)calloc(v, sizeof(DbcValDesc)) : nullptr;
+    DbcMessage *pm = m ? (DbcMessage *)psCalloc(m, sizeof(DbcMessage)) : nullptr;
+    DbcSignal  *pg = g ? (DbcSignal  *)psCalloc(g, sizeof(DbcSignal))  : nullptr;
+    DbcValDesc *pv = v ? (DbcValDesc *)psCalloc(v, sizeof(DbcValDesc)) : nullptr;
 
     if ((!m || pm) && (!g || pg) && (!v || pv)) {
       db.msg = pm; db.sig = pg; db.val = pv;
@@ -304,6 +306,9 @@ void dbcReset(DbcDb &db) {
   db.valCount   = 0;
   db.version[0] = '\0';
   db.lineErrors = 0;
+  db.skipped    = 0;
+  db.curDropped = 0;
+  db.lastSkip   = 0;
   db.nameClipped = 0;
   db.overflow   = 0;
   db.loaded     = 0;
@@ -376,9 +381,15 @@ static int16_t findMsgByRawId(const DbcDb &db, uint32_t rawId) {
 static int16_t findSignal(const DbcDb &db, int16_t msgIdx, const char *name) {
   if (msgIdx < 0) return -1;
   const DbcMessage &m = db.msg[msgIdx];
+  /* Compared the way the stored name was clipped. A name longer than the slot
+   * is stored cut short, and a VAL_ or BA_ line naming it in full would
+   * otherwise never match - its value table silently lost. */
+  const size_t cap = sizeof(db.sig[0].name) - 1;
   for (uint16_t i = 0; i < m.signalCount; i++) {
     const uint16_t s = m.firstSignal + i;
-    if (strcmp(db.sig[s].name, name) == 0) return (int16_t)s;
+    if (strncmp(db.sig[s].name, name, cap) == 0 &&
+        (strlen(name) >= cap || db.sig[s].name[strlen(name)] == '\0'))
+      return (int16_t)s;
   }
   return -1;
 }
@@ -388,6 +399,10 @@ static int16_t findSignal(const DbcDb &db, int16_t msgIdx, const char *name) {
  * ======================================================================== */
 static bool parseBo(DbcDb &db, char *p) {
   char tok[40];
+
+  /* Until this message is actually stored, the SG_ lines that follow it have
+   * no home. */
+  db.curDropped = 1;
 
   if (!nextToken(&p, tok, sizeof(tok))) return false;
   char *endp = nullptr;
@@ -402,7 +417,7 @@ static bool parseBo(DbcDb &db, char *p) {
   if (!nextToken(&p, tok, sizeof(tok))) return false;
   const uint8_t dlc = (uint8_t)strtoul(tok, nullptr, 10);
 
-  if (db.msgCount >= db.msgCap) { db.overflow = 1; return false; }
+  if (db.msgCount >= db.msgCap) { db.overflow = 1; db.lastSkip = 1; return false; }
 
   DbcMessage &m = db.msg[db.msgCount];
   m.id          = rawId & 0x1FFFFFFFu;
@@ -420,11 +435,16 @@ static bool parseBo(DbcDb &db, char *p) {
 
   db.msgCount++;
   db.loaded = 1;
+  db.curDropped = 0;
   return true;
 }
 
 static bool parseSg(DbcDb &db, char *p) {
   if (db.msgCount == 0) return false;                 /* SG_ before any BO_ */
+  /* The message this signal belongs to was not stored. Appending it to the
+   * previous message would decode that message's frames with this one's
+   * bits. */
+  if (db.curDropped) { db.lastSkip = 1; return false; }
   DbcMessage &m = db.msg[db.msgCount - 1];
 
   /* Signals of one message must stay contiguous, which they are as long as the
@@ -514,7 +534,7 @@ static bool parseSg(DbcDb &db, char *p) {
   char *after = readQuoted(p, unit, sizeof(unit));
   (void)after;
 
-  if (db.sigCount >= db.sigCap) { db.overflow = 1; return false; }
+  if (db.sigCount >= db.sigCap) { db.overflow = 1; db.lastSkip = 1; return false; }
 
   DbcSignal &s = db.sig[db.sigCount];
   memset(&s, 0, sizeof(s));
@@ -658,6 +678,13 @@ bool dbcParseLine(DbcDb &db, char *line) {
   char *save = p;
   if (!nextToken(&p, kw, sizeof(kw))) return true;
 
+  /* A keyword on its own is the NS_ preamble's list of keywords, which every
+   * DBC carries - not a statement, and not an error. Counting it made the
+   * error figure non-zero on every file ever loaded. */
+  if (!*skipSpace(p)) return true;
+
+  db.lastSkip = 0;
+
   bool ok = true;
 
   if      (strcmp(kw, "BO_")  == 0)          ok = parseBo(db, p);
@@ -676,7 +703,13 @@ bool dbcParseLine(DbcDb &db, char *line) {
                                                        * deliberately ignored */
   }
 
-  if (!ok) db.lineErrors++;
+  if (!ok) {
+    /* A definition that refers to something the tables had no room for - a
+     * VAL_ for a signal that was never stored - is part of the same shortage,
+     * not a malformed line. */
+    if (db.lastSkip || (db.overflow && strcmp(kw, "BO_") != 0)) db.skipped++;
+    else                                                       db.lineErrors++;
+  }
   return ok;
 }
 
@@ -943,4 +976,49 @@ bool dbcSignalRef(const DbcDb &db, uint16_t si, char *out, size_t cap) {
     return true;
   }
   return false;
+}
+
+
+/* ---------------------------------------------------------------------------
+ *  Fitting a counted file to the heap
+ *
+ *  Split out of recorder.cpp's loader so it can be tested without an SD card,
+ *  a heap or a board. The regression it exists to catch is a real one: a
+ *  DBC_HEAP_RESERVE larger than the free heap makes `room` zero, the scale
+ *  factor zero, and every message on every bus disappears - while the log says
+ *  only "wants N KB but only 0 KB is free", which reads like a big file rather
+ *  than a broken constant. See test_dbc.cpp.
+ * -------------------------------------------------------------------------*/
+size_t dbcBytesPerMessage() { return sizeof(DbcMessage); }
+
+size_t dbcBytesPerSignal() {
+  /* The live-value slots are allocated alongside the tables by liveAllocate(),
+   * so leaving them out understates a signal by a fifth. */
+  return sizeof(DbcSignal) + LIVE_TEXT_MAX + sizeof(uint32_t) + 1;
+}
+
+size_t dbcBytesPerValue() { return sizeof(DbcValDesc); }
+
+DbcFit dbcFitToHeap(DbcCounts &want, size_t heap, size_t reserve, bool psram) {
+  const size_t need = (size_t)want.messages * dbcBytesPerMessage()
+                    + (size_t)want.signals  * dbcBytesPerSignal()
+                    + (size_t)want.values   * dbcBytesPerValue();
+
+  const size_t room = psram ? heap
+                            : ((heap > reserve) ? heap - reserve : 0);
+
+  if (need <= room) return DBC_FIT_ALL;
+
+  if (room == 0) {
+    want.messages = 0;
+    want.signals  = 0;
+    want.values   = 0;
+    return DBC_FIT_NONE;
+  }
+
+  const double k = need ? (double)room / (double)need : 0.0;
+  want.messages = (uint16_t)((double)want.messages * k);
+  want.signals  = (uint16_t)((double)want.signals  * k);
+  want.values   = (uint16_t)((double)want.values   * k);
+  return DBC_FIT_PART;
 }

@@ -1,4 +1,5 @@
 #include "decode.h"
+#include "psram.h"
 
 #include <stdlib.h>
 #include <stdarg.h>
@@ -36,9 +37,11 @@ bool liveAllocate(LiveSignals &l, uint16_t signals) {
   liveFree(l);
   if (!signals) return true;
 
-  l.text   = (char (*)[LIVE_TEXT_MAX])calloc(signals, LIVE_TEXT_MAX);
-  l.lastMs = (uint32_t *)calloc(signals, sizeof(uint32_t));
-  l.seen   = (uint8_t  *)calloc(signals, 1);
+  /* 21 bytes a signal, so an 8000-signal map is 168 KB of these alone -
+   * more than the internal heap has to give. Same home as the tables. */
+  l.text   = (char (*)[LIVE_TEXT_MAX])psCalloc(signals, LIVE_TEXT_MAX);
+  l.lastMs = (uint32_t *)psCalloc(signals, sizeof(uint32_t));
+  l.seen   = (uint8_t  *)psCalloc(signals, 1);
 
   if (!l.text || !l.lastMs || !l.seen) {
     /* The live view is a convenience; the recording is not. Give the memory

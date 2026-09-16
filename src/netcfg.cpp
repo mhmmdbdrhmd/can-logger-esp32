@@ -1,6 +1,7 @@
 #include "netcfg.h"
 #include "config.h"
 #include "logger.h"
+#include "mem.h"
 #include "recorder.h"
 
 #include <WiFi.h>
@@ -135,6 +136,13 @@ static void startAp(const char *why) {
            g_net.apSsid.c_str(), why, WiFi.softAPIP().toString().c_str());
 }
 
+/* Set when the driver itself could not be brought up. Retrying that is not a
+ * recovery strategy - the memory it wanted is not going to appear while the
+ * logger is recording - and each attempt reprints four lines of ESP-IDF
+ * errors, which is how the one message that explains the fault scrolls off
+ * the top of somebody's serial monitor. */
+static bool s_wifiDead = false;
+
 void netBegin() {
   WiFi.persistent(false);
 
@@ -143,7 +151,33 @@ void netBegin() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(g_net.hostname.c_str());
   WiFi.setSleep(false);                 /* keeps the dashboard responsive */
-  WiFi.begin(g_net.staSsid.c_str(), g_net.staPass.c_str());
+
+  /* begin() returns a wl_status_t, NOT a bool - and WL_CONNECT_FAILED is 4, so
+   * testing it with ! would never fire. It is the code the core returns when
+   * wifiLowLevelInit() could not bring the driver up at all, which on this
+   * firmware means one thing in practice: esp_wifi_init could not get its
+   * memory, and the core printed "STA enable failed!" without ever mentioning
+   * memory. Said plainly here, with the numbers that fix it, because the
+   * alternative is reading ESP-IDF error codes off a serial log.
+   *
+   * This is NOT the same as failing to join: a wrong password or an absent
+   * access point still starts the driver and shows up as a timeout below. */
+  if (WiFi.begin(g_net.staSsid.c_str(), g_net.staPass.c_str())
+        == WL_CONNECT_FAILED) {
+    LOG_LIVE(LVL_ERROR, "the Wi-Fi driver would not start - almost always out "
+                        "of memory (esp_wifi_init -> ESP_ERR_NO_MEM), not a "
+                        "wrong SSID. %lu bytes free, largest block %lu. Lower "
+                        "FRAME_QUEUE_LEN or SD_BLOCK_BYTES in config.h and "
+                        "reflash; recording is unaffected and continues.",
+             (unsigned long)memStat().freeNow,
+             (unsigned long)memLargestBlock());
+    snprintf(s_status, sizeof(s_status), "Wi-Fi driver failed to start");
+    s_wifiDead = true;
+    /* No AP fallback: it would need the same allocation and fail the same way,
+     * and a second identical failure in the log helps nobody. */
+    g_net.apMode = false;
+    return;
+  }
 
   LOG_LIVE(LVL_INFO, "joining Wi-Fi '%s' ...", g_net.staSsid.c_str());
 
@@ -166,6 +200,8 @@ void netBegin() {
 }
 
 void netService() {
+  if (s_wifiDead) return;
+
   static uint32_t last = 0;
   if (millis() - last < 5000) return;
   last = millis();

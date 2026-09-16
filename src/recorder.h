@@ -67,6 +67,8 @@ struct BusHealth {
    * controller, which only remembers that it happened. Measured against the
    * rolling counters carried by the bus itself, the true figure was roughly
    * 1.7x this - so treat it as the floor it is, never as the total. */
+  uint8_t  canOvfEflg   = 0;   /* EFLG bits of the last receive overflow    */
+  uint8_t  canIntfLast  = 0;   /* last sticky CANINTF cleared off this bus   */
   uint32_t canOvfEvents    = 0;
   uint32_t canOvfFramesMin = 0;
 
@@ -119,6 +121,60 @@ struct RecStatus {
   uint32_t wakeCount     = 0;   /* reader wake-ups, interrupt or timeout      */
   uint32_t wakeRate      = 0;
 
+  /* HOW OFTEN appLoop() ACTUALLY RUNS, per second.
+   *
+   * This is not a curiosity, it is the one number that says whether the web
+   * server is being scheduled at all. The Arduino loop task runs at priority 1
+   * on core 1 (CONFIG_ARDUINO_RUNNING_CORE is 1), and this firmware pins the
+   * CAN reader at 20 and the writer at 10 to that same core. FreeRTOS is
+   * strictly preemptive, so the loop - and with it handleClient(), which IS
+   * the whole web server - only runs when both of those are blocked.
+   *
+   * appLoop() ends in delay(2), so a healthy board sits somewhere around
+   * 300-500 passes a second. The writer's duty cycle rises with the number of
+   * signals the frame map decodes, because every decoded signal is another CSV
+   * row: a bigger map does not merely cost heap, it costs the web server its
+   * share of core 1. If this figure collapses while the map grows, that is the
+   * mechanism - and no amount of heap will fix it. */
+  uint32_t loopCount     = 0;
+  uint32_t loopRate      = 0;
+
+  /* ---- WHERE CORE 1 ACTUALLY GOES -------------------------------------
+   *
+   * Hand-instrumented, because CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not
+   * set in the sdkconfig arduino-esp32 ships, so uxTaskGetSystemState()
+   * reports no runtime counters. Each of the three tasks brackets its own work
+   * with esp_timer_get_time() and adds the span here; statusTick() converts
+   * the accumulators into per-second figures and zeroes them.
+   *
+   * PERMILLE, not percent: at 1000 Hz tick and microsecond spans, busyUs
+   * divided by the interval in milliseconds IS permille, exactly, with no
+   * rounding step. 1000 = one whole core.
+   *
+   * sdBusyUs is a SUBSET of writerBusyUs - it is the part of the writer's time
+   * spent inside SD.write()/flush(). Subtracting it leaves the cost of
+   * decoding and formatting, and that split is the whole point: it decides
+   * whether a bigger frame map costs CPU or costs card. */
+  uint32_t canBusyUs     = 0;
+  uint32_t writerBusyUs  = 0;
+  uint32_t loopBusyUs    = 0;
+  uint32_t sdBusyUs      = 0;
+
+  uint32_t canPermille   = 0;
+  uint32_t writerPermille= 0;
+  uint32_t loopPermille  = 0;
+  uint32_t sdPermille    = 0;
+
+  uint32_t rowRate       = 0;   /* CSV rows a second                        */
+  uint32_t frameRateAll  = 0;   /* frames a second, both buses              */
+  uint32_t rowsPerFrame10= 0;   /* tenths - the map's multiplier            */
+  uint32_t usPerRow10    = 0;   /* tenths of a us to decode+format one row  */
+  uint32_t usPerFlush    = 0;   /* mean us inside one SD block write        */
+  uint32_t flushRate     = 0;   /* SD block writes a second                 */
+
+  uint64_t rowsAtLastStatus  = 0;
+  uint32_t flushAtLastStatus = 0;
+
   /* Worst time one service pass took to drain BOTH controllers, in
    * microseconds. This is the number the whole dual-bus design turns on.
    *
@@ -129,6 +185,25 @@ struct RecStatus {
    * show. Expect ~115 us with both buses busy; anything approaching 200 means
    * the margin is gone. */
   uint32_t drainMaxUs    = 0;
+
+  /* THE GAP BETWEEN DRAINS, which is the figure drainMaxUs cannot see.
+   *
+   * drainMaxUs times the drain itself. It says nothing about how long the CAN
+   * task was away between drains - and that is where frames are actually lost.
+   * A transmit that spins for 20 ms waiting on TXREQ, or a scheduling delay,
+   * leaves drainMaxUs looking healthy at a few hundred microseconds while the
+   * controller quietly overflows.
+   *
+   * Measured end-of-drain to start-of-next-drain, so a gap longer than two
+   * frame times means a frame COULD have been lost and a gap longer than that
+   * plus the queue means one WAS. txBusyUs is the part of that gap spent
+   * inside sendFrame(), which separates "we were transmitting" from "we were
+   * not scheduled" - two different faults with two different fixes. */
+  uint32_t drainGapMaxUs = 0;
+  uint32_t txBusyUs      = 0;
+  uint32_t txMaxUs       = 0;
+  uint32_t rxDeadlineUs  = 0;   /* two frame times at this bus's bit rate    */
+  uint32_t gapOverruns   = 0;   /* gaps that exceeded it                     */
 
   /* Lifetime totals. The counters above are zeroed when a recording starts so
    * that "lost" describes THAT recording and not something that happened at

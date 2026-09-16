@@ -7,6 +7,8 @@
 #include "dash.h"
 #include "dashstore.h"
 #include "cantx.h"
+#include "psram.h"
+#include "mem.h"
 
 #include <SPI.h>
 #include <SD.h>
@@ -42,6 +44,10 @@ static uint8_t  s_idCursor[CAN_BUSES] = { 0, 0 };
 static uint32_t s_lastStatusMs = 0;
 static uint32_t s_framesAtLastStatus[CAN_BUSES] = { 0, 0 };
 static uint32_t s_irqAtLastStatus[CAN_BUSES]    = { 0, 0 };
+static uint32_t s_loopAtLastStatus = 0;
+
+static uint32_t s_lostSeen  = 0;   /* frames lost that have been reported     */
+static uint8_t  s_lostSaid  = 0;
 static uint32_t s_wakeAtLastStatus   = 0;
 static bool     s_warnedIntStuck[CAN_BUSES]     = { false, false };
 static uint64_t s_bitsAtLastStatus[CAN_BUSES]   = { 0, 0 };
@@ -69,8 +75,71 @@ uint32_t recorderElapsedMs() {
   return g_rec.recording ? (millis() - g_rec.startMs) : 0;
 }
 
+/* ------------------------------------------------------------------------ *
+ *  Unstick a card that was cut off mid-write
+ *
+ *  A serial upload is not a graceful shutdown. esptool pulls EN low through
+ *  the auto-reset transistors at whatever instant it likes, and with
+ *  AUTO_START_RECORDING this firmware is almost always in the middle of a
+ *  32 KB block write when that happens. The ESP32 restarts; the SD card does
+ *  not, because its 3V3 rail never dropped. It is still sitting in the data
+ *  phase of a multi-block write, holding DO low to say "busy", and it will
+ *  ignore CMD0 forever. f_mount then fails with FR_DISK_ERR (1) - "a hard
+ *  error occurred in the low level disk I/O layer" - which reads like a dead
+ *  card but is really an unfinished sentence.
+ *
+ *  The cure is the one the SD spec gives for exactly this: clock the card
+ *  until it lets go. Phase 1 holds CS low and shifts 0xFF until DO releases,
+ *  finishing the transaction the reset interrupted. Phase 2 raises CS and
+ *  sends the >=74 idle clocks the card needs before it will accept CMD0
+ *  again. Bit-banged on purpose - this runs before the SPI peripheral is
+ *  attached to the pins, and it must work even when the driver's own state
+ *  machine is the thing that is confused.
+ *
+ *  Costs about 8 ms in the worst case and nothing in the common one. An OTA
+ *  update never needs it: onStart() closes the file first, which is why
+ *  flashing over the air has always mounted cleanly and flashing over USB
+ *  did not.                                                                */
+static void sdBusRecover() {
+  pinMode(PIN_SD_CS,   OUTPUT);
+  pinMode(PIN_SD_SCK,  OUTPUT);
+  pinMode(PIN_SD_MOSI, OUTPUT);
+  pinMode(PIN_SD_MISO, INPUT_PULLUP);
+
+  digitalWrite(PIN_SD_MOSI, HIGH);        /* 0xFF on the line throughout */
+  digitalWrite(PIN_SD_SCK,  LOW);
+
+  /* Phase 1: card selected, clock until DO goes high (not busy) and stays
+   * there for a full byte. ~200 kHz, capped so a genuinely absent or dead
+   * card cannot stall the boot. */
+  digitalWrite(PIN_SD_CS, LOW);
+  uint16_t highRun = 0;
+  uint16_t clocks  = 0;
+  for (; clocks < 8192 && highRun < 8; clocks++) {
+    digitalWrite(PIN_SD_SCK, HIGH); delayMicroseconds(2);
+    highRun = digitalRead(PIN_SD_MISO) ? (uint16_t)(highRun + 1) : 0;
+    digitalWrite(PIN_SD_SCK, LOW);  delayMicroseconds(2);
+  }
+
+  /* Phase 2: deselect, then the mandatory idle clocks. */
+  digitalWrite(PIN_SD_CS, HIGH);
+  for (uint16_t i = 0; i < 160; i++) {
+    digitalWrite(PIN_SD_SCK, HIGH); delayMicroseconds(2);
+    digitalWrite(PIN_SD_SCK, LOW);  delayMicroseconds(2);
+  }
+
+  /* Only worth a line when it actually did something. A card that was idle
+   * releases within the first byte or two. */
+  if (clocks > 64) {
+    LOG_LIVE(LVL_WARN, "SD card was still busy from an interrupted write - "
+                       "took %u clocks to release it. Normal after flashing "
+                       "over USB while recording.", (unsigned)clocks);
+  }
+}
+
 /* ------------------------------------------------------------------------ */
 bool recorderBeginSD() {
+  sdBusRecover();
   s_sdSpi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
 
   /* Try progressively slower clocks before giving up.
@@ -84,27 +153,74 @@ bool recorderBeginSD() {
    * so a card that needed 1 MHz is not a silent mystery later. */
   static const uint32_t SPEEDS[] = { SD_SPI_HZ, 10000000UL, 4000000UL, 1000000UL };
 
+  /* Several ROUNDS of the speed ladder, each after a longer settle.
+   *
+   * One round was not enough. After a USB flash the card regularly comes up
+   * in a state where every speed fails:
+   *
+   *     [E][sd_diskio.cpp:199] sdCommand(): Card Failed! cmd: 0x00
+   *     [E][sd_diskio.cpp:806] f_mount failed: (3) The physical drive cannot work
+   *     E NO SD CARD at any clock down to 1000 kHz
+   *
+   * and the consequence is out of all proportion to the cause: with no card
+   * there is no /config.txt, so the firmware falls back to compiled-in
+   * defaults, those say hotspot, and the board sits on its own AP recording
+   * nothing. An entire experiment run produces no data and looks like a
+   * Wi-Fi fault. It has cost two runs that way.
+   *
+   * A plain reset clears it every time - measured three for three on this
+   * board. The only thing a reset gives the card that the old single round
+   * did not is TIME: four attempts 50 ms apart is about 1.7 seconds, while a
+   * reset is several hundred milliseconds of quiet with the lines idle
+   * followed by a clean initialisation sequence.
+   *
+   * So: the same ladder, up to three times, settling 50 ms, then 300, then
+   * 800 before each round. Worst case adds about a second to a boot that was
+   * going to fail anyway, and turns the common case from "no card" into "card
+   * mounted, second round". */
+  static const uint16_t SETTLE_MS[] = { 50, 300, 800 };
+  const uint8_t ROUNDS = sizeof(SETTLE_MS) / sizeof(SETTLE_MS[0]);
+  const uint8_t NSPEED = sizeof(SPEEDS)    / sizeof(SPEEDS[0]);
+
   bool mounted = false;
-  for (uint8_t i = 0; i < sizeof(SPEEDS) / sizeof(SPEEDS[0]); i++) {
-    if (SD.begin(PIN_SD_CS, s_sdSpi, SPEEDS[i])) {
-      if (i) {
-        LOG_LIVE(LVL_WARN, "SD card needed a slower clock: %lu kHz instead of "
-                           "%lu kHz - check the wiring if writes cannot keep up",
-                 (unsigned long)(SPEEDS[i] / 1000UL),
-                 (unsigned long)(SD_SPI_HZ  / 1000UL));
+  for (uint8_t r = 0; r < ROUNDS && !mounted; r++) {
+    for (uint8_t i = 0; i < NSPEED; i++) {
+      if (SD.begin(PIN_SD_CS, s_sdSpi, SPEEDS[i])) {
+        if (i || r) {
+          LOG_LIVE(LVL_WARN, "SD card mounted at %lu kHz on round %u of %u "
+                             "(wanted %lu kHz on the first try) - check the "
+                             "wiring if writes cannot keep up",
+                   (unsigned long)(SPEEDS[i] / 1000UL),
+                   (unsigned)(r + 1), (unsigned)ROUNDS,
+                   (unsigned long)(SD_SPI_HZ / 1000UL));
+        }
+        mounted = true;
+        break;
       }
-      mounted = true;
-      break;
+      SD.end();
+      s_sdSpi.end();
+      delay(SETTLE_MS[r]);  /* let the card settle before re-clocking it */
+      sdBusRecover();       /* and clear anything the failed attempt left */
+      s_sdSpi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
     }
-    SD.end();
-    delay(50);          /* let the card settle before re-clocking it */
+    if (!mounted && r + 1 < ROUNDS) {
+      LOG_LIVE(LVL_WARN, "no SD card after round %u - waiting %u ms and trying "
+                         "the whole ladder again. This is usually the first "
+                         "boot after a USB flash, not a missing card.",
+               (unsigned)(r + 1), (unsigned)SETTLE_MS[r + 1]);
+      delay(SETTLE_MS[r + 1]);
+      sdBusRecover();
+    }
   }
 
   if (!mounted) {
-    LOG_LIVE(LVL_ERROR, "NO SD CARD at any clock down to %lu kHz - check that "
-                        "the module is powered (many need 5V/VIN, not 3V3), "
-                        "that the card is FAT32, and CS=D%d",
-             (unsigned long)(SPEEDS[sizeof(SPEEDS) / sizeof(SPEEDS[0]) - 1] / 1000UL),
+    LOG_LIVE(LVL_ERROR, "NO SD CARD after %u rounds down to %lu kHz - check "
+                        "that the module is powered (many need 5V/VIN, not "
+                        "3V3), that the card is FAT32, and CS=D%d. NOTHING "
+                        "WILL BE SAVED, and with no /config.txt the network "
+                        "settings fall back to the compiled-in defaults.",
+             (unsigned)ROUNDS,
+             (unsigned long)(SPEEDS[NSPEED - 1] / 1000UL),
              PIN_SD_CS);
     g_rec.sdOk = false;
     return false;
@@ -129,11 +245,48 @@ bool recorderBeginSD() {
 /* ------------------------------------------------------------------------ *
  *  The frame map
  * ------------------------------------------------------------------------ */
-static bool readLine(File &f, char *buf, size_t cap) {
+/* A frame map is read twice - once to count, once to parse - and the obvious
+ * way to do that is File::read() one byte at a time. On the ESP32 that is one
+ * VFS syscall per byte through FatFs, roughly 25 us each. It is invisible on
+ * the 6 KB map this project ships and ruinous on a real vendor DBC: a
+ * megabyte-class file costs about two million round-trips per pass, which
+ * measured at 53 SECONDS per pass on hardware - 107 s of boot before the radio
+ * started or a single frame was recorded.
+ *
+ * Reading in 512-byte blocks turns those two million syscalls into two
+ * thousand. The buffer has to be part of the reader rather than hidden inside
+ * readLine(), because the loader seeks back to 0 between the passes and a
+ * stale buffer would silently re-serve bytes from the first one. */
+struct LineReader {
+  File   *f;
+  size_t  pos;
+  size_t  len;
+  uint8_t buf[512];
+};
+
+static void lrBegin(LineReader &r, File &f) { r.f = &f; r.pos = 0; r.len = 0; }
+
+static void lrRewind(LineReader &r) {
+  r.f->seek(0);
+  r.pos = 0;
+  r.len = 0;
+}
+
+static int lrGet(LineReader &r) {
+  if (r.pos >= r.len) {
+    const size_t n = r.f->read(r.buf, sizeof(r.buf));
+    if (n == 0) return -1;
+    r.len = n;
+    r.pos = 0;
+  }
+  return r.buf[r.pos++];
+}
+
+static bool readLine(LineReader &r, char *buf, size_t cap) {
   size_t n = 0;
   bool   any = false;
-  while (f.available()) {
-    const int c = f.read();
+  for (;;) {
+    const int c = lrGet(r);
     if (c < 0) break;
     any = true;
     if (c == '\n') break;
@@ -176,18 +329,23 @@ static void loadOneDbc(uint8_t bus, const char *path) {
     return;
   }
 
-  static char line[DBC_LINE_MAX];
+  const size_t fileBytes = f.size();
+
+  static char       line[DBC_LINE_MAX];
+  static LineReader lr;
+  lrBegin(lr, f);
 
   /* FIRST PASS: count. The tables are then sized to this file rather than to a
    * number picked at compile time, which is what stops a 707-signal bus being
    * decoded 256 signals deep and logged raw for the rest. Reading the file
    * twice costs a fraction of a second off an SD card and happens once at
-   * boot. */
+   * boot - in 512-byte blocks, see LineReader above, because doing it a
+   * byte at a time makes a large map take minutes rather than seconds. */
   DbcCounts want = {0, 0, 0};
   uint32_t   lines = 0;
-  while (readLine(f, line, sizeof(line))) {
+  while (readLine(lr, line, sizeof(line))) {
     dbcCountLine(line, want);
-    if (++lines > 20000) break;            /* a runaway file is not a DBC */
+    if (++lines > DBC_MAX_LINES) break;    /* a runaway file is not a DBC */
   }
 
   /* A little slack, so a file that gains a signal after being counted - it
@@ -202,29 +360,49 @@ static void loadOneDbc(uint8_t bus, const char *path) {
    * not the better half of that trade. Scale down proportionally rather than
    * dropping one table, so a large map degrades evenly. */
   {
-    const size_t perMsg = sizeof(DbcMessage);
-    const size_t perSig = sizeof(DbcSignal) + LIVE_TEXT_MAX
-                        + sizeof(uint32_t) + 1;      /* the live slots too */
-    const size_t perVal = sizeof(DbcValDesc);
+    /* PSRAM changes the question entirely. The tables go there when it exists
+     * (see psram.h), so the budget is the free PSRAM and the internal-heap
+     * reserve does not apply - there is nothing on that side to protect.
+     *
+     * The arithmetic itself lives in dbcFitToHeap() so it can be tested
+     * against this board's real heap figures without an SD card or a board.
+     * It used to be written out here, and that is how a DBC_HEAP_RESERVE
+     * larger than the free heap came to drop every message on both buses
+     * with nothing louder than a fit-down warning. */
+    const bool   ps   = psramSize() != 0;
+    const size_t heap = ps ? psramFree() : (size_t)memStat().freeNow;
 
-    const size_t need = (size_t)want.messages * perMsg
-                      + (size_t)want.signals  * perSig
-                      + (size_t)want.values   * perVal;
-    const size_t heap = (size_t)ESP.getFreeHeap();
-    const size_t room = (heap > DBC_HEAP_RESERVE) ? heap - DBC_HEAP_RESERVE : 0;
+    const DbcCounts asked = want;
+    const DbcFit    fit   = dbcFitToHeap(want, heap, DBC_HEAP_RESERVE, ps);
 
-    if (need > room) {
-      LOG_LIVE(LVL_WARN, "frame map wants %lu KB, %lu KB free - keeping %lu KB "
-                         "and leaving %lu KB for Wi-Fi. If the logger runs with "
-                         "plenty spare, lower DBC_HEAP_RESERVE in config.h.",
+    if (fit == DBC_FIT_NONE) {
+      /* NOT a fit-down, and it must not be reported as one. The budget is
+       * zero, so EVERY message is dropped and the dashboard comes up with its
+       * panels and no values in any of them - which reads as a decode fault
+       * rather than the configuration fault it is. */
+      LOG_LIVE(LVL_ERROR, "NO frame map will be loaded for this bus: "
+                          "DBC_HEAP_RESERVE is %lu bytes but only %lu bytes of "
+                          "%s are free, so the budget is zero and all %u "
+                          "message(s) are dropped. This is a CONFIGURATION "
+                          "fault, not a file fault - lower DBC_HEAP_RESERVE in "
+                          "config.h. Recording continues as raw payload bytes.",
+               (unsigned long)DBC_HEAP_RESERVE, (unsigned long)heap,
+               ps ? "PSRAM" : "internal heap", (unsigned)asked.messages);
+      db.overflow = 1;
+    } else if (fit == DBC_FIT_PART) {
+      const size_t need = (size_t)asked.messages * dbcBytesPerMessage()
+                        + (size_t)asked.signals  * dbcBytesPerSignal()
+                        + (size_t)asked.values   * dbcBytesPerValue();
+      const size_t room = ps ? heap : heap - DBC_HEAP_RESERVE;
+      LOG_LIVE(LVL_WARN, "frame map wants %lu KB but only %lu KB of %s is free"
+                         "%s. Keeping what fits - the rest of the bus is still "
+                         "RECORDED, just as raw payload, and decodes offline "
+                         "against the same DBC.",
                (unsigned long)((need + 1023) / 1024),
-               (unsigned long)(heap / 1024),
                (unsigned long)((room + 1023) / 1024),
-               (unsigned long)(DBC_HEAP_RESERVE / 1024));
-      const double k = need ? (double)room / (double)need : 0.0;
-      want.messages = (uint16_t)((double)want.messages * k);
-      want.signals  = (uint16_t)((double)want.signals  * k);
-      want.values   = (uint16_t)((double)want.values   * k);
+               ps ? "PSRAM" : "internal heap",
+               ps ? "" : " - a map this size needs a module with PSRAM, no "
+                         "ESP32 has that much internal RAM");
       db.overflow = 1;
     }
   }
@@ -233,11 +411,11 @@ static void loadOneDbc(uint8_t bus, const char *path) {
   liveAllocate(g_live[bus], db.sigCap);
 
   /* SECOND PASS: parse. */
-  f.seek(0);
+  lrRewind(lr);
   lines = 0;
-  while (readLine(f, line, sizeof(line))) {
+  while (readLine(lr, line, sizeof(line))) {
     dbcParseLine(db, line);
-    if (++lines > 20000) break;
+    if (++lines > DBC_MAX_LINES) break;
   }
   f.close();
 
@@ -252,11 +430,29 @@ static void loadOneDbc(uint8_t bus, const char *path) {
     return;
   }
 
-  LOG_LIVE(LVL_INFO, "CAN%u frame map: %u messages, %u signals from %s (%lu KB, "
-                     "%lu KB free)",
-           busNo, (unsigned)db.msgCount, (unsigned)db.sigCount, path,
-           (unsigned long)((dbcBytes(db) + 1023) / 1024),
-           (unsigned long)(ESP.getFreeHeap() / 1024));
+  /* What the map COST, not what the file weighed. Those are different numbers
+   * and only the first one competes with the radio: dbcBytes() is the three
+   * tables, and the live-value slots are allocated alongside them at
+   * LIVE_TEXT_MAX + 5 bytes a signal, so leaving them out of the figure
+   * understates a 47-signal map by a kilobyte and an 8000-signal one by
+   * 168 KB. Largest block is here for the same reason it is everywhere else:
+   * it, and not the total, is what the next allocation has to fit into. */
+  {
+    const size_t liveBytes = (size_t)db.sigCap
+                           * (LIVE_TEXT_MAX + sizeof(uint32_t) + 1);
+    const MemStat mm = memStat();
+    LOG_LIVE(LVL_INFO, "CAN%u frame map: %u messages, %u signals from %s "
+                       "(%lu bytes on the card) "
+                       "(%lu KB tables + %lu KB live = %lu KB; heap %lu KB "
+                       "free, largest block %lu KB)",
+             busNo, (unsigned)db.msgCount, (unsigned)db.sigCount, path,
+             (unsigned long)fileBytes,
+             (unsigned long)((dbcBytes(db) + 1023) / 1024),
+             (unsigned long)((liveBytes + 1023) / 1024),
+             (unsigned long)((dbcBytes(db) + liveBytes + 1023) / 1024),
+             (unsigned long)(mm.freeNow / 1024),
+             (unsigned long)(mm.largest / 1024));
+  }
   LOG_FILE(LVL_INFO, "CAN%u dbc: version='%s' values=%u lineErrors=%u inexact=%u "
                      "caps=%u/%u/%u bytes=%lu",
            busNo, db.version, (unsigned)db.valCount,
@@ -275,7 +471,12 @@ static void loadOneDbc(uint8_t bus, const char *path) {
                        "as raw bytes.",
              (unsigned)db.msgCap, (unsigned)db.sigCap,
              (unsigned)DBC_MAX_MESSAGES, (unsigned)DBC_MAX_SIGNALS,
-             (unsigned long)(ESP.getFreeHeap() / 1024));
+             (unsigned long)(memStat().freeNow / 1024));
+  }
+  if (db.skipped) {
+    LOG_LIVE(LVL_WARN, "%u definition(s) in %s were readable but did not fit "
+                       "and were skipped - the map is incomplete, not corrupt",
+             (unsigned)db.skipped, path);
   }
   if (db.lineErrors) {
     LOG_LIVE(LVL_WARN, "%u line(s) of %s could not be parsed - see the .log",
@@ -346,6 +547,7 @@ static void flushBuffer(bool force) {
   }
   g_rec.bytes += n;
   g_rec.writeCount++;
+  g_rec.sdBusyUs += dt;       /* a SUBSET of writerBusyUs - see recorder.h */
   if (dt > g_rec.writeMaxUs) g_rec.writeMaxUs = dt;
   if (dt > 100000UL) {
     LOG_FILE(LVL_WARN, "slow SD write: %u bytes took %lu us",
@@ -366,6 +568,7 @@ static void syncToCard() {
   const uint32_t dt = micros() - t0;
 
   g_rec.syncCount++;
+  g_rec.sdBusyUs += dt;       /* the commit is card time too, not decode time */
   if (dt > g_rec.syncMaxUs) g_rec.syncMaxUs = dt;
   s_lastSyncMs = millis();
 }
@@ -393,6 +596,10 @@ static void startRecording() {
              g_rec.logName);
   } else {
     logAttachFile(&s_log);
+    /* The boot heap ladder happened before this file existed. Put it in now,
+     * so a recording is self-contained and the one figure that predicts the
+     * web UI does not depend on someone having captured serial. */
+    memReplayBoot();
   }
 
   /* Self-describing preamble, written before a single sample. */
@@ -468,6 +675,8 @@ static void startRecording() {
   g_rec.queueDropped = 0;
   g_rec.queuePeak    = 0;
   g_rec.drainMaxUs   = 0;
+  s_lostSeen = 0;
+  s_lostSaid = 0;
   for (uint8_t b = 0; b < CAN_BUSES; b++) {
     BusHealth &h = g_rec.bus[b];
     h.lifeOverflow   += h.canOvfFramesMin;
@@ -610,6 +819,54 @@ static void statusTick() {
                                * 1000ULL) / (dt ? dt : 1));
   s_wakeAtLastStatus = g_rec.wakeCount;
 
+  g_rec.loopRate = (uint32_t)(((uint64_t)(g_rec.loopCount - s_loopAtLastStatus)
+                               * 1000ULL) / (dt ? dt : 1));
+  s_loopAtLastStatus = g_rec.loopCount;
+
+  /* ---- where core 1 went, this second ----------------------------------
+   *
+   * busyUs / dt(ms) IS permille, exactly - no scaling constant, no rounding
+   * step. 1000 is one whole core. The three tasks share core 1, so they can
+   * sum to at most ~1000 between them; whatever is missing went to the idle
+   * task, and that margin is the answer to "can this board carry a bigger
+   * frame map". */
+  {
+    const uint32_t d = dt ? dt : 1;
+    g_rec.canPermille    = g_rec.canBusyUs    / d;
+    g_rec.writerPermille = g_rec.writerBusyUs / d;
+    g_rec.loopPermille   = g_rec.loopBusyUs   / d;
+    g_rec.sdPermille     = g_rec.sdBusyUs     / d;
+
+    const uint64_t rowsNow  = g_rec.rows;
+    const uint32_t rowsDelta = (uint32_t)(rowsNow - g_rec.rowsAtLastStatus);
+    g_rec.rowsAtLastStatus  = rowsNow;
+    g_rec.rowRate = (uint32_t)(((uint64_t)rowsDelta * 1000ULL) / d);
+
+    g_rec.frameRateAll = 0;
+    for (uint8_t b = 0; b < CAN_BUSES; b++) g_rec.frameRateAll += g_rec.bus[b].frameRate;
+
+    /* The frame map's multiplier, in tenths: how many CSV rows one frame off
+     * the wire turns into. This is the number the whole "how big a map can
+     * this board carry" question actually turns on, and until now it was only
+     * ever inferred from the file. */
+    g_rec.rowsPerFrame10 = g_rec.frameRateAll
+        ? (uint32_t)(((uint64_t)g_rec.rowRate * 10ULL) / g_rec.frameRateAll) : 0;
+
+    /* Decode+format time is the writer's time MINUS the time it spent inside
+     * the card. Guarded because the two are sampled independently and a pass
+     * can straddle the boundary. */
+    const uint32_t decodeUs = (g_rec.writerBusyUs > g_rec.sdBusyUs)
+                            ? (g_rec.writerBusyUs - g_rec.sdBusyUs) : 0;
+    g_rec.usPerRow10 = rowsDelta ? (uint32_t)(((uint64_t)decodeUs * 10ULL) / rowsDelta) : 0;
+
+    const uint32_t flushDelta = g_rec.writeCount - g_rec.flushAtLastStatus;
+    g_rec.flushAtLastStatus = g_rec.writeCount;
+    g_rec.flushRate  = (uint32_t)(((uint64_t)flushDelta * 1000ULL) / d);
+    g_rec.usPerFlush = flushDelta ? (g_rec.sdBusyUs / flushDelta) : 0;
+
+    g_rec.canBusyUs = g_rec.writerBusyUs = g_rec.loopBusyUs = g_rec.sdBusyUs = 0;
+  }
+
   const uint32_t qNow = g_frameQueue ? uxQueueMessagesWaiting(g_frameQueue) : 0;
   if (qNow > g_rec.queuePeak) g_rec.queuePeak = qNow;
 
@@ -650,15 +907,77 @@ static void statusTick() {
     }
   }
 
+  /* Heap on the same line as everything else, because a leak is only visible
+   * as a trend and a single boot-time reading cannot show one. Free first,
+   * then the largest block, then the worst that block has ever been - three
+   * numbers because the total on its own has now twice failed to predict a
+   * failure that the block size predicted exactly. */
+  /* What is NOT being used. The three tasks share core 1, so the remainder is
+   * the headroom a bigger frame map would have to fit into - and it is the
+   * only figure here that answers "how much more can this carry". */
+  const uint32_t busyAll = g_rec.canPermille + g_rec.writerPermille
+                         + g_rec.loopPermille;
+  const uint32_t idlePermille = (busyAll < 1000) ? (1000 - busyAll) : 0;
+
+  char heap[72];
+#if MEM_IN_STATUS_LINE
+  {
+    const MemStat mm = memStat();
+    /* NOT the place for allocFail, though it was tried. LOG_LINE_CHARS is 160
+     * and this line already runs to exactly that: measured on the wire it ends
+     * mid-word at "blk 15", so `low` and `web` have been silently truncated
+     * away for some time. Anything appended here is thrown away before it is
+     * printed. allocFail gets its own line below; the truncation is recorded
+     * separately, because widening the buffer moves the heap and the heap is
+     * what these runs are measuring. */
+    snprintf(heap, sizeof(heap), " | heap %luK blk %luK low %luK | web %lu/s",
+             (unsigned long)(mm.freeNow  / 1024),
+             (unsigned long)(mm.largest  / 1024),
+             (unsigned long)(mm.lowBlock / 1024),
+             (unsigned long)g_rec.loopRate);
+  }
+#else
+  snprintf(heap, sizeof(heap), " | web %lu/s", (unsigned long)g_rec.loopRate);
+#endif
+
+  /* ---- frames lost, said out loud the first time it happens --------------
+   *
+   * `lost` is on the status line, but a number on a line nobody is reading is
+   * not a report. This fires once when loss first appears, and
+   * names the half it came from - because the two halves have opposite causes
+   * and opposite fixes. It fires again if the OTHER half starts too. */
+  if (lost > s_lostSeen) {
+    const uint32_t byQueue = g_rec.queueDropped;
+    uint32_t byCtrl = 0;
+    for (uint8_t b = 0; b < CAN_BUSES; b++) byCtrl += g_rec.bus[b].canOvfFramesMin;
+
+    const uint8_t which = (uint8_t)((byQueue ? 1 : 0) | (byCtrl ? 2 : 0));
+    if (which & ~s_lostSaid) {
+      s_lostSaid |= which;
+      LOG_LIVE(LVL_ERROR,
+        "FRAMES ARE BEING LOST: %lu so far (%lu dropped at the queue, %lu at "
+        "least overrun in a controller). Queue drops mean the WRITER could not "
+        "keep up - it is decoding too many rows a frame, or the card is "
+        "blocking it, or something is preempting it. Controller overruns mean "
+        "the CAN TASK did not get there in time - drain is %lu us worst. "
+        "This configuration is not viable whatever the dashboard is doing.",
+        (unsigned long)lost, (unsigned long)byQueue, (unsigned long)byCtrl,
+        (unsigned long)g_rec.drainMaxUs);
+    }
+    s_lostSeen = lost;
+  }
+
   if (anyOk) {
     LOG_LIVE(anyStuck ? LVL_WARN : LVL_INFO,
-      "%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu drain=%lu us | lost %lu",
+      "%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu drain=%lu us "
+      "write=%lu us | lost %lu%s",
       state,
       (unsigned long)g_rec.rows, (unsigned long)(g_rec.bytes / 1024ULL),
       perBus[0], perBus[1],
       (unsigned long)qNow, (unsigned)FRAME_QUEUE_LEN,
       (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.drainMaxUs,
-      (unsigned long)lost);
+      (unsigned long)g_rec.writeMaxUs,
+      (unsigned long)lost, heap);
   } else {
     /* Counted rather than assumed: with one module fitted, "on either bus" is
      * wrong and sends somebody looking at hardware that is not there. */
@@ -684,9 +1003,41 @@ static void statusTick() {
                (unsigned)g_rec.bus[only].bitrateKbps);
     } else {
       LOG_LIVE(LVL_WARN, "%s | NO CAN CONTROLLER FOUND AT ALL - check the "
-                         "shared SPI wiring (SCK/MISO/MOSI) and 3V3", state);
+                         "shared SPI wiring (SCK/MISO/MOSI) and 3V3%s",
+               state, heap);
     }
   }
+
+  /* ---- the profile: one line, and the model is closed -------------------
+   *
+   * Everything needed to compute the ceiling instead of bracketing it:
+   *
+   *   frames/s x rows/frame        = rows/s
+   *   rows/s   x us/row            = decode CPU, permille
+   *   flushes/s x us/flush         = card CPU, permille
+   *   1000 - (can + writer + loop) = the margin that is left
+   *
+   * So the largest frame map this board can carry is the one whose rows/frame
+   * keeps that margin positive - a number, from this bus, not a bracket. */
+#if PROF_LIVE_LINE
+  LOG_LIVE(LVL_INFO,
+#else
+  LOG_FILE(LVL_INFO,
+#endif
+    "prof: core1 can=%lu.%lu%% writer=%lu.%lu%% (sd %lu.%lu%%) loop=%lu.%lu%% "
+    "idle=%lu.%lu%% | %lu frames/s x %lu.%lu rows = %lu rows/s @ %lu.%lu us/row "
+    "| %lu flush/s @ %lu us | web %lu/s%s",
+    (unsigned long)(g_rec.canPermille    / 10), (unsigned long)(g_rec.canPermille    % 10),
+    (unsigned long)(g_rec.writerPermille / 10), (unsigned long)(g_rec.writerPermille % 10),
+    (unsigned long)(g_rec.sdPermille     / 10), (unsigned long)(g_rec.sdPermille     % 10),
+    (unsigned long)(g_rec.loopPermille   / 10), (unsigned long)(g_rec.loopPermille   % 10),
+    (unsigned long)(idlePermille / 10),         (unsigned long)(idlePermille % 10),
+    (unsigned long)g_rec.frameRateAll,
+    (unsigned long)(g_rec.rowsPerFrame10 / 10), (unsigned long)(g_rec.rowsPerFrame10 % 10),
+    (unsigned long)g_rec.rowRate,
+    (unsigned long)(g_rec.usPerRow10 / 10), (unsigned long)(g_rec.usPerRow10 % 10),
+    (unsigned long)g_rec.flushRate, (unsigned long)g_rec.usPerFlush,
+    (unsigned long)g_rec.loopRate, "");
 
   /* ---- the detail that only the .log file gets -------------------------- */
   /* Sized to the line the logger actually writes. The old 240-byte buffer only
@@ -720,11 +1071,21 @@ static void statusTick() {
 
   /* drain is the dual-bus number: worst microseconds spent emptying BOTH
    * controllers in one pass. A controller holds two frames, so at 500 kbit/s
-   * anything approaching 200 means the margin is gone. */
+   * anything approaching 200 means the margin is gone.
+   *
+   * block and lowBlock are here because heap and minHeap on their own were
+   * actively misleading. The largest free BLOCK is what decides whether an
+   * allocation succeeds - that is the whole argument of mem.h - and yet it was
+   * only ever written to the log when it crossed a warning threshold. So every
+   * recording carried a 1 Hz series of the number that does not matter and two
+   * scattered samples of the number that does, which made the web UI's decay
+   * impossible to characterise after the fact. Two more heap_caps calls a
+   * second closes that. */
   LOG_FILE(LVL_DEBUG,
     "health: queue=%lu peak=%lu drop=%lu drain=%lu us wake=%lu/s "
     "writes=%lu maxWr=%lu us "
-    "syncs=%lu maxSync=%lu us atRisk<=%lu ms logDrop=%lu heap=%lu minHeap=%lu",
+    "syncs=%lu maxSync=%lu us atRisk<=%lu ms logDrop=%lu heap=%lu minHeap=%lu "
+    "block=%lu lowBlock=%lu allocFail=%lu lastFail=%lu maxFail=%lu",
     (unsigned long)qNow, (unsigned long)g_rec.queuePeak,
     (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.drainMaxUs,
     (unsigned long)g_rec.wakeRate,
@@ -732,7 +1093,26 @@ static void statusTick() {
     (unsigned long)g_rec.syncCount, (unsigned long)g_rec.syncMaxUs,
     (unsigned long)(millis() - s_lastSyncMs),
     (unsigned long)logDroppedCount(),
-    (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
+    (unsigned long)memStat().freeNow, (unsigned long)memStat().minFree,
+    (unsigned long)memStat().largest, (unsigned long)memStat().lowBlock,
+    (unsigned long)memAllocFailures(), (unsigned long)memAllocFailLast(),
+    (unsigned long)memAllocFailMax());
+  /* Its own line, short enough to survive LOG_LINE_CHARS, and LIVE so it
+   * reaches the serial capture - the experiments that need it run from a card
+   * whose .log cannot be read without reflashing the board to get at it.
+   *
+   * Silent until the first failure, then once a second. A counter that prints
+   * "0" every second for forty minutes trains everyone to stop reading it. */
+  {
+    const uint32_t nf = memAllocFailures();
+    if (nf) {
+      LOG_LIVE(LVL_WARN, "allocFail %lu, last %lu B caps=0x%lx from %s - an "
+                         "allocation was REFUSED; the SYN for an inbound "
+                         "connection is dropped and the port looks dead",
+               (unsigned long)nf, (unsigned long)memAllocFailLast(),
+               (unsigned long)memAllocFailCaps(), memAllocFailFn());
+    }
+  }
   LOG_FILE(LVL_DEBUG, "net: %s", netStatusLine());
 }
 
@@ -908,7 +1288,14 @@ void recorderTask(void *arg) {
 
     /* Block until work arrives, then take everything that is already queued in
      * one go - one wake-up per burst instead of one per frame. */
-    if (xQueueReceive(g_frameQueue, &f, pdMS_TO_TICKS(20)) == pdTRUE) {
+    /* The clock starts AFTER the blocking receive returns, so waiting for work
+     * is not counted as doing it. A pass that times out with nothing queued
+     * contributes almost nothing, which is what makes writerPermille mean
+     * "share of core 1 this task consumed". */
+    const bool got = (xQueueReceive(g_frameQueue, &f, pdMS_TO_TICKS(20)) == pdTRUE);
+    const uint32_t busyStart = micros();
+
+    if (got) {
       do {
         /* Always counted, so the dashboard shows the bus even while idle -
          * except for frames this logger sent, which were never on the wire as
@@ -941,5 +1328,7 @@ void recorderTask(void *arg) {
 
     statusTick();
     logService();
+
+    g_rec.writerBusyUs += micros() - busyStart;
   }
 }

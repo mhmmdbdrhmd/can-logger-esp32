@@ -21,13 +21,18 @@ src="$here/../src"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 
+# Run from the repository root, whatever directory the caller was in: several
+# tests open fixtures by repo-relative path, and a suite whose result depends
+# on the caller's working directory fails for reasons unrelated to the code.
+cd "$here/.." || exit 1
+
 CXX="${CXX:-g++}"
 FLAGS=(-std=c++17 -Wall -Wextra -Wno-unused-parameter -I "$here/shim" -I "$src")
 
 fail=0
 
 echo "=== type-checking every module ==="
-for f in dbc canopen decode logger mcp2515 recorder netcfg dash dashstore cantx webui webpage; do
+for f in dbc canopen decode logger mcp2515 recorder netcfg dash dashstore cantx webui webpage mem bundle; do
     if "$CXX" "${FLAGS[@]}" -c "$src/$f.cpp" -o "$out/$f.o" 2>"$out/$f.err"; then
         echo "  ok   $f.cpp"
     else
@@ -52,6 +57,9 @@ run_test "CANopen framing"                "$here/test_canopen.cpp" "$src/canopen
 run_test "CSV schema"                     "$here/test_decode.cpp"  "$src/decode.cpp" "$src/dbc.cpp"
 run_test "logger"                         "$here/test_logger.cpp"  "$src/logger.cpp"
 run_test "MCP2515 driver and transmit"    "$here/test_mcp2515.cpp" "$src/mcp2515.cpp"
+run_test "frame-map heap budget"          "$here/test_heapfit.cpp" "$src/dbc.cpp"
+run_test "the setup bundle unpacks"       "$here/test_bundle.cpp"  "$src/bundle.cpp"
+run_test "the radio is configured first"  "$here/test_netcfg.cpp"  "$src/netcfg.cpp"
 run_test "signal encoding"                "$here/test_encode.cpp"  "$src/dbc.cpp"
 run_test "dashboard configuration"        "$here/test_dash.cpp"    "$src/dash.cpp" "$src/dbc.cpp"
 
@@ -132,7 +140,9 @@ print("  %s the page's capacity limits match config.h%s" %
 bad |= bool(off)
 
 # Every JSON field the page reads must be one a handler actually produces.
-made = set(re.findall(r'\\"([a-zA-Z]+)\\":', api))
+# [a-zA-Z_]+ on both sides: a field with an underscore in it must be findable
+# where it is produced as well as where it is used.
+made = set(re.findall(r'\\"([a-zA-Z_]+)\\":', api))
 used = set(re.findall(r'\bd\.([a-zA-Z_]+)', html)) - {"lines", "seq"}
 gap  = sorted(f for f in used if f not in made)
 print("  %s %d JSON fields all produced by a handler%s" %
@@ -348,15 +358,27 @@ int main(int argc, char **argv) {
       const uint16_t si = (uint16_t)(m.firstSignal + k);
       if (si >= db.sigCount) break;
       const DbcSignal &s = db.sig[si];
-      printf("S\t%s\t%s\t%u\t%d\t%u\t%s\n", m.name, s.name, s.bits,
-             s.muxValue, s.exact ? s.dec : 3, s.unit);
+      printf("S\t%s\t%s\t%u\t%d\t%u\t%s\t%u\n", m.name, s.name, s.bits,
+             s.muxValue, s.exact ? s.dec : 3, s.unit, (unsigned)s.valCount);
     }
   }
   return 0;
 }
 CPP
 
-for f in "$here"/../examples/*.dbc; do
+# One signal name, two messages, two DIFFERENT value tables - the J1939 shape.
+# A reader that keys VAL_ by signal name alone merges them and hangs the merged
+# list off both; the firmware keys by message too, and so must the desk tools.
+cat > "$out/valdup.dbc" <<'VALDUP'
+BO_ 100 First: 8 N
+ SG_ Mode : 0|8@1+ (1,0) [0|255] "" X
+BO_ 200 Second: 8 N
+ SG_ Mode : 0|8@1+ (1,0) [0|255] "" X
+VAL_ 100 Mode 0 "off" 1 "on" ;
+VAL_ 200 Mode 0 "low" 1 "mid" 2 "high" ;
+VALDUP
+
+for f in "$here"/../examples/*.dbc "$out/valdup.dbc"; do
     "$out/t_dump" "$f" > "$out/c.txt" 2>/dev/null
     python3 - "$f" "$out/c.txt" <<'AGREE' || fail=1
 import sys, os
@@ -372,8 +394,8 @@ for m in db["m"]:
     mid = int(m["id"], 16)
     mine.append("M\t%s\t%d\t%s\t%d" % (m["n"], mid, m["tx"], m["mux"]))
     for s in m["s"]:
-        mine.append("S\t%s\t%s\t%d\t%d\t%d\t%s"
-                    % (m["n"], s["n"], s["b"], s["mx"], s["d"], s["u"]))
+        mine.append("S\t%s\t%s\t%d\t%d\t%d\t%s\t%d"
+                    % (m["n"], s["n"], s["b"], s["mx"], s["d"], s["u"], len(s["v"])))
 theirs = [l for l in open(cdump).read().splitlines() if l]
 
 name = os.path.basename(path)
@@ -596,6 +618,23 @@ for a, b in zip(mine + [""] * len(theirs), theirs + [""] * len(mine)):
         break
 sys.exit(1)
 SAME2
+
+echo
+echo "=== the compressed page matches webpage.cpp ==="
+# src/webpage_gz.h is generated and committed. If webpage.cpp changes and the
+# header is not regenerated, the board serves the OLD page - which looks like a
+# browser cache rather than a build fault.
+python3 "$here/../tools/gen_page_gz.py" --check || fail=1
+
+echo
+echo "=== webui.cpp compiles with the compressed page on and off ==="
+for gzflag in 0 1; do
+  if "$CXX" "${FLAGS[@]}" -DWEB_PAGE_GZIP=$gzflag -fsyntax-only "$src/webui.cpp" 2>/dev/null; then
+    echo "  ok   WEB_PAGE_GZIP=$gzflag"
+  else
+    echo "  FAIL WEB_PAGE_GZIP=$gzflag"; fail=1
+  fi
+done
 
 echo
 echo "=== the Arduino sketch folder regenerates from src/ ==="

@@ -14,6 +14,12 @@
 
 #define PROGMEM
 #define IRAM_ATTR
+/* PGM_P is what the core calls a pointer into flash. webui.cpp casts
+ * through it to hand the pre-compressed page to sendContent_P; on the
+ * host there is one address space and the cast is a no-op. */
+#ifndef PGM_P
+#define PGM_P const char *
+#endif
 #define LOW 0
 #define HIGH 1
 #define INPUT 0
@@ -95,7 +101,13 @@ public:
   String &operator+=(long v)          { append(std::to_string(v)); return *this; }
   String &operator+=(unsigned long v) { append(std::to_string(v)); return *this; }
   String &operator+=(const String &s) { append(s); return *this; }
-  void reserve(size_t n)              { std::string::reserve(n); }
+  /* Returns a status, as the real Arduino String does, so a caller that
+   * checks whether the reservation succeeded compiles here too. */
+  bool reserve(size_t n)              { std::string::reserve(n); return true; }
+  bool startsWith(const String &p) const { return rfind(p, 0) == 0; }
+  bool endsWith(const String &p) const {
+    return size() >= p.size() && compare(size() - p.size(), p.size(), p) == 0;
+  }
   void trim() { size_t a=find_first_not_of(" \t\r\n"); size_t b=find_last_not_of(" \t\r\n");
                 if(a==npos){clear();} else {*this=String(substr(a,b-a+1));} }
   int indexOf(char c) const { size_t i=find(c); return i==npos?-1:(int)i; }
@@ -124,6 +136,11 @@ extern FakeSerial Serial;
 /* ---- ESP ----------------------------------------------------------- */
 struct FakeEsp {
   uint32_t getFreeHeap()     { return 200000; }
+  uint32_t getMaxAllocHeap()     { return 200000; }
+  /* No PSRAM on the host, so psram.h resolves to plain calloc() and the
+   * tests exercise the fallback path - which is the one a WROOM runs. */
+  uint32_t getPsramSize()    { return 0; }
+  uint32_t getFreePsram()    { return 0; }
   uint32_t getMinFreeHeap()  { return 180000; }
   uint32_t getFlashChipSize(){ return 4194304; }
   const char *getChipModel() { return "ESP32"; }

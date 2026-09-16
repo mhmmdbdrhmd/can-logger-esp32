@@ -17,6 +17,19 @@ public:
   void flush() {}
   bool available() { return pos < src.size(); }
   int  read() { return (pos < src.size()) ? (unsigned char)src[pos++] : -1; }
+  /* peek() is what bundle.cpp uses to step over the newline that separates one
+   * packed file from the next header, without consuming a byte of the next
+   * file when there is no separator. The real File has it; the shim did not,
+   * which is exactly how a drifted shim hides a real bug. */
+  int  peek() { return (pos < src.size()) ? (unsigned char)src[pos] : -1; }
+  /* Block read, as the real File has it. The DBC loader reads through
+   * this and not through read() - byte-at-a-time is a syscall per byte
+   * on the ESP32 - so the shim must offer the same shape. */
+  size_t read(uint8_t *b, size_t n) {
+    size_t k = 0;
+    while (k < n && pos < src.size()) b[k++] = (unsigned char)src[pos++];
+    return k;
+  }
   String readStringUntil(char t) {
     std::string out;
     while (pos < src.size() && src[pos] != t) out.push_back(src[pos++]);

@@ -13,6 +13,7 @@ public:
   SPIClass(int = 0) {}
   virtual ~SPIClass() {}
   void begin(int8_t=-1,int8_t=-1,int8_t=-1,int8_t=-1) {}
+  void end() {}
   virtual void beginTransaction(SPISettings) {}
   virtual void endTransaction() {}
   virtual uint8_t transfer(uint8_t) { return 0; }

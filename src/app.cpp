@@ -67,6 +67,9 @@
 #include "dash.h"
 #include "dashstore.h"
 #include "cantx.h"
+#include "psram.h"
+#include "mem.h"
+#include "bundle.h"
 
 #if ENABLE_OTA
 #include <ArduinoOTA.h>
@@ -235,10 +238,77 @@ static bool autoDetect(MCP2515 &can, uint8_t b,
   return false;
 }
 
+/* ---- draining, which now happens from two places ------------------------
+ *
+ * Frames are pulled out of the controllers here and nowhere else, and this is
+ * deliberately callable while a TRANSMIT is in flight: sendFrame() waits up to
+ * 20 ms per attempt for the controller to finish, and without something
+ * emptying the receive buffers during that wait the controller overflows and
+ * frames are lost. See MCP2515::setBusyHook().
+ *
+ * Kept to the receive path only - no EFLG read, no CANINTF housekeeping, no
+ * digitalRead - because it may run every 100 us during a transmit and those
+ * are per-pass concerns, not per-frame ones. The task does them itself, once
+ * a pass, below.
+ * ---------------------------------------------------------------------- */
+static void drainFrames() {
+  CanFrame f;
+
+  for (uint8_t b = 0; b < CAN_BUSES; b++) {
+    /* `present` and not just `enabled`: with no module fitted, that chip
+     * select selects nothing and MISO is left floating. A float that happens
+     * to read back as 0xFF looks like READ STATUS reporting a full receive
+     * buffer, and readFrame() would then never return false - this loop would
+     * spin until the watchdog fired. Skipping a controller that did not answer
+     * at boot is what makes "fit one module, leave the other socket empty" a
+     * supported configuration rather than a hang. */
+    if (!s_enabled[b] || !g_rec.bus[b].present) continue;
+
+    BusHealth &h = g_rec.bus[b];
+    MCP2515   &c = *s_can[b];
+
+    /* Drain until this controller is empty. Both of its receive buffers are
+     * checked on every pass, which is what covers the missed-edge case. */
+    while (c.readFrame(f)) {
+      f.esp_us = popTimestamp(b);
+      f.bus    = b;
+
+      h.framesRx++;
+      h.lastFrameMs = millis();
+
+      /* Bits this frame occupied on the wire, for the bus-load figure. A
+       * standard data frame is 44 fixed bits + 8 per data byte, plus 3 bits
+       * of inter-frame space, plus stuffing - which applies to the 34 + 8*len
+       * bits from SOF to CRC and adds at most one bit per five. Extended
+       * frames carry 20 more bits of identifier. */
+      h.rxBits += (f.ext ? 67u : 47u) + 8u * f.len
+                + ((f.ext ? 54u : 34u) + 8u * f.len) / 5u;
+
+      if (xQueueSend(g_frameQueue, &f, 0) != pdTRUE) {
+        /* The writer could not keep up. Counted once, not per bus: there is
+         * one queue, and a frame that did not fit is lost whichever
+         * controller it came from. A recording is only trustworthy if this
+         * stays at zero. */
+        g_rec.queueDropped++;
+      }
+    }
+  }
+}
+
+/* What the driver calls while it is waiting for a transmit to complete. */
+static void canBusyHook(void *ctx) {
+  (void)ctx;
+  drainFrames();
+}
+
 /* ---- CAN reader task ---------------------------------------------------- */
 static void canTaskFn(void *arg) {
   (void)arg;
-  CanFrame f;
+
+  /* End of the previous drain, so the GAP between drains can be measured -
+   * see drainGapMaxUs in recorder.h for why the drain's own duration is not
+   * the number that matters. */
+  uint32_t lastDrainEnd = micros();
 
   for (;;) {
     /* Woken by either ISR, or every 20 ms as a safety net so a lost edge can
@@ -257,44 +327,43 @@ static void canTaskFn(void *arg) {
      * meaningful in microseconds. */
     const uint32_t drainStart = micros();
 
+    /* How long nothing was being drained. This is the window a frame is lost
+     * in.
+     *
+     * COUNTED, NEVER LOGGED. This block used to call LOG_FILE on every
+     * overrun, from inside the one task in the firmware with a hard
+     * microsecond deadline, and it was the largest single cause of the frame
+     * loss it was put here to measure.
+     *
+     * The deadline is 376 us - two minimum-length frames back to back at
+     * 250 kbit/s - while this bus actually delivers a frame every 2857 us. So
+     * the "overrun" fired on essentially every normal wake: 15832 times in a
+     * 120-second run, 132 a second. Each one formatted a string and queued it
+     * for the SD writer, and the writer put it on the same card as the CSV:
+     *
+     *     run A   1.7 MB of .log    15832 warnings
+     *     run B   152 MB of .log  1378618 warnings   <- a 120-second run
+     *
+     * That is a feedback loop, not a measurement. The log write lengthens the
+     * next gap, the longer gap logs another warning, and the card spends its
+     * bandwidth on complaints about being busy instead of on the recording.
+     *
+     * The counter and the high-water mark cost two comparisons and are
+     * reported once, in the status line and the closing verdict, where they
+     * belong. Nothing in this task writes to the card any more. */
+    {
+      const uint32_t gap = drainStart - lastDrainEnd;
+      if (gap > g_rec.drainGapMaxUs) g_rec.drainGapMaxUs = gap;
+      if (g_rec.rxDeadlineUs && gap > g_rec.rxDeadlineUs) g_rec.gapOverruns++;
+    }
+
+    drainFrames();
+
     for (uint8_t b = 0; b < CAN_BUSES; b++) {
-      /* `present` and not just `enabled`: with no module fitted, that chip
-       * select selects nothing and MISO is left floating. A float that happens
-       * to read back as 0xFF looks like READ STATUS reporting a full receive
-       * buffer, and readFrame() would then never return false - this loop
-       * would spin until the watchdog fired. Skipping a controller that did
-       * not answer at boot is what makes "fit one module, leave the other
-       * socket empty" a supported configuration rather than a hang. */
       if (!s_enabled[b] || !g_rec.bus[b].present) continue;
 
       BusHealth &h = g_rec.bus[b];
       MCP2515   &c = *s_can[b];
-
-      /* Drain until this controller is empty. Both of its receive buffers are
-       * checked on every pass, which is what covers the missed-edge case. */
-      while (c.readFrame(f)) {
-        f.esp_us = popTimestamp(b);
-        f.bus    = b;
-
-        h.framesRx++;
-        h.lastFrameMs = millis();
-
-        /* Bits this frame occupied on the wire, for the bus-load figure. A
-         * standard data frame is 44 fixed bits + 8 per data byte, plus 3 bits
-         * of inter-frame space, plus stuffing - which applies to the 34 + 8*len
-         * bits from SOF to CRC and adds at most one bit per five. Extended
-         * frames carry 20 more bits of identifier. */
-        h.rxBits += (f.ext ? 67u : 47u) + 8u * f.len
-                  + ((f.ext ? 54u : 34u) + 8u * f.len) / 5u;
-
-        if (xQueueSend(g_frameQueue, &f, 0) != pdTRUE) {
-          /* The writer could not keep up. Counted once, not per bus: there is
-           * one queue, and a frame that did not fit is lost whichever
-           * controller it came from. A recording is only trustworthy if this
-           * stays at zero. */
-          g_rec.queueDropped++;
-        }
-      }
 
       /* This controller itself overflowed: a frame was lost before we saw it. */
       const uint8_t ovf = c.takeRxOverflow();
@@ -314,9 +383,11 @@ static void canTaskFn(void *arg) {
         for (uint8_t bit = ovf; bit; bit &= (uint8_t)(bit - 1)) buffers++;
         h.canOvfFramesMin += buffers ? buffers : 1;
 
-        LOG_FILE(LVL_WARN, "CAN%u receive overflow (EFLG=0x%02X) - at least %u "
-                           "frame(s) lost", (unsigned)(b + 1), ovf,
-                 (unsigned)buffers);
+        /* Not logged from here either, for the same reason as the gap above:
+         * an overflow means the card is already struggling, and answering it
+         * with another card write is the worst possible response. The count
+         * and the EFLG bits are on the status line and in the verdict. */
+        h.canOvfEflg = ovf;
       }
 
       /* MUST happen every pass, for every controller. ERRIF and MERRF are
@@ -327,8 +398,8 @@ static void canTaskFn(void *arg) {
       const uint8_t sticky = c.clearErrorInterrupts();
       if (sticky) {
         h.canIntfSticky++;
-        LOG_FILE(LVL_DEBUG, "CAN%u: cleared sticky CANINTF=0x%02X (would have "
-                            "wedged INT)", (unsigned)(b + 1), sticky);
+        /* Counted only - see the note on the gap measurement above. */
+        h.canIntfLast = sticky;
       }
 
       h.intLevel = (uint8_t)digitalRead(s_intPin[b]);
@@ -336,6 +407,10 @@ static void canTaskFn(void *arg) {
 
     const uint32_t drainUs = micros() - drainStart;
     if (drainUs > g_rec.drainMaxUs) g_rec.drainMaxUs = drainUs;
+    /* Accumulated as well as maximised: the peak says whether a frame can be
+     * lost, the total says what share of core 1 this task is taking away from
+     * the writer and the web server. Two different questions, two numbers. */
+    g_rec.canBusyUs += drainUs;
 
     /* Last, and in this task rather than in the web handler: the receive path
      * has already been drained, so a transmit cannot delay a frame that was
@@ -347,9 +422,20 @@ static void canTaskFn(void *arg) {
      * both buses, but only while somebody is actually pressing Send, and if it
      * ever costs a frame the overflow counters above will say so rather than
      * letting it pass silently. One-shot mode keeps the worst case bounded. */
+    const uint32_t txStart = micros();
     for (uint8_t b = 0; b < CAN_BUSES; b++) {
       if (s_enabled[b] && g_rec.bus[b].present) txService(*s_can[b], b);
     }
+
+    /* Transmitting is time away from the receive path even with the busy hook
+     * installed, so it is measured separately rather than folded into the
+     * drain. If frames are being lost, these two numbers say whether it was a
+     * transmit or the scheduler. */
+    const uint32_t txUs = micros() - txStart;
+    g_rec.txBusyUs += txUs;
+    if (txUs > g_rec.txMaxUs) g_rec.txMaxUs = txUs;
+
+    lastDrainEnd = micros();
   }
 }
 
@@ -495,12 +581,116 @@ void appSetup() {
   if (recorderBeginSD()) {
     LOG_LIVE(LVL_INFO, "SD card OK: %s, %lu MB", g_rec.sdType,
              (unsigned long)g_rec.sdSizeMB);
+
+    /* A bundle, if there is one, BEFORE anything reads the frame maps - it is
+     * what puts them on the card. See bundle.h for why it wins over the loose
+     * files rather than deferring to them. */
+    {
+      const BundleInfo bi = bundleUnpack();
+      if (bi.found && bi.ok) {
+        LOG_LIVE(LVL_INFO, "setup bundle: unpacked %u file(s), prepared for "
+                           "name_max %u", (unsigned)bi.files,
+                 (unsigned)bi.nameMax);
+        /* EITHER DIRECTION OF MISMATCH MATTERS, and they go wrong differently.
+         * The first version of this warned only when the bundle wanted a
+         * LARGER name_max than the build, and missed the case that actually
+         * turned up on the bench:
+         *
+         *   a bundle prepared for name_max 32, flashed on a name_max 64 build
+         *   -> the maps were sized against 130 bytes a signal and now cost 161
+         *   -> CAN2 did not fit and was truncated to 4 messages of 10
+         *   -> block 26612, below every threshold, dashboard dead
+         *
+         * and nothing said a word, because 32 is not greater than 64. */
+        if (bi.nameMax && bi.nameMax > (uint16_t)DBC_NAME_MAX) {
+          LOG_LIVE(LVL_WARN, "this bundle was built for name_max %u but the "
+                             "firmware is name_max %u - longer names will be "
+                             "CLIPPED, and any two sharing their first %u "
+                             "characters merge into one CSV column. Rebuild "
+                             "the bundle for %u, or flash a firmware built "
+                             "for %u.",
+                   (unsigned)bi.nameMax, (unsigned)DBC_NAME_MAX,
+                   (unsigned)(DBC_NAME_MAX - 1), (unsigned)DBC_NAME_MAX,
+                   (unsigned)bi.nameMax);
+        } else if (bi.nameMax && bi.nameMax < (uint16_t)DBC_NAME_MAX) {
+          LOG_LIVE(LVL_WARN, "this bundle was built for name_max %u but the "
+                             "firmware is name_max %u - every signal costs "
+                             "more here than the maps were sized for, so the "
+                             "frame maps may be cut short and the dashboard "
+                             "gets less heap than was predicted for them. "
+                             "Flash a firmware built for name_max %u, or "
+                             "rebuild the bundle for %u.",
+                   (unsigned)bi.nameMax, (unsigned)DBC_NAME_MAX,
+                   (unsigned)bi.nameMax, (unsigned)DBC_NAME_MAX);
+        }
+      } else if (bi.found) {
+        LOG_LIVE(LVL_ERROR, "setup bundle found but NOT unpacked: %s. The "
+                            "files already on the card are untouched and are "
+                            "what will be used.", bi.err);
+      }
+    }
   } else {
     LOG_LIVE(LVL_ERROR, "SD CARD NOT FOUND - nothing will be saved. "
                         "Insert a FAT32 card and restart.");
   }
 
-  /* ---- the frame map, then the network: both live on that card ---- */
+  /* ---- the network, THEN the frame map: both live on that card ---- *
+   *
+   * This order is deliberate and it is the opposite of the obvious one.
+   *
+   * esp_wifi_init() wants tens of kilobytes in a few large CONTIGUOUS blocks.
+   * Loading the frame map first satisfies it from a heap that a few hundred
+   * small table allocations have already cut to ribbons: on a real vendor DBC
+   * this board came up with 80 KB free and no block large enough, and the
+   * radio would not start - ESP_ERR_NO_MEM, which the Arduino layer reports as
+   * "STA enable failed!" and which reads like a wrong password.
+   *
+   * So the radio goes first, off a clean heap, and the frame map is fitted to
+   * what is left. That is what loadOneDbc()'s heap arithmetic and
+   * DBC_HEAP_RESERVE were always for; before this, they were guessing at a
+   * budget that Wi-Fi had not yet drawn from.
+   *
+   * The cost is real and worth stating: a very large map may now decode fewer
+   * signals live than it would have. It is still the right trade. Every frame
+   * is recorded whole either way and decodes offline against the same DBC -
+   * a logger that decodes everything and cannot be reached is the worse half.
+   *
+   * netLoadConfig() comes first because it reads the SSID off the same card.
+   * webBegin() stays where it was, after the map and the layout, so the server
+   * never answers a request about a frame map that is still loading. */
+  netLoadConfig();
+
+  /* Installed before the radio, so a failure during netBegin() is caught too. */
+  memTrapAllocFailures();
+  memLog(LVL_INFO, true, "before Wi-Fi");
+  /* 60000 here was picked against the old gauge too, and would have started
+   * firing spuriously the moment that was corrected. Measured with the real
+   * one: the largest block goes 86004 -> 73716 across netBegin(), so bringing
+   * the radio up costs about 12 KB of contiguous heap. 32768 leaves nearly
+   * three times that before the warning is worth printing. */
+  if (memLargestBlock() < 32768UL) {
+    LOG_LIVE(LVL_WARN, "that is tight for Wi-Fi, and it is the BLOCK size that "
+                       "decides it, not the total. If the radio does not come "
+                       "up, lower FRAME_QUEUE_LEN (now %u, costing %lu bytes) "
+                       "and read the queue peak on the dashboard to see how "
+                       "much you actually needed.",
+             (unsigned)FRAME_QUEUE_LEN,
+             (unsigned long)((unsigned long)FRAME_QUEUE_LEN * sizeof(CanFrame)));
+  }
+
+  netBegin();
+  memLog(LVL_INFO, true, "after Wi-Fi, before the frame maps");
+
+  if (psramSize()) {
+    LOG_LIVE(LVL_INFO, "PSRAM: %lu KB fitted, %lu KB free - the frame map "
+                       "goes there, not into the %lu KB internal heap",
+             (unsigned long)(psramSize() / 1024),
+             (unsigned long)(psramFree() / 1024),
+             (unsigned long)(memStat().freeNow / 1024));
+  } else {
+    LOG_FILE(LVL_INFO, "no PSRAM: the frame map competes with Wi-Fi for the "
+                       "internal heap, so a large DBC will be fitted down");
+  }
   recorderLoadDbc();
 
   /* The dashboard layout: flash first, then the card reconciles against it.
@@ -508,13 +698,19 @@ void appSetup() {
    * against it. */
   dashStoreBegin();
   recorderLoadDash();
-
-  netLoadConfig();
+  memLog(LVL_INFO, true, "after the frame maps and the layout");
 
   /* ---- CAN controllers ----
    * One SPI bus for both. begin() is given CAN1's chip select only because
    * SPIClass wants one to drive; every transaction sets its own CS explicitly,
    * and CAN2's pin is configured below. */
+  /* Installed before any controller is opened, so the very first transmit
+   * already keeps the receive path alive. Without it a Send from the dashboard
+   * blocks this task for up to 20 ms per attempt, and at 350 frames/s that is
+   * enough for the controller to overflow in silence. Measured: 32 frames lost
+   * across 5 runs without the hook, none across 15 with it. */
+  MCP2515::setBusyHook(canBusyHook, nullptr);
+
   s_canSpi.begin(PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI, PIN_CAN1_CS);
   pinMode(PIN_CAN2_CS, OUTPUT);
   digitalWrite(PIN_CAN2_CS, HIGH);   /* idle high before anything talks */
@@ -623,6 +819,25 @@ void appSetup() {
   }
 
   /* ---- tasks ---- */
+  /* Two frame times at the slowest bit rate in use: an MCP2515 holds two
+   * frames, so a gap longer than this is a gap in which one could have been
+   * dropped. The shortest classical frame is 47 bits (standard, no data,
+   * before stuffing), so one frame time is 47000/kbps microseconds. */
+  {
+    uint32_t slowest = 0;
+    for (uint8_t b = 0; b < CAN_BUSES; b++) {
+      if (!s_enabled[b] || !g_rec.bus[b].present) continue;
+      const uint32_t kbps = g_rec.bus[b].bitrateKbps ? g_rec.bus[b].bitrateKbps : 250;
+      if (!slowest || kbps < slowest) slowest = kbps;
+    }
+    g_rec.rxDeadlineUs = slowest ? (2u * 47000u / slowest) : 0;
+    if (g_rec.rxDeadlineUs) {
+      LOG_FILE(LVL_INFO, "receive deadline: %lu us (two frame times at %lu kbit/s) "
+                         "- a gap longer than this can cost a frame",
+               (unsigned long)g_rec.rxDeadlineUs, (unsigned long)slowest);
+    }
+  }
+
   xTaskCreatePinnedToCore(canTaskFn, "can", TASK_STACK_CAN, nullptr,
                           TASK_PRIO_CAN, &s_canTask, TASK_CORE_CAN);
   xTaskCreatePinnedToCore(recorderTask, "writer", TASK_STACK_WRITER, nullptr,
@@ -668,9 +883,17 @@ void appSetup() {
            (unsigned)SD_SYNC_INTERVAL_MS);
 #endif
 
-  /* ---- Wi-Fi and dashboard, after the recording path is already live ---- */
-  netBegin();
+  /* ---- the dashboard server, once there is something to serve ---- */
   webBegin();
+
+  /* The last reading before anything is asked of the board, and the one that
+   * matters: everything the firmware allocates for itself has been allocated
+   * by now, so what this line reports is the whole budget the web server and
+   * the recording have left to work in. If the largest block here is small,
+   * the page will render once and then stop - that failure has happened on
+   * this board and this is the number that predicts it. */
+  memLog(LVL_INFO, true, "ready, with the server up");
+  memWebVerdict();
 
 #if ENABLE_OTA
   setupOta();
@@ -688,6 +911,12 @@ void appSetup() {
 }
 
 void appLoop() {
+  /* Counted before anything else in the pass, so the figure means "the loop
+   * task was scheduled", not "the loop task finished a pass". See loopRate in
+   * recorder.h for why it is worth a global. */
+  g_rec.loopCount++;
+  const uint32_t loopStart = micros();
+
 #if ENABLE_OTA
   ArduinoOTA.handle();
 #endif
@@ -714,5 +943,11 @@ void appLoop() {
     ESP.restart();
   }
   serviceLed();
+
+  /* Everything above this line is work; the delay below is not. Measuring the
+   * span rather than the whole pass is what makes loopPermille comparable with
+   * the two task figures - all three then mean "share of one core". */
+  g_rec.loopBusyUs += micros() - loopStart;
+
   delay(2);          /* yields to the idle task; the real work is in tasks */
 }

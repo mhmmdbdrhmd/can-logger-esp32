@@ -69,8 +69,39 @@
  * heap-allocated and sized to the file now, so eight more bytes per signal
  * costs about six kilobytes on a seven-hundred-signal bus and nothing at all
  * on a small one. Anything still too long is counted and reported, never
- * clipped in silence. */
-#define DBC_NAME_MAX    32
+ * clipped in silence.
+ *
+ * 32 was still too short. A real vendor map reported
+ *
+ *     W 59 name(s) are longer than 31 characters and are cut short in the CSV
+ *
+ * on a 98-signal file - sixty per cent of it. `WheelBasedMachineDistance` fits;
+ * `ActualMaximumAvailableEnginePercentTorque` does not, and two signals that
+ * differ only past character 31 become the same column name in the CSV, which
+ * is worse than a truncated one.
+ *
+ * 64, not 48, because 48 does not finish the job. Measured over real vendor
+ * maps (a J1939-style bus of about 1100 messages, and cut-down versions of it):
+ *
+ *     map                 longest name   clipped at 32   at 48   at 64
+ *     small sensor bus              19               0       0       0
+ *     vendor, trimmed               52              20       5       0
+ *     vendor, full                  57             310      18       0
+ *
+ * The cost is exact: DbcSignal 112 -> 144 and DbcMessage 48 -> 80, so 32 bytes
+ * per signal and per message, plus 1 KB for each bus's node table. On a pair
+ * of maps with about fifty signals that is about 5 KB.
+ *
+ * FIVE KILOBYTES IS NOT FREE HERE. The web server stops accepting connections
+ * when the largest free block runs out (see MEM_WEB_SERVES in config.h). Read
+ * the `ready` heap line after changing this, and if the margin has gone, trade
+ * a few characters back rather than losing the dashboard.
+ *
+ * Guarded so a build can trade it back for map size without editing this
+ * header, and so the host tests can measure the cost at several values. */
+#ifndef DBC_NAME_MAX
+#define DBC_NAME_MAX    64
+#endif
 #define DBC_UNIT_MAX    10
 #define DBC_LABEL_MAX   16
 #define DBC_VERSION_MAX 96
@@ -140,6 +171,38 @@ struct DbcCounts {
   uint16_t values;
 };
 
+/* What fitting a counted file to the available heap decided.
+ *
+ * Three outcomes, not two, because "kept everything", "kept some of it" and
+ * "kept NONE of it" are different events and only the last one is a mistake in
+ * the firmware's own configuration rather than a property of the file. Reported
+ * separately for that reason: a reserve larger than the free heap once
+ * silently dropped every message on both buses and was logged as an ordinary
+ * fit-down. */
+enum DbcFit : uint8_t {
+  DBC_FIT_ALL  = 0,   /* the whole file fits                                 */
+  DBC_FIT_PART = 1,   /* scaled down proportionally; some of it is kept      */
+  DBC_FIT_NONE = 2    /* the budget is zero - nothing can be kept at all     */
+};
+
+/* Bytes one message / one signal / one value descriptor cost, live slots and
+ * all. Exposed so a test can do this arithmetic without duplicating it. */
+size_t dbcBytesPerMessage();
+size_t dbcBytesPerSignal();
+size_t dbcBytesPerValue();
+
+/* Scale a counted request down to what `heap` bytes can hold, keeping `reserve`
+ * back for everything that is not the frame map.
+ *
+ * PURE: no heap, no clock, no logging. `want` is modified in place. This is the
+ * arithmetic that decides whether a bus decodes anything at all, so it is kept
+ * out of the loader and tested directly against the heap figures this board
+ * really reports.
+ *
+ * `reserve` is ignored when `psram` is set: the tables go to PSRAM there, and
+ * there is nothing on that side to protect. */
+DbcFit dbcFitToHeap(DbcCounts &want, size_t heap, size_t reserve, bool psram);
+
 /* The frame map.
  *
  * The three tables are HEAP BLOCKS sized to the file, not fixed arrays. They
@@ -180,7 +243,19 @@ struct DbcDb {
   char       version[DBC_VERSION_MAX] = {};
 
   uint16_t   lineErrors  = 0; /* lines that looked like ours but did not parse */
+  /* Definitions that were perfectly readable but had nowhere to go, because a
+   * table was full or the message they belong to was itself dropped. Kept
+   * apart from lineErrors: lumped together, a syntactically perfect file that
+   * merely did not fit reported ten thousand "unparsable" lines and sent
+   * people hunting for corruption that was not there. */
+  uint16_t   skipped     = 0;
   uint16_t   nameClipped = 0; /* names too long for DBC_NAME_MAX - see above   */
+  /* Parser state, not a result: the last BO_ was NOT stored, so the SG_ lines
+   * under it belong to nothing. Without it they were appended to the previous,
+   * stored message - which then decoded its frames with another message's
+   * signals. */
+  uint8_t    curDropped  = 0;
+  uint8_t    lastSkip    = 0; /* the line just parsed failed for want of room  */
   uint8_t    overflow    = 0; /* a table filled up - the map is INCOMPLETE     */
   uint8_t    loaded      = 0; /* at least one message was parsed               */
   uint8_t    inexact     = 0; /* at least one signal needs floating point      */

@@ -9,9 +9,13 @@
 #include "dashstore.h"
 #include "cantx.h"
 #include "webpage.h"
+#include "webpage_gz.h"
+#include "mem.h"
 
 #include <SD.h>
 #include <WebServer.h>
+#include <lwip/sockets.h>
+#include <sys/time.h>       /* struct timeval for SO_SNDTIMEO; SO_LINGER is in lwip */
 #include <ESPmDNS.h>
 
 static WebServer *s_srv = nullptr;
@@ -19,16 +23,153 @@ static WebServer *s_srv = nullptr;
 /* ==========================================================================
  *  Handlers
  * ======================================================================== */
+/* ------------------------------------------------------------------------ *
+ *  One way out for every JSON response.
+ *
+ *  Handing a whole response to send() is a single WiFiClient::write(). lwIP's
+ *  send buffer is a few kilobytes, so anything larger asks it to accept more
+ *  than it can hold: the write returns EAGAIN, the body is cut short, and the
+ *  Content-Length header still promises the rest. A browser told to expect
+ *  15 KB and given 4 KB does not error - it WAITS. The fetch never settles,
+ *  the page shows neither data nor "connection lost", and nothing is logged on
+ *  either side. That silence is the reason this took so long to find.
+ *
+ *  Sliced, with a yield between slices so the TCP task can drain, the promise
+ *  in the header is one the writes can keep.                                */
+static void sendJson(const String &j) {
+  s_srv->sendHeader("Cache-Control", "no-store");
+  s_srv->setContentLength(j.length());
+  s_srv->send(200, "application/json", "");
+
+  const char  *body = j.c_str();
+  const size_t len  = j.length();
+  /* By value: WebServer::client() returns a copy, and the copy shares the
+   * underlying socket through a shared_ptr - so connected() reports on the
+   * real connection and stop() really closes it. */
+  WiFiClient   cl   = s_srv->client();
+  const uint32_t started = millis();
+  for (size_t off = 0; off < len; off += 2048) {
+    /* Same reason as handleRoot: a write to a client that has gone, or has
+     * merely stopped reading, costs up to ten seconds per slice inside
+     * WiFiClient::write() - on the loop task, which is also the only thing
+     * that accepts new connections. Both cheap to check, so check both. */
+    /* Returning is enough: handleClient() drops the client as soon as this
+     * request finishes. cl.stop() would only clear this COPY's flag - the
+     * server holds its own reference, so the socket would stay open. */
+    if (!cl.connected()) return;
+    if (millis() - started > WEB_SEND_MAX_MS) return;
+    const size_t n = (len - off < 2048) ? (len - off) : 2048;
+    s_srv->sendContent(body + off, n);
+    delay(0);
+  }
+}
+
 static void handleRoot() {
   s_srv->sendHeader("Cache-Control", "no-store");
 
-  /* Chunked, so the page streams from flash to the socket without ever being
-   * assembled in RAM. The parts are only split for readability - the browser
-   * sees one document. */
-  s_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
+  /* ---- THE PAGE, SENT SO THAT A SLOW CLIENT CANNOT WEDGE THE SERVER -----
+   *
+   * The page is stored pre-compressed (src/webpage_gz.h, about 52 KB against
+   * 170 KB of source) and goes out in WEB_PAGE_SLICE pieces with a real
+   * Content-Length. Each of those choices fixes a failure that was measured in
+   * station mode, where the browser is a router hop away rather than on the
+   * board's own hotspot:
+   *
+   *  - ONE WRITE PER PART was up to 73 KB handed to WiFiClient::write(). lwIP's
+   *    send buffer is a few kilobytes; once the window filled the write came
+   *    back EAGAIN - `write(): fail on fd 50, errno: 11` - and the page died
+   *    half-sent. On the hotspot the client drains fast enough to hide it.
+   *
+   *  - A CHUNKED response has to be terminated after the handler returns: three
+   *    more writes to a socket this function may have just given up on. A
+   *    Content-Length has no terminator and no framing to desynchronise.
+   *
+   *  - NOTHING STOPPED THE LOOP. sendContent_P() ignores short writes, and
+   *    WiFiClient::write() retries a full buffer ten times with a one-second
+   *    wait each, so a client that stopped reading held this handler - and with
+   *    it every other request, since the server takes one client at a time -
+   *    for up to ten seconds a slice. So: SO_SNDTIMEO makes a stalled write
+   *    return, and between slices the send gives up if the socket has closed or
+   *    WEB_SEND_MAX_MS has passed. connected() alone is not enough: a client
+   *    that timed out without closing still reads as connected.
+   *
+   *  - AN ABANDONED SEND held its queued bytes. A polite close keeps them and
+   *    retransmits for minutes, from the same heap an inbound connection needs
+   *    its ~2.3 KB receive buffer from, so the board stopped accepting anything.
+   *    SO_LINGER with a zero timeout turns that close into a reset and the
+   *    memory comes straight back.
+   *
+   * What none of this can fix: if the heap has no room for a receive buffer
+   * the connection is refused before any handler runs. That is a budgeting
+   * question - see MEM_WEB_SERVES in config.h - not a sending one. */
+  WiFiClient cl = s_srv->client();   /* a copy, sharing the same socket */
+
+  memSample();
+
+#if WEB_SEND_SLICE_TIMEOUT_MS
+  if (cl.fd() >= 0) {
+    struct timeval tv;
+    tv.tv_sec  = 0;
+    tv.tv_usec = WEB_SEND_SLICE_TIMEOUT_MS * 1000;
+    cl.setSocketOption(SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+  }
+#endif
+
+  const size_t SLICE = WEB_PAGE_SLICE;
+  bool   gone = false, slow = false;
+  size_t sent = 0;
+  const uint32_t started = millis();
+
+#if WEB_PAGE_GZIP
+  s_srv->sendHeader("Content-Encoding", "gzip");
+  s_srv->setContentLength(PAGE_GZ_LEN);
   s_srv->send(200, "text/html", "");
-  for (uint8_t i = 0; i < PAGE_PART_COUNT; i++) s_srv->sendContent_P(PAGE_PARTS[i]);
-  s_srv->sendContent("");
+  for (size_t off = 0; off < PAGE_GZ_LEN; off += SLICE) {
+    if (!cl.connected())                        { gone = true; break; }
+    if (millis() - started > WEB_SEND_MAX_MS)   { slow = true; break; }
+    const size_t n = (PAGE_GZ_LEN - off < SLICE) ? (PAGE_GZ_LEN - off) : SLICE;
+    s_srv->sendContent_P((PGM_P)(PAGE_GZ + off), n);
+    sent += n;
+    delay(0);            /* let the TCP task drain what was just queued */
+  }
+#else
+  static size_t pageBytes = 0;
+  if (!pageBytes) {
+    for (uint8_t i = 0; i < PAGE_PART_COUNT; i++) pageBytes += strlen(PAGE_PARTS[i]);
+  }
+  s_srv->setContentLength(pageBytes);
+  s_srv->send(200, "text/html", "");
+  for (uint8_t i = 0; i < PAGE_PART_COUNT && !gone && !slow; i++) {
+    const char  *part = PAGE_PARTS[i];
+    const size_t len  = strlen(part);
+    for (size_t off = 0; off < len; off += SLICE) {
+      if (!cl.connected())                      { gone = true; break; }
+      if (millis() - started > WEB_SEND_MAX_MS) { slow = true; break; }
+      const size_t n = (len - off < SLICE) ? (len - off) : SLICE;
+      s_srv->sendContent_P(part + off, n);
+      sent += n;
+      delay(0);
+    }
+  }
+#endif
+
+  if (gone || slow) {
+    LOG_LIVE(LVL_WARN, "%s %u KB into the page (%lu ms) - stopped sending, so "
+                       "other requests are not held up behind it",
+             gone ? "the browser dropped the connection"
+                  : "the client stopped reading",
+             (unsigned)(sent / 1024), (unsigned long)(millis() - started));
+    /* No cl.stop(): it would only release this copy. handleClient() closes the
+     * real socket when this returns, and the linger setting makes that close a
+     * reset rather than minutes of retransmitting to nobody. */
+    if (cl.fd() >= 0) {
+      struct linger sl;
+      sl.l_onoff  = 1;
+      sl.l_linger = 0;
+      cl.setSocketOption(SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
+    }
+  }
+  memSample();
 }
 
 /* Appends a JSON string body (no surrounding quotes). Names and units come out
@@ -133,8 +274,49 @@ static void handleStatus() {
   uint32_t lost = g_rec.queueDropped;
   for (uint8_t b = 0; b < CAN_BUSES; b++) lost += g_rec.bus[b].canOvfFramesMin;
 
-  String j;
-  j.reserve(4096);          /* two buses of ids and signals */
+  /* STATIC, and reserved at what the reply MEASURES rather than at its
+   * theoretical ceiling.
+   *
+   * Two mistakes, one after the other, and both are worth keeping written
+   * down because they pull in opposite directions.
+   *
+   * It began as a local String with reserve(4096). Arduino's String does not
+   * grow geometrically - concat() calls reserve(needed) and reserve() reallocs
+   * to exactly that - so every append past the reservation moved the whole
+   * buffer again, a thousand times a reply, five times a second. Static fixed
+   * that, and static is still right.
+   *
+   * The reservation was then raised to the worst case the ceilings allow:
+   *
+   *     1024 + CAN_BUSES * (BUS_TRACK_IDS * 80 + WEB_MAX_SIGNALS * 120)
+   *   = 1024 + 2 * (24 * 80 + 48 * 120) = 16384 bytes
+   *
+   * against a reply that measures 2111-2126 bytes in practice. Eight times
+   * over-asked, as one unbroken run of heap. Once the frame maps had
+   * fragmented DRAM that allocation stopped succeeding and /api/status
+   * answered 503 for the rest of the run - in 15 of 20 test runs, on
+   * every map from v1 (16 KB of tables) upward and never on v0 or with no map.
+   *
+   * 4096 is double the measured reply. If a bus ever tracks enough signals to
+   * pass it the String grows once more and stays grown, which is the same
+   * property the worst-case reservation was after and does not need 16 KB of
+   * contiguous heap to get.
+   *
+   * Sent with a real Content-Length through sendJson(), NOT chunked. Chunked
+   * framing has to be terminated, and terminating it means another write to a
+   * socket that may already be dead - see handleRoot for what that costs. */
+  const uint32_t blockNow = memSample();
+
+  static String j;
+  if (!j.reserve(4096)) {
+    LOG_LIVE(LVL_ERROR, "/api/status: could not reserve 4096 bytes for the "
+                        "reply - largest free block is %lu, total free %lu. "
+                        "The dashboard will show this as a failed poll.",
+             (unsigned long)blockNow, (unsigned long)memStat().freeNow);
+    s_srv->send(503, "text/plain", "out of memory");
+    return;
+  }
+
   j  = "{\"sd\":";      j += g_rec.sdOk ? 1 : 0;
   j += ",\"sdErr\":";   j += g_rec.sdError ? 1 : 0;
   j += ",\"sdType\":\"";j += g_rec.sdType; j += '"';
@@ -172,11 +354,25 @@ static void handleStatus() {
   j += ",\"ap\":";      j += netIsAp() ? 1 : 0;
   j += ",\"ip\":\"";    j += netIp(); j += '"';
   j += ",\"up\":";      j += millis();
-  j += ",\"heap\":";    j += (uint32_t)ESP.getFreeHeap();
+  /* Three numbers, not one. The total is the reassuring one and the
+   * useless one; `heapMax` is the largest block that can still be
+   * handed out, which is what decides whether the next allocation
+   * succeeds, and `heapLow` is the worst that block has ever been -
+   * so a squeeze that has since recovered is still visible. */
+  {
+    const MemStat mm = memStat();
+    j += ",\"heap\":";    j += mm.freeNow;
+    j += ",\"heapMax\":"; j += mm.largest;
+    j += ",\"heapLow\":"; j += mm.lowBlock;
+    j += ",\"heapMin\":"; j += mm.minFree;
+  }
+  /* Passes of appLoop() a second. Under a few tens the web server is not being
+   * scheduled - which is what a browser sees as "the logger stopped answering"
+   * even though the recording is fine. */
+  j += ",\"web\":";     j += (uint32_t)g_rec.loopRate;
   j += ",\"fw\":\"";    j += FIRMWARE_NAME " v" FIRMWARE_VERSION; j += "\"}";
 
-  s_srv->sendHeader("Cache-Control", "no-store");
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 static void handleLog() {
@@ -192,7 +388,7 @@ static void handleLog() {
   j += ",\"lines\":["; j += lines; j += "]}";
 
   s_srv->sendHeader("Cache-Control", "no-store");
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 static void handleStart() {
@@ -243,8 +439,24 @@ static void handleStop() {
 static uint32_t s_dashGen = 1;
 
 static void handleDash() {
-  String j;
-  j.reserve(1024);
+  /* THE endpoint the Dashboard tab polls - the busiest response this firmware
+   * produces, and it was reserved at 1 KB. Three arrays of DASH_MAX_CELLS plus
+   * a copy of the health block is several times that, and Arduino's String
+   * reallocs to the exact size on every append past the reservation. Sized
+   * from the grid it actually describes, and static so the buffer is not
+   * taken and returned on every poll. */
+  static const size_t DASH_RESERVE = 1024                    /* health block */
+                                   + (size_t)DASH_MAX_CELLS * 48;
+  const uint32_t dashBlockNow = memSample();
+  static String j;
+  if (!j.reserve(DASH_RESERVE)) {
+    LOG_LIVE(LVL_ERROR, "/api/dash: could not reserve %lu bytes for the reply - "
+                        "largest free block is %lu, total free %lu",
+             (unsigned long)DASH_RESERVE, (unsigned long)dashBlockNow,
+             (unsigned long)memStat().freeNow);
+    s_srv->send(503, "text/plain", "out of memory");
+    return;
+  }
 
   const uint8_t cells = dashCellCount(g_dash);
   const uint32_t now  = millis();
@@ -359,7 +571,13 @@ static void handleDash() {
   j += ",\"kb\":";    j += (uint32_t)(g_rec.bytes / 1024ULL);
   j += ",\"pf\":";    j += g_rec.powerFail ? 1 : 0;
   j += ",\"up\":";    j += millis();
-  j += ",\"heap\":";  j += (uint32_t)ESP.getFreeHeap();
+  {
+    const MemStat mm = memStat();
+    j += ",\"heap\":";    j += mm.freeNow;
+    j += ",\"heapMax\":"; j += mm.largest;
+    j += ",\"heapLow\":"; j += mm.lowBlock;
+  }
+  j += ",\"web\":";     j += (uint32_t)g_rec.loopRate;
   j += ",\"ap\":";    j += netIsAp() ? 1 : 0;
   j += ",\"ip\":\"";  j += netIp(); j += '"';
   j += ",\"fw\":\"";  j += FIRMWARE_NAME " v" FIRMWARE_VERSION; j += '"';
@@ -401,7 +619,7 @@ static void handleDash() {
   j += "]}";
 
   s_srv->sendHeader("Cache-Control", "no-store");
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 /* The layout as text - byte for byte what is on the card. Doubles as Export. */
@@ -455,7 +673,7 @@ static void handleDashCfgPost() {
   j += ",\"missing\":"; j += missing;
   j += ",\"gen\":";     j += s_dashGen;
   j += '}';
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 /* Uploading a frame map from the browser.
@@ -489,6 +707,78 @@ static uint8_t  s_dbcUpBus   = 0;    /* captured at UPLOAD_FILE_START */
 
 static const char *const kDbcPath[CAN_BUSES]    = { DBC_PATH,     DBC2_PATH };
 static const char *const kDbcTmpPath[CAN_BUSES] = { DBC_TMP_PATH, DBC2_TMP_PATH };
+
+/* GET /api/bundle - the whole setup as one file.
+ *
+ * Export used to hand back /dash.cfg alone, which is half a setup: the layout
+ * names signals as "Message.Signal", so a layout without the maps it was built
+ * against is a page full of "unknown". This streams the maps and the layout
+ * together in the format tools/make_bundle.py writes and bundle.cpp unpacks,
+ * so what comes out of a logger can be copied straight onto another one.
+ *
+ * Streamed from the card in the same slices the dashboard page uses, and for
+ * the same reason: the maps can be 60 KB and this board does not have 60 KB to
+ * assemble them in. The declared name_max is this firmware's own - these files
+ * are what it is actually running. */
+static void handleBundle() {
+  static const char *const kNames[] = { "frames.dbc", "frames2.dbc",
+                                        "dash.cfg" };
+  const char *paths[3] = { DBC_PATH, DBC2_PATH, DASH_PATH };
+
+  char head[64];
+  snprintf(head, sizeof(head), "#DCLB1 name_max=%u\n", (unsigned)DBC_NAME_MAX);
+
+  /* Content-Length is worked out first so this is a plain response rather than
+   * a chunked one - see the note on handleRoot for what chunked encoding cost
+   * here. */
+  size_t total = strlen(head) + 5;          /* header + "#END\n" */
+  size_t sizes[3] = { 0, 0, 0 };
+  bool   have[3]  = { false, false, false };
+  for (uint8_t i = 0; i < 3; i++) {
+    File f = SD.open(paths[i], FILE_READ);
+    if (!f) continue;
+    sizes[i] = (size_t)f.size();
+    f.close();
+    if (!sizes[i]) continue;
+    have[i] = true;
+    char hdr[80];
+    total += snprintf(hdr, sizeof(hdr), "#FILE %s %u\n",
+                      kNames[i], (unsigned)sizes[i]);
+    total += sizes[i] + 1;                  /* payload + its newline */
+  }
+
+  s_srv->sendHeader("Cache-Control", "no-store");
+  s_srv->sendHeader("Content-Disposition",
+                    "attachment; filename=\"logger.bundle\"");
+  s_srv->setContentLength(total);
+  s_srv->send(200, "application/octet-stream", "");
+  s_srv->sendContent(head);
+
+  WiFiClient cl = s_srv->client();
+  uint8_t buf[512];
+  for (uint8_t i = 0; i < 3; i++) {
+    if (!have[i]) continue;
+    char hdr[80];
+    snprintf(hdr, sizeof(hdr), "#FILE %s %u\n", kNames[i],
+             (unsigned)sizes[i]);
+    s_srv->sendContent(hdr);
+    File f = SD.open(paths[i], FILE_READ);
+    if (!f) continue;
+    size_t left = sizes[i];
+    while (left && cl.connected()) {
+      const size_t want = (left < sizeof(buf)) ? left : sizeof(buf);
+      const int got = f.read(buf, want);
+      if (got <= 0) break;
+      s_srv->sendContent((const char *)buf, (size_t)got);
+      left -= (size_t)got;
+      delay(0);
+    }
+    f.close();
+    s_srv->sendContent("\n");
+  }
+  s_srv->sendContent("#END\n");
+  LOG_FILE(LVL_INFO, "served the setup bundle, %u bytes", (unsigned)total);
+}
 
 static void handleDbcUpload() {
   HTTPUpload &up = s_srv->upload();
@@ -594,7 +884,7 @@ static void handleDbcDone() {
   j += ",\"dropped\":";   j += (uint32_t)dropped;
   j += ",\"clipped\":";   j += (uint32_t)db.nameClipped;
   j += '}';
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 /* Everything the editor needs to offer a signal: its name, unit, the range the
@@ -603,6 +893,64 @@ static void handleDbcDone() {
  * anything else this firmware builds in RAM, and building it as one String
  * would be the largest allocation in the program for the sake of a list that
  * is fetched when somebody opens a dialog. */
+/* ---------------------------------------------------------------------------
+ *  /api/websurvival - will this page keep answering while the logger records?
+ *
+ *  The design tools serve this too, and NOT with the same thing. They predict,
+ *  from the .dbc files, for all three DBC_NAME_MAX settings, and can therefore
+ *  offer to change one. This board can only report what it actually came up
+ *  with: the map is loaded, the tables are allocated, and it cannot rebuild
+ *  itself to try a different name length.
+ *
+ *  So can_choose and can_trim are 0 here, and the page renders a verdict with
+ *  no controls under it. That asymmetry is the point rather than a limitation:
+ *  the choice belongs at design time, and a logger that offered it would be
+ *  offering something it cannot do.
+ *
+ *  Small, fixed-size and built on the stack. It is one short object and must
+ *  not become another reason to reserve a kilobyte during a recording - see
+ *  the note on handleStatus for what that cost the last time.
+ * -------------------------------------------------------------------------*/
+static void handleWebSurvival() {
+  const uint32_t block = memReadyBlock();
+  const bool ok = block >= MEM_WEB_SERVES;
+
+  /* Before setup finished there is no answer yet, and saying "not guaranteed"
+   * would be a claim rather than an absence. */
+  if (!block) {
+    s_srv->sendHeader("Cache-Control", "no-store");
+    s_srv->send(200, "application/json",
+                "{\"available\":0,\"why\":\"still starting up\"}");
+    return;
+  }
+
+  const char *why =
+      ok ? "the largest free block at start-up cleared the mark every "
+           "measured run served every request above."
+         : (block > MEM_WEB_DEAD
+            ? "this is in the band where the same map served anywhere from "
+              "3% to 100% of its requests on repeated runs. The recording is "
+              "unaffected and will not lose a frame."
+            : "this is at or below the mark where no measured run served even "
+              "10% of its requests. Expect this page to stop answering within "
+              "the first minute. The recording is unaffected and will not "
+              "lose a frame.");
+
+  char j[512];
+  snprintf(j, sizeof(j),
+           "{\"available\":1,\"guaranteed\":%d,\"block\":%lu,"
+           "\"name_max\":%u,\"serves_at\":%lu,\"dead_at\":%lu,"
+           "\"can_choose\":0,\"can_trim\":0,\"remedies\":[],"
+           "\"options\":[{\"name_max\":%u,\"block\":%lu,"
+           "\"guaranteed\":%d,\"chosen\":1}],\"why\":\"%s\"}",
+           ok ? 1 : 0, (unsigned long)block, (unsigned)DBC_NAME_MAX,
+           (unsigned long)MEM_WEB_SERVES, (unsigned long)MEM_WEB_DEAD,
+           (unsigned)DBC_NAME_MAX, (unsigned long)block, ok ? 1 : 0, why);
+
+  s_srv->sendHeader("Cache-Control", "no-store");
+  s_srv->send(200, "application/json", j);
+}
+
 static void handleSignals() {
   const uint8_t bus = argBus();
   const DbcDb  &db  = g_dbc[bus];
@@ -611,6 +959,24 @@ static void handleSignals() {
   s_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
   s_srv->send(200, "application/json", "");
 
+  /* The BUFFER here is already right and must stay as it is: the response is
+   * chunked and flushed every couple of kilobytes (see the sendContent below),
+   * so `j` is a working buffer, not the whole payload. Do not "fix" it the way
+   * handleDash and handleStatus were fixed - and do not add a 503 here,
+   * because the 200 header has already gone out.
+   *
+   * What it was missing was a YIELD. Each sendContent() on a chunked response
+   * is three socket writes (size, body, CRLF), and this loop fired them back
+   * to back with nothing in between. On a 33-signal map that is 4 flushes and
+   * survives; on a 98-signal map it is 13, the TCP window fills part way
+   * through, and the write comes back EAGAIN - so the response is truncated,
+   * r.json() throws in the browser, and the page's init chain never reaches
+   * startPolls(). The dashboard then sits on "connecting..." forever with
+   * every cell showing "--", which looks like the poll failing when in fact
+   * the poll never started.
+   *
+   * Deleting /frames2.dbc from the card "fixed" it for exactly this reason:
+   * it took the bus-2 response from 14363 bytes back down to 38. */
   String j;
   j.reserve(1400);
   j = "{\"bus\":";
@@ -689,12 +1055,15 @@ static void handleSignals() {
     }
     j += "]}";
 
-    /* Flush at message boundaries so the buffer never grows with the map. */
-    if (j.length() > 1024) { s_srv->sendContent(j); j = ""; }
+    /* Flush at message boundaries so the buffer never grows with the map, and
+     * yield so the TCP task can drain what was just queued. 2 KB rather than
+     * 1 KB halves the chunk count for the same buffer ceiling. */
+    if (j.length() > 2048) { s_srv->sendContent(j); j = ""; delay(0); }
   }
 
   j += "]}";
   s_srv->sendContent(j);
+  delay(0);
   s_srv->sendContent("");
 }
 
@@ -707,7 +1076,7 @@ static void txReply(uint32_t ticket) {
   j  = "{\"ticket\":"; j += ticket;
   j += ",\"n\":";      j += (uint32_t)g_tx.ringCount;
   j += '}';
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 static void handleTxArm() {
@@ -719,7 +1088,7 @@ static void handleTxArm() {
   j  = "{\"arm\":";     j += txArmed() ? 1 : 0;
   j += ",\"armLeft\":"; j += (uint32_t)(txArmRemainingMs() / 1000UL);
   j += '}';
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 static uint8_t hexPair(const char *p) {
@@ -796,7 +1165,7 @@ static void handleTxCyclic() {
   j  = "{\"cyc\":"; j += g_tx.cyclicOn;
   j += ",\"n\":";   j += (uint32_t)g_tx.ringCount;
   j += '}';
-  s_srv->send(200, "application/json", j);
+  sendJson(j);
 }
 
 void webBegin() {
@@ -815,15 +1184,33 @@ void webBegin() {
   s_srv->on("/api/dash/cfg",  HTTP_GET,  handleDashCfgGet);
   s_srv->on("/api/dash/cfg",  HTTP_POST, handleDashCfgPost);
   s_srv->on("/api/signals",   HTTP_GET,  handleSignals);
+  s_srv->on("/api/websurvival", HTTP_GET, handleWebSurvival);
   s_srv->on("/api/dbc",       HTTP_POST, handleDbcDone, handleDbcUpload);
+  s_srv->on("/api/bundle",    HTTP_GET,  handleBundle);
 
   s_srv->on("/api/tx/arm",    HTTP_POST, handleTxArm);
   s_srv->on("/api/tx/send",   HTTP_POST, handleTxSend);
   s_srv->on("/api/tx/cyclic", HTTP_POST, handleTxCyclic);
 
+  /* Every browser asks for this on every page load, and some ask again while
+   * the tab is open. Without a handler it fell through to onNotFound, which
+   * serves the WHOLE 168 KB dashboard - so the cost of an icon nobody wants was
+   * a second full page render, streamed down the same single-client socket the
+   * status poll is queued on. 204 ends it in one packet. */
+  s_srv->on("/favicon.ico", HTTP_GET, []() { s_srv->send(204); });
+
   /* Anything else goes to the dashboard, including the captive-portal probes
-   * phones fire when they join the hotspot. */
-  s_srv->onNotFound(handleRoot);
+   * phones fire when they join the hotspot - EXCEPT an unknown /api/ path,
+   * which gets a small 404. Serving 168 KB of HTML in answer to a mistyped or
+   * newer API call wedges the server for no possible benefit: nothing that
+   * calls /api/ can use a page, and the caller is a script that will retry. */
+  s_srv->onNotFound([]() {
+    if (s_srv->uri().startsWith("/api/")) {
+      s_srv->send(404, "application/json", "{\"err\":\"no such endpoint\"}");
+      return;
+    }
+    handleRoot();
+  });
 
   s_srv->begin();
 
@@ -837,5 +1224,11 @@ void webBegin() {
 }
 
 void webService() {
-  if (s_srv) s_srv->handleClient();
+  if (!s_srv) return;
+  s_srv->handleClient();
+  /* Sampled HERE and nowhere cheaper: serving is what spends the heap,
+   * so this is the only place that sees the trough. A boot-time reading
+   * cannot - by the time anything is wrong the page has been served a
+   * hundred times. */
+  memSample();
 }

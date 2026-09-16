@@ -225,6 +225,27 @@ bool MCP2515::startReceiving(bool listenOnly) {
 
 uint8_t MCP2515::interruptFlags() { return readReg(REG_CANINTF); }
 
+/* See setBusyHook() in the header for why this exists. Static, and guarded
+ * against re-entry: the hook drains the controllers, and a drain must never be
+ * able to start another transmit and recurse into this wait. */
+static MCP2515::BusyHook s_busyHook = nullptr;
+static void             *s_busyCtx  = nullptr;
+static bool              s_inBusy   = false;
+
+void MCP2515::setBusyHook(BusyHook hook, void *ctx) {
+  s_busyHook = hook;
+  s_busyCtx  = ctx;
+}
+
+static inline void busyWait100us() {
+  if (s_busyHook && !s_inBusy) {
+    s_inBusy = true;
+    s_busyHook(s_busyCtx);
+    s_inBusy = false;
+  }
+  delayMicroseconds(100);
+}
+
 uint8_t MCP2515::clearErrorInterrupts() {
   const uint8_t sticky = readReg(REG_CANINTF) & (uint8_t)~(INT_RX0 | INT_RX1);
   if (sticky) {
@@ -362,7 +383,9 @@ MCP2515::TxResult MCP2515::sendFrame(const CanFrame &f, uint8_t attempts,
     for (uint16_t i = 0; i < 200; i++) {
       ctrl = readReg(REG_TXB0CTRL);
       if (!(ctrl & TXB_TXREQ)) { done = true; break; }
-      delayMicroseconds(100);
+      /* NOT a bare delay. This is the window in which frames are lost if
+       * nobody is emptying the receive buffers - see setBusyHook(). */
+      busyWait100us();
     }
 
     if (!done) {

@@ -216,10 +216,16 @@ int main() {
        "100;2;0x100;PumpState;Pressure;10.0;bar;\n");
 
     /* One clock for both buses: the epoch is taken from the first frame seen,
-     * whichever bus it came from, so the two are directly comparable. */
+     * whichever bus it came from, so the two are directly comparable.
+     *
+     * 0x077 rather than something rounder: this row has to stay undecoded for
+     * the timestamp to be the only thing under test, and 0x001..0x07F is the
+     * one 11-bit range CiA 301 reserves - so it is raw whether CANOPEN_DECODE
+     * is on or off. 0x777 used to be here and became HEARTBEAT.119 the day
+     * that setting was turned on. */
     eq("one timestamp origin across both buses",
-       emit(d, mk(0x777, 250, {0xAB}, false, 1)),
-       "250;2;0x777;;;;;AB\n");
+       emit(d, mk(0x077, 250, {0xAB}, false, 1)),
+       "250;2;0x77;;;;;AB\n");
 
     eq("an id only bus 1 knows is raw on bus 2",
        emit(d, mk(0x101, 300, {0x18, 0xFC, 0, 0, 0, 0, 0, 0}, false, 1)),

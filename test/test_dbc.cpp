@@ -233,6 +233,86 @@ int main() {
        "got " + std::to_string(j.lineErrors));
   }
 
+  printf("\n== a map that does not fit is INCOMPLETE, not corrupt ==\n");
+  {
+    /* Tables deliberately smaller than the file: two messages, three signals.
+     * Message C does not fit, so its two SG_ lines and its VAL_ line have
+     * nowhere to go. None of that is a malformed line. */
+    static const char *const TIGHT[] = {
+      "NS_ :",
+      "    BA_",
+      "    SIG_VALTYPE_",
+      "    VAL_",
+      "BO_ 100 A: 8 N",
+      " SG_ a1 : 0|8@1+ (1,0) [0|255] \"\" X",
+      " SG_ a2 : 8|8@1+ (1,0) [0|255] \"\" X",
+      "BO_ 101 B: 8 N",
+      " SG_ b1 : 0|8@1+ (1,0) [0|255] \"\" X",
+      "BO_ 102 C: 8 N",
+      " SG_ c1 : 0|8@1+ (1,0) [0|255] \"\" X",
+      " SG_ c2 : 8|8@1+ (1,0) [0|255] \"\" X",
+      "VAL_ 102 c1 0 \"zero\" ;",
+      nullptr
+    };
+    DbcDb t = {};
+    DbcCounts want{2, 5, 2};   /* room left for signals: only the guard can stop C's landing on B */
+    dbcAllocate(t, want);
+    dbcReset(t);
+    char line[DBC_LINE_MAX];
+    for (const char *const *l = TIGHT; *l; l++) {
+      snprintf(line, sizeof(line), "%s", *l);
+      dbcParseLine(t, line);
+    }
+    ck("the NS_ keyword list is not an error", t.lineErrors == 0,
+       "lineErrors " + std::to_string(t.lineErrors));
+    ck("what did not fit is counted as skipped", t.skipped == 4,
+       "skipped " + std::to_string(t.skipped));
+    ck("and flagged as incomplete", t.overflow == 1);
+    ck("the kept messages are whole", t.msgCount == 2 &&
+       t.msg[0].signalCount == 2 && t.msg[1].signalCount == 1,
+       "A " + std::to_string(t.msg[0].signalCount) +
+       " B " + std::to_string(t.msg[1].signalCount));
+    ck("C's signals were NOT attached to B", t.sigCount == 3 &&
+       strcmp(t.sig[2].name, "b1") == 0,
+       std::string("last signal ") + (t.sigCount ? t.sig[t.sigCount - 1].name : "-"));
+    dbcFree(t);
+
+    /* The same, but the SIGNAL table is the one that runs out: C is stored and
+     * must end up with no signals rather than someone else's. */
+    DbcDb u = {};
+    DbcCounts want2{3, 3, 2};
+    dbcAllocate(u, want2);
+    dbcReset(u);
+    for (const char *const *l = TIGHT; *l; l++) {
+      snprintf(line, sizeof(line), "%s", *l);
+      dbcParseLine(u, line);
+    }
+    ck("a message whose signals did not fit keeps none",
+       u.msgCount == 3 && u.msg[2].signalCount == 0,
+       "C has " + std::to_string(u.msgCount == 3 ? u.msg[2].signalCount : 99));
+    ck("still skipped, still no errors", u.lineErrors == 0 && u.skipped == 3,
+       "errors " + std::to_string(u.lineErrors) +
+       " skipped " + std::to_string(u.skipped));
+    dbcFree(u);
+  }
+
+  printf("\n== a VAL_ naming a clipped signal in full still binds ==\n");
+  {
+    /* Longer than any name slot. Stored cut short; the VAL_ line names it in
+     * full, and used to match nothing - the labels silently lost. */
+    std::string longName(DBC_NAME_MAX + 20, 'L');
+    std::string text = "BO_ 300 Long: 8 N\n SG_ " + longName +
+                       " : 0|8@1+ (1,0) [0|255] \"\" X\nVAL_ 300 " + longName +
+                       " 1 \"on\" ;\n";
+    DbcDb v = {};
+    dbcLoadText(v, text.c_str(), text.size());
+    ck("the name was clipped and said so", v.nameClipped == 1);
+    ck("its value table still bound", v.sigCount == 1 && v.sig[0].valCount == 1,
+       "labels " + std::to_string(v.sigCount ? v.sig[0].valCount : 0));
+    ck("with no line counted as an error", v.lineErrors == 0);
+    dbcFree(v);
+  }
+
   printf("\n== the table cannot be overrun ==\n");
   {
     /* The tables are sized to the file now, so a file with more messages than

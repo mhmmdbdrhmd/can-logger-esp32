@@ -48,6 +48,11 @@ header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14p
 .bushdr{font-size:10px;letter-spacing:.14em;text-transform:uppercase;
   color:var(--dim);text-align:center;padding-bottom:1px}
 .busgrp .hbtn{width:100%;padding:7px 10px;text-align:center}
+/* The web-UI badge. Green and red rather than a word alone, so the
+   state is readable without reading - it sits in a header that is
+   scanned, not studied. */
+.hbtn.good{border-color:var(--ok);color:var(--ok)}
+.hbtn.bad{border-color:var(--bad);color:var(--bad)}
 #rolelist button{width:100%;margin:0 0 8px;text-align:left}
 #rolelist button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
@@ -496,6 +501,13 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <button class="hbtn rolebtn" data-bus="2">Role: none</button>
   </div>
   <button id="setupbtn" class="hbtn">Setup file</button>
+  <!-- Whether this frame map leaves the logger able to SERVE this page while
+       it records. It belongs in the header, next to the button that loads the
+       map, because it is a consequence of that map and of nothing else the
+       reader does - and because it was previously printed only to the terminal
+       that launched the tool, where the person laying out a dashboard in a
+       browser never saw it. -->
+  <button id="webbtn" class="hbtn">Web UI: &mdash;</button>
   <span id="conn">connecting...</span>
 </header>
 
@@ -792,10 +804,13 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     </div>
 
     <h4>Export</h4>
-    <div class="sub">Downloads the file <b>to the phone or laptop you are
-      holding</b>, into its downloads folder. Nothing on the logger changes and
-      no card is written, so this is safe to press at any time &mdash; including
-      in the middle of a recording.</div>
+    <div class="sub">Downloads <b>logger.bundle</b> to the phone or laptop you
+      are holding &mdash; the frame maps and this layout together, because a
+      layout without the maps it was built against is a page full of
+      &ldquo;unknown&rdquo;. Copy that one file onto another logger&rsquo;s card
+      and it unpacks itself at boot. Nothing here changes and no card is
+      written, so it is safe to press at any time &mdash; including in the
+      middle of a recording.</div>
     <button class="cfgexport pri">Export to this device</button>
 
     <h4>Import</h4>
@@ -831,6 +846,45 @@ static const char PAGE_2[] PROGMEM = R"HTML(
 
     <div class="acts">
       <button id="role_close" class="pri">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- will this dashboard still answer while the logger records? -->
+<div class="sheet" id="websheet">
+  <div class="sheetbox">
+    <h3>Will this dashboard still answer while it records?</h3>
+    <div class="sub" style="margin-bottom:14px">The frame maps and this web
+      server come out of the same memory. A big map does not stop the logger
+      <b>recording</b> &mdash; every frame is captured whole whatever happens
+      here &mdash; but it can leave the board unable to accept a connection, and
+      then this page stops loading a minute into the run and does not come back.
+      <br><br>There are two answers and no middle one. In the band between them
+      the same map served 46%, 3%, 95%, 3% and 99.9% on five consecutive runs,
+      so &ldquo;probably&rdquo; would describe the run rather than the choice
+      &mdash; and it is the choice being made here.</div>
+
+    <div class="card" style="margin-bottom:14px">
+      <div class="state"><span class="dot" id="webdot"></span>
+        <div><div class="big" id="webhead">&mdash;</div>
+             <div class="sub" id="webwhy">&nbsp;</div></div></div>
+    </div>
+
+    <div class="card" style="margin-bottom:14px" id="webnmcard">
+      <h2>Longest signal name kept</h2>
+      <div class="sub" style="margin:0 0 8px">The single biggest lever on the
+        memory a map costs. Shorter names are <b>abbreviated</b>, not clipped
+        &mdash; <code>EngineCoolantTemperature</code> becomes <code>EngCoolTemp</code>
+        &mdash; and the layout references are rewritten to match, so nothing
+        stops resolving.</div>
+      <div class="step" id="webnm"></div>
+    </div>
+
+    <div id="webfix"></div>
+
+    <div class="acts">
+      <button id="web_trim">Trim the map to fit</button>
+      <button id="web_close" class="pri">Done</button>
     </div>
   </div>
 </div>
@@ -1803,8 +1857,17 @@ function paintHealth(d){
     q('btn').textContent = 'START'; q('btn').className = 'start';
   }
 
+  /* Free heap AND the largest block, because they fail apart: the radio and
+     the page both need one big allocation, and this board has refused to start
+     Wi-Fi with 80 KB free because no single block was big enough. `low` is the
+     worst that block has been since boot, so a squeeze that has since
+     recovered still shows. */
   q('s_up').textContent = 'up ' + hms(Math.floor(d.up/1000)) + ', ' +
-                          Math.round(d.heap/1024) + ' KB free';
+        Math.round(d.heap/1024) + ' KB free' +
+        (d.heapMax === undefined ? '' :
+           ' \u00b7 block ' + Math.round(d.heapMax/1024) + ' KB' +
+           ' \u00b7 low ' + Math.round(d.heapLow/1024) + ' KB') +
+        (d.web === undefined ? '' : ' \u00b7 web ' + d.web + '/s');
   q('foot').textContent = d.fw;
 }
 
@@ -3812,13 +3875,31 @@ q('clearcfg').onclick = function(){
    control exists in more than one place on the page. */
 function exportSetup(){
   /* Downloads what the LOGGER holds, not what this browser thinks it holds, so
-     an export is always exactly the file that is on the card. */
-  fetch('/api/dash/cfg').then(function(r){ return r.text(); }).then(function(t){
+     an export is always exactly what is on the card.
+
+     A BUNDLE, not dash.cfg alone. The layout names signals as
+     "Message.Signal", so a layout on its own is half a setup: carried to
+     another logger without the maps it was built against, every cell reads
+     "unknown". /api/bundle returns the frame maps and the layout together,
+     plus the DBC_NAME_MAX this firmware was built with, and the logger unpacks
+     it at boot - so moving a setup is copying one file instead of three that
+     have to match. */
+  fetch('/api/bundle').then(function(r){ return r.blob(); }).then(function(b){
     var a = el('a');
-    a.href = URL.createObjectURL(new Blob([t], {type:'text/plain'}));
-    a.download = 'dash.cfg';
+    a.href = URL.createObjectURL(b);
+    a.download = 'logger.bundle';
     a.click();
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+  }).catch(function(){
+    /* An older firmware has no /api/bundle. Fall back to the layout alone
+       rather than leaving the button dead. */
+    fetch('/api/dash/cfg').then(function(r){ return r.text(); }).then(function(t){
+      var a = el('a');
+      a.href = URL.createObjectURL(new Blob([t], {type:'text/plain'}));
+      a.download = 'dash.cfg';
+      a.click();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); }, 2000);
+    });
   });
 }
 function importSetup(){ q('filepick').click(); }
@@ -3991,6 +4072,11 @@ q('dbcpick').onchange = function(){
               + (d.errors ? ', ' + d.errors + ' line(s) unreadable' : '')
               + (d.dropped ? ' — ' + d.dropped + ' item(s) from the old map '
                         + 'removed' : ''), 'ok');
+        /* The map just changed, so the memory answer changed with it. This
+           is the whole reason the badge exists: it used to be computed once,
+           in the terminal, against whatever .dbc was on the command line, and
+           a map loaded from this button never touched it. */
+        loadWebSurv();
         /* Straight into the question that has to be answered before either
            Fill button is worth pressing - for the bus whose map just changed,
            since that is the one whose node list is now different. */
@@ -4000,6 +4086,166 @@ q('dbcpick').onchange = function(){
     .catch(function(){
       toast('Frame map not loaded', 'the logger did not answer', 'bad');
     });
+};
+
+/* ---------------------------------------------------------------------------
+ *  Will this page still be reachable while the logger records?
+ *
+ *  Answered by /api/websurvival, which the design tools and the logger both
+ *  serve but not with the same thing:
+ *
+ *    the preview   PREDICTS, from the .dbc files, for all three name_max
+ *                  settings, and can therefore offer to change them
+ *    the logger    REPORTS the block it actually came up with, because it
+ *                  knows its own and cannot rebuild itself to try another
+ *
+ *  So the page renders whatever rows it is given and only shows the
+ *  name_max control when the server says choosing is possible. A logger that
+ *  predates the endpoint answers 404, and the badge simply stays blank rather
+ *  than the header filling with an error nobody can act on.
+ * -------------------------------------------------------------------------*/
+var WEBSURV = null;
+
+function webBadge(){
+  var b = q('webbtn');
+  if(!b) return;
+  if(!WEBSURV){ b.textContent = 'Web UI: —'; b.className = 'hbtn'; return; }
+  b.textContent = 'Web UI: ' + (WEBSURV.guaranteed ? 'OK' : 'AT RISK');
+  b.className = 'hbtn ' + (WEBSURV.guaranteed ? 'good' : 'bad');
+}
+
+function loadWebSurv(){
+  return fetch('/api/websurvival').then(function(r){
+    if(!r.ok) throw 0;
+    return r.json();
+  }).then(function(d){
+    WEBSURV = d; webBadge(); return d;
+  }).catch(function(){ WEBSURV = null; webBadge(); return null; });
+}
+
+function drawWebSheet(){
+  var d = WEBSURV;
+  q('webdot').className = 'dot ' + (!d ? '' : (d.guaranteed ? 'ok' : 'bad'));
+  q('webhead').textContent = !d ? 'not available on this logger'
+                                : (d.guaranteed ? 'GUARANTEED' : 'NOT GUARANTEED');
+  q('webwhy').textContent = d ? (d.why || '') : '';
+
+  /* The three settings, each with what it would cost and whether it clears.
+     Shown even when the current one is fine: seeing that 64 would not clear it
+     is how somebody decides to leave 32 alone. */
+  var nm = q('webnm');
+  nm.textContent = '';
+  var rows = (d && d.options) || [];
+  q('webnmcard').style.display = rows.length ? '' : 'none';
+  rows.forEach(function(o){
+    /* .bussel is the selector style the Send tab already uses for "which
+       bus", so this looks like every other choice on the page rather than
+       introducing a fourth kind of button. */
+    var b = el('button', 'bussel' + (o.chosen ? ' on' : ''),
+               String(o.name_max));
+    b.title = o.block + ' bytes, '
+            + (o.guaranteed ? 'guaranteed' : 'not guaranteed');
+    var w = b;
+    if(d.can_choose && !o.chosen){
+      b.onclick = function(){
+        fetch('/api/websurvival?name_max=' + o.name_max, {method:'POST'})
+          .then(function(r){ return r.json(); })
+          .then(function(x){
+            if(!x || !x.ok){
+              toast('Not changed', (x && x.err) || 'the tool refused it', 'bad');
+              return;
+            }
+            return loadWebSurv().then(function(){
+              drawWebSheet();
+              toast('Longest name is now ' + o.name_max,
+                    'names longer than that are abbreviated', 'ok');
+            });
+          });
+      };
+    } else if(!d.can_choose){
+      b.disabled = true;
+      b.title = 'this is what the logger was built with - '
+              + 'change it in the design tool and reflash';
+    }
+    nm.appendChild(w);
+  });
+  if(rows.length){
+    var legend = el('div', 'sub',
+      rows.map(function(o){
+        return o.name_max + ': ' + o.block + ' B '
+             + (o.guaranteed ? 'ok' : 'at risk');
+      }).join('   ·   '));
+    legend.style.marginTop = '8px';
+    nm.parentNode.appendChild(legend);
+  }
+
+  /* The way out, when there is one. Every remedy the tool offers has already
+     been checked to actually reach GUARANTEED - an instruction that does not
+     fix it is worse than none. */
+  var fx = q('webfix');
+  fx.textContent = '';
+  var rem = (d && d.remedies) || [];
+  if(rem.length){
+    var c = el('div', 'card');
+    c.appendChild(el('h2', null, 'Any one of these makes it certain'));
+    rem.forEach(function(r){ c.appendChild(el('div', 'sub', '· ' + r.text)); });
+    fx.appendChild(c);
+  }
+  q('web_trim').style.display =
+    (d && d.can_trim && !d.guaranteed) ? '' : 'none';
+}
+
+q('webbtn').onclick = function(){
+  loadWebSurv().then(function(){
+    drawWebSheet();
+    q('websheet').classList.add('on');
+  });
+};
+q('web_close').onclick = function(){ q('websheet').classList.remove('on'); };
+q('websheet').onclick  = function(e){
+  if(e.target === q('websheet')) q('websheet').classList.remove('on');
+};
+
+/* Prunes the map, abbreviates what is left, rewrites the layout references to
+   match, and hands back one bundle. The messages the layout USES are never
+   dropped - the rest go largest first - so trimming cannot empty the dashboard
+   that is being designed. */
+q('web_trim').onclick = function(){
+  toast('Trimming the frame map', 'pruning, abbreviating and rewriting refs');
+  fetch('/api/websurvival/trim', {method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(!d || !d.ok){
+        /* Nothing was changed, and the reason matters more than the failure:
+           pruning cannot rescue every map, and the message names the setting
+           that would. Kept as a toast rather than an alert so it can be read
+           beside the three name_max rows it is talking about. */
+        toast('Nothing was changed',
+              (d && d.err) || 'the tool refused it', 'bad');
+        return;
+      }
+      return loadWebSurv().then(function(){
+        drawWebSheet();
+        /* BOTH buses. Trimming drops the largest messages across both maps, so
+           reloading only CAN 1 leaves the Send tab and the cell pickers
+           offering signals from a CAN 2 map that no longer has them. The cfg
+           is re-read after, because the logger has already pruned it and
+           rewritten its references to the abbreviated names. */
+        DBCS[0] = null; DBCS[1] = null;
+        Promise.all([loadDbc(1, true), loadDbc(2, true)]).then(loadCfg);
+        /* Deliberately NOT reporting how many layout items went with the
+           messages, though the trim response carries the number. That field
+           exists only on the design tool, and the page is served by the logger
+           too - a page reading a field no firmware handler produces is exactly
+           what run_tests.sh checks for, and weakening that check to allow one
+           convenience would cost more than the sentence is worth. The reload
+           below redraws the layout, so the change is visible anyway. */
+        toast('Frame map trimmed',
+              d.signals + ' signal(s) kept, ' + d.dropped + ' dropped'
+              + ' — now guaranteed', 'ok');
+      });
+    })
+    .catch(function(){ toast('Not trimmed', 'the tool did not answer', 'bad'); });
 };
 
 q('setupbtn').onclick = function(){
@@ -4175,6 +4421,10 @@ window.addEventListener('hashchange', function(){
   showTab(location.hash.slice(1));
 });
 loadCfg().then(function(){ showTab(location.hash.slice(1) || 'dash'); });
+/* Asked once at start-up, so the header carries the answer before anybody
+   opens a sheet. A logger without the endpoint leaves the badge blank
+   rather than showing an error - see loadWebSurv(). */
+loadWebSurv();
 </script>
 </body></html>
 )HTML";

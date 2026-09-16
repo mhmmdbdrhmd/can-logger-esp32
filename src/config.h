@@ -206,6 +206,11 @@
 #define DBC_TMP_PATH        "/frames.tmp"
 #define DBC2_TMP_PATH       "/frames2.tmp"
 
+/* One file carrying the whole setup: both frame maps, the dashboard layout and
+ * the name length the maps were prepared for. If it is on the card it is
+ * unpacked at boot over the three loose files - see bundle.h. */
+#define BUNDLE_PATH         "/logger.bundle"
+
 /* CEILINGS on the frame map, not its size.
  *
  * The tables are counted from the file and allocated to fit it (see dbc.h), so
@@ -218,20 +223,35 @@
  * wrote the other 451 as raw payload, with one line in the CSV header to say
  * so. Nothing about the numbers was wrong for the bus they were chosen for -
  * being fixed at all was the problem. */
-#define DBC_MAX_MESSAGES    256
-#define DBC_MAX_SIGNALS     1024
-#define DBC_MAX_VALDESC     2048
+#define DBC_MAX_MESSAGES    4096
+#define DBC_MAX_SIGNALS     16384
+#define DBC_MAX_VALDESC     16384
+/* Raised again after a real vendor map - 1104 messages, 8472 signals - walked
+ * straight through 256 / 1024 and was truncated with nothing louder than a
+ * "did not fit" line. The heap is what limits a map now (see
+ * DBC_HEAP_RESERVE); these only stop a corrupt file asking for the moon. */
+
+/* Lines read from one DBC before the file is treated as runaway. A 3 MB vendor
+ * map is about 60 000 lines. */
+#define DBC_MAX_LINES       200000UL
 
 /* Heap the frame map will NOT take, whatever the file asks for.
  *
- * The map is loaded before the radio starts, so an unbounded map could leave
- * the Wi-Fi stack with nothing and take the web app down to decode a few more
- * signals - the wrong trade in both directions. When the file needs more than
- * the budget allows, the request is scaled down proportionally and the load
- * reports what it kept, which is the same "map did not fit" path that has
- * always existed. Wi-Fi AP plus the web server wants roughly 50 KB; the rest
- * is margin for the writer's buffers and the task stacks. */
-#define DBC_HEAP_RESERVE    90000UL
+ * The radio is started BEFORE the maps are read (it needs large contiguous
+ * blocks that a freshly loaded map would have cut up), so this reserve only has
+ * to cover what comes after: measured with no map loaded, the rest of boot
+ * takes about 22.6 KB and the web server's working set about 16 KB.
+ *
+ * It was 90000 when the heap gauge read the wrong pool (ESP.getFreeHeap()
+ * counts 32-bit-only IRAM that malloc() can never return). Against the real
+ * figure 90000 exceeded the whole free heap, the budget came out as zero and
+ * EVERY message on both buses was dropped. The loader now reports that case as
+ * a configuration error, not as a map that did not fit.
+ *
+ * When a file needs more than the budget, the request is scaled down
+ * proportionally and the load reports what it kept. Frames outside the kept
+ * part are still recorded, as raw payload. */
+#define DBC_HEAP_RESERVE    40000UL
 /* Nodes named in BU_. Kept because a DBC says who TRANSMITS each message, and
  * that is the only thing in the file that separates "a reading to watch" from
  * "a command to send". Names are stored once and referenced by index, so this
@@ -326,15 +346,17 @@
  * -------------------------------------------------------------------------*/
 /* Raw frames buffered between the CAN reader task and the decode/write task.
  *
- * 2048 * 24 B = 48 KB. Sized against the SD card, not against the bus: a single
- * write on a healthy card is under 5 ms, but the outliers are ~320 ms, and the
- * queue exists entirely to absorb those. Two buses at 500 kbit/s and 80 % load
- * deliver ~6250 frames/s, so 2048 entries is ~330 ms - just past the worst
- * stall. At 1024 it would be 164 ms, which is not.
+ * 512 * 24 B = 12 KB. The queue absorbs SD card stalls: a healthy write is
+ * under 5 ms, the outliers reach ~320 ms, and 512 entries cover a stall that
+ * long at up to ~1600 frames/s across both buses.
  *
- * This is the number to raise first if `drop` is ever non-zero while
- * `maxWr` shows a long write. Each entry costs 24 bytes. */
-#define FRAME_QUEUE_LEN     2048
+ * It was 2048 (48 KB), sized for two saturated 500 kbit/s buses. Measured on a
+ * real 350 frames/s bus the peak was 13 entries - and those 36 KB came out of
+ * the same heap the Wi-Fi driver and the web server need, which is the budget
+ * that decides whether the dashboard stays reachable. If you log two busy buses
+ * and `qPeak` climbs towards this, raise it and accept a tighter dashboard.
+ * Each entry costs 24 bytes. */
+#define FRAME_QUEUE_LEN     512
 
 /* Log lines buffered between any task and the single SD-owning writer task. */
 #define LOG_QUEUE_LEN       48
@@ -541,6 +563,63 @@
  * on a busy bus is normal; losing it three times running means the identifier
  * is too low a priority to get on the wire. */
 #define TX_ATTEMPTS         3
+
+/* ---------------------------------------------------------------------------
+ *  14. WEB SERVER AND MEMORY
+ *
+ *  The web server serves one client at a time from the same heap the frame
+ *  maps live in, so how it sends and how much room it is left are one topic.
+ * -------------------------------------------------------------------------*/
+/* The dashboard page goes out in slices this big. A whole part (up to 73 KB)
+ * in one socket write overran lwIP's send buffer in station mode and the page
+ * died half-sent; 2 KB sits well inside it. */
+#define WEB_PAGE_SLICE          2048
+
+/* Serve the page pre-compressed: src/webpage_gz.h, about 52 KB instead of
+ * 170 KB, made by tools/gen_page_gz.py and checked by test/run_tests.sh. The
+ * board does no work for it beyond one header. 0 serves the plain parts. */
+#ifndef WEB_PAGE_GZIP
+#define WEB_PAGE_GZIP           1
+#endif
+
+/* Give up on one response after this long. The server handles one client at a
+ * time, so a stalled send holds up every other request - and a browser gives
+ * up after about eight seconds. A healthy page takes under a second. */
+#define WEB_SEND_MAX_MS         4000UL
+
+/* ...and let a single socket write block for at most this long. Without it one
+ * write retries a full buffer ten times with a one-second wait each, and the
+ * deadline above is never consulted. 0 leaves the core's behaviour alone. */
+#define WEB_SEND_SLICE_TIMEOUT_MS 500
+
+/* Largest-free-block thresholds for the one-shot warnings in mem.cpp. */
+#define MEM_WARN_BLOCK      24576UL
+#define MEM_CRIT_BLOCK       8192UL
+
+/* The buffer an inbound TCP connection needs, measured with the heap's
+ * failed-allocation hook. If the largest free block stays below this the board
+ * drops incoming SYNs: the page does not load slowly, it does not load. */
+#define MEM_CONN_BYTES      2308U
+
+/* Whether the dashboard can be expected to stay reachable, judged by the
+ * largest free block once boot has finished ("ready" in the log). Measured
+ * over fifteen runs on a WROOM board, two frame maps, station mode:
+ *
+ *    at or above SERVES   every run served every request
+ *    between the two      anywhere from 58 % to 99 %, not predictable
+ *    at or below DEAD     no run served even 10 %
+ *
+ * Recording is unaffected in all three - no run lost a frame to this. The
+ * number to watch is in the boot log and on the dashboard's memory badge. */
+#define MEM_WEB_SERVES      36852UL
+#define MEM_WEB_DEAD        28660UL
+
+/* Put free heap and largest block on the once-a-second status line. */
+#define MEM_IN_STATUS_LINE  1
+
+/* The once-a-second CPU profile line ("prof: core1 ..."): 1 = serial and web
+ * log as well, 0 = the recording's .log only. */
+#define PROF_LIVE_LINE      0
 
 #define FIRMWARE_NAME    "Dual CAN Logger ESP32"
 #define FIRMWARE_VERSION "2.0.0"

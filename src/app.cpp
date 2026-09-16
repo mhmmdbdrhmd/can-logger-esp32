@@ -587,6 +587,7 @@ void appSetup() {
      * files rather than deferring to them. */
     {
       const BundleInfo bi = bundleUnpack();
+      if (bi.applied) dbcSetNameMax(bi.nameMax);
       if (bi.found && bi.ok) {
         /* The name width the maps were prepared for is the width they are
          * loaded with. It used to be a build setting, and a bundle made for 32
@@ -596,6 +597,7 @@ void appSetup() {
         LOG_LIVE(LVL_INFO, "setup bundle: unpacked %u file(s), names up to %u "
                            "characters", (unsigned)bi.files,
                  (unsigned)(dbcNameMax() - 1));
+        if (bi.err[0]) LOG_LIVE(LVL_WARN, "setup bundle: %s", bi.err);
         if (bi.nameMax && bi.nameMax != dbcNameMax()) {
           LOG_LIVE(LVL_WARN, "the bundle asks for name_max %u, which this "
                              "firmware does not offer (16 to %u) - using %u",

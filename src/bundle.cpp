@@ -32,13 +32,30 @@ static int readLine(File &f, char *buf, size_t cap) {
 BundleInfo bundleUnpack() {
   BundleInfo bi;
   bi.found = false;
+  bi.applied = false;
   bi.ok = false;
   bi.files = 0;
   bi.nameMax = 0;
   bi.err[0] = '\0';
   s_nameMax = 0;
 
-  if (!SD.exists(BUNDLE_PATH)) return bi;
+  if (!SD.exists(BUNDLE_PATH)) {
+    /* Nothing new. The one applied earlier still decides the name length. */
+    File a = SD.open(BUNDLE_DONE_PATH, FILE_READ);
+    if (!a) return bi;
+    char head[160];
+    if (readLine(a, head, sizeof(head)) >= 0 &&
+        strncmp(head, "#DCLB1", 6) == 0) {
+      const char *p = strstr(head, "name_max=");
+      if (p) {
+        bi.nameMax = (uint16_t)atoi(p + 9);
+        s_nameMax  = bi.nameMax;
+        bi.applied = true;
+      }
+    }
+    a.close();
+    return bi;
+  }
   bi.found = true;
 
   File f = SD.open(BUNDLE_PATH, FILE_READ);
@@ -137,5 +154,15 @@ BundleInfo bundleUnpack() {
 
   f.close();
   bi.ok = (bi.err[0] == '\0') && bi.files > 0;
+
+  /* Set aside only once it has fully gone in. A bundle that failed stays where
+   * it is, so the next boot tries again and says why again. */
+  if (bi.ok) {
+    SD.remove(BUNDLE_DONE_PATH);
+    if (!SD.rename(BUNDLE_PATH, BUNDLE_DONE_PATH)) {
+      snprintf(bi.err, sizeof(bi.err), "unpacked, but could not rename %s - "
+               "it will be unpacked again next boot", BUNDLE_PATH);
+    }
+  }
   return bi;
 }

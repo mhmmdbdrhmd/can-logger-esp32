@@ -95,6 +95,40 @@ int main() {
          SDFiles::get("/dash.cfg"), cfg);
     ck("no .part left behind", !SDFiles::has("/frames.dbc.part") &&
                                !SDFiles::has("/dash.cfg.part"));
+    ck("the bundle is set aside, not left to unpack again",
+       !SDFiles::has("/logger.bundle") && SDFiles::has("/logger.applied"));
+
+    /* The next boot. A layout edited in the browser in between must survive,
+     * and the name length must still be known - it sizes the tables. */
+    SDFiles::put("/dash.cfg", "EDITED IN THE BROWSER");
+    const BundleInfo again = bundleUnpack();
+    ck("next boot: nothing new to unpack", !again.found && again.files == 0);
+    ck("but the applied name_max is still in force",
+       again.applied && again.nameMax == 32 && bundleNameMax() == 32);
+    ckeq("and the edited layout was left alone",
+         SDFiles::get("/dash.cfg"), std::string("EDITED IN THE BROWSER"));
+  }
+
+  printf("\n== a new bundle replaces the applied one ==\n");
+  {
+    SDFiles::put("/logger.bundle",
+                 pack("#DCLB1 name_max=16\n", "frames.dbc", "NEW MAP\n",
+                      nullptr, ""));
+    const BundleInfo bi = bundleUnpack();
+    ck("unpacked", bi.found && bi.ok && bi.files == 1);
+    ckeq("the new map is in place", SDFiles::get("/frames.dbc"),
+         std::string("NEW MAP\n"));
+    ck("its name_max is the one in force now",
+       bi.nameMax == 16 && bundleNameMax() == 16);
+    const BundleInfo later = bundleUnpack();
+    ck("and it is what the next boot reads", later.applied && later.nameMax == 16);
+  }
+
+  printf("\n== no bundle ever ==\n");
+  SDFiles::clear();
+  {
+    const BundleInfo bi = bundleUnpack();
+    ck("no name_max to apply", !bi.applied && bi.nameMax == 0);
   }
 
   printf("\n== a file that is not a bundle ==\n");
@@ -107,6 +141,8 @@ int main() {
     SDFiles::put("/logger.bundle", "just some text\nnot a bundle at all\n");
     const BundleInfo bi = bundleUnpack();
     ck("found but refused", bi.found && !bi.ok);
+    ck("and left in place to be seen again", SDFiles::has("/logger.bundle") &&
+                                             !SDFiles::has("/logger.applied"));
     ck("says why", bi.err[0] != '\0');
     ckeq("the existing frame map is untouched",
          SDFiles::get("/frames.dbc"), std::string("ORIGINAL"));

@@ -211,6 +211,7 @@
  * unpacked at boot over the three loose files - see bundle.h. */
 #define BUNDLE_PATH         "/logger.bundle"
 #define BUNDLE_TMP_PATH     "/logger.tmp"   /* an upload, until it is complete */
+#define BUNDLE_DONE_PATH    "/logger.applied" /* a bundle, once unpacked       */
 
 /* CEILINGS on the frame map, not its size.
  *

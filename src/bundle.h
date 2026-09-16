@@ -26,11 +26,12 @@
  *  most places, since the heap it would take from is the one the dashboard
  *  needs.
  *
- *  THE BUNDLE IS THE SOURCE OF TRUTH. If one is present it is unpacked on every
- *  boot, overwriting the three files. That is deliberate: the alternative is a
- *  card whose .dbc and .cfg have drifted apart from the bundle that produced
- *  them, which is the exact failure this exists to remove. Delete the bundle to
- *  go back to editing the files directly.
+ *  A bundle is unpacked ONCE. /logger.bundle is written over the three files
+ *  and then renamed to /logger.applied, so a layout changed in the browser
+ *  afterwards survives the next restart instead of being put back every boot.
+ *  The applied copy is kept for its first line: the name length the maps were
+ *  prepared for is needed on every boot, since it sizes the tables. Putting a
+ *  new /logger.bundle on the card applies that one, the same way.
  * ==========================================================================*/
 #pragma once
 
@@ -38,7 +39,8 @@
 #include "config.h"
 
 struct BundleInfo {
-  bool     found;        /* a bundle was on the card                        */
+  bool     found;        /* a NEW bundle was on the card                    */
+  bool     applied;      /* no new one, but an earlier one set name_max     */
   bool     ok;           /* it unpacked without error                       */
   uint8_t  files;        /* how many files it wrote                         */
   uint16_t nameMax;      /* the DBC_NAME_MAX the maps were prepared for     */
@@ -48,13 +50,11 @@ struct BundleInfo {
   char     err[96];      /* why it failed, empty when ok                    */
 };
 
-/* Unpack /logger.bundle, if it is there. Call after the card is mounted and
- * BEFORE the frame maps are read, since it is what puts them on the card.
- * Safe to call with no card and no bundle: it reports found=false and does
- * nothing. */
+/* Unpack /logger.bundle, if it is there, and set it aside as applied. With
+ * no new bundle, reads the name length of the one applied last. Call after the
+ * card is mounted and BEFORE the frame maps are read. Safe with no card and no
+ * bundle: found=false, applied=false, nameMax=0, nothing done. */
 BundleInfo bundleUnpack();
 
-/* The name_max the last unpacked bundle declared, or 0 if there was none.
- * Compared against DBC_NAME_MAX so a mismatch is said out loud rather than
- * showing up as silently clipped signal names. */
+/* The name_max the bundle in force declared, or 0 if there is none. */
 uint16_t bundleNameMax();

@@ -10,6 +10,14 @@
  * and counters - a few dozen bytes rather than thirty-two kilobytes. */
 DbcDb g_dbc[CAN_BUSES] = {};
 
+static uint16_t s_nameMax = DBC_NAME_MAX;
+
+void dbcSetNameMax(uint16_t n) {
+  s_nameMax = (n >= 16 && n <= DBC_NAME_MAX) ? n : DBC_NAME_MAX;
+}
+
+uint16_t dbcNameMax() { return s_nameMax; }
+
 /* ==========================================================================
  *  Small text helpers. Everything here works on a mutable line buffer and
  *  allocates nothing - the parser runs on the ESP32 with a 256-byte line.
@@ -192,8 +200,8 @@ uint64_t dbcExtractBits(const uint8_t *data, uint8_t len,
  *  Database management
  * ======================================================================== */
 void dbcFree(DbcDb &db) {
-  free(db.msg); free(db.sig); free(db.val);
-  db.msg = nullptr; db.sig = nullptr; db.val = nullptr;
+  free(db.msg); free(db.sig); free(db.val); free(db.names);
+  db.msg = nullptr; db.sig = nullptr; db.val = nullptr; db.names = nullptr;
   db.msgCap = db.sigCap = db.valCap = 0;
   db.msgCount = db.sigCount = db.valCount = 0;
 }
@@ -201,11 +209,14 @@ void dbcFree(DbcDb &db) {
 size_t dbcBytes(const DbcDb &db) {
   return (size_t)db.msgCap * sizeof(DbcMessage)
        + (size_t)db.sigCap * sizeof(DbcSignal)
-       + (size_t)db.valCap * sizeof(DbcValDesc);
+       + (size_t)db.valCap * sizeof(DbcValDesc)
+       + ((size_t)db.msgCap + db.sigCap) * db.nameMax;
 }
 
 bool dbcAllocate(DbcDb &db, const DbcCounts &want) {
   dbcFree(db);
+  db.nameMax = s_nameMax;
+  const size_t nm = db.nameMax;
 
   uint16_t m = want.messages, g = want.signals, v = want.values;
   if (m > DBC_MAX_MESSAGES) { m = DBC_MAX_MESSAGES; db.overflow = 1; }
@@ -221,14 +232,20 @@ bool dbcAllocate(DbcDb &db, const DbcCounts &want) {
     DbcMessage *pm = m ? (DbcMessage *)psCalloc(m, sizeof(DbcMessage)) : nullptr;
     DbcSignal  *pg = g ? (DbcSignal  *)psCalloc(g, sizeof(DbcSignal))  : nullptr;
     DbcValDesc *pv = v ? (DbcValDesc *)psCalloc(v, sizeof(DbcValDesc)) : nullptr;
+    const size_t names = (size_t)m + g;
+    char       *pn = names ? (char *)psCalloc(names, nm) : nullptr;
 
-    if ((!m || pm) && (!g || pg) && (!v || pv)) {
-      db.msg = pm; db.sig = pg; db.val = pv;
+    if ((!m || pm) && (!g || pg) && (!v || pv) && (!names || pn)) {
+      db.msg = pm; db.sig = pg; db.val = pv; db.names = pn;
       db.msgCap = m; db.sigCap = g; db.valCap = v;
+      /* Every slot points at its name up front, so a name is never a null
+       * pointer - not even in a slot the parser has yet to fill. */
+      for (uint16_t i = 0; i < m; i++) pm[i].name = pn + (size_t)i * nm;
+      for (uint16_t i = 0; i < g; i++) pg[i].name = pn + ((size_t)m + i) * nm;
       return !db.overflow;
     }
 
-    free(pm); free(pg); free(pv);
+    free(pm); free(pg); free(pv); free(pn);
     db.overflow = 1;
     m = (uint16_t)(m / 2); g = (uint16_t)(g / 2); v = (uint16_t)(v / 2);
   }
@@ -327,7 +344,7 @@ static int8_t internNode(DbcDb &db, const char *name) {
     if (strcmp(db.node[i], name) == 0) return (int8_t)i;
   }
   if (db.nodeCount >= DBC_MAX_NODES) return -1;
-  copyBounded(db.node[db.nodeCount], DBC_NAME_MAX, name, strlen(name));
+  copyBounded(db.node[db.nodeCount], db.nameMax, name, strlen(name));
   return (int8_t)db.nodeCount++;
 }
 
@@ -384,7 +401,7 @@ static int16_t findSignal(const DbcDb &db, int16_t msgIdx, const char *name) {
   /* Compared the way the stored name was clipped. A name longer than the slot
    * is stored cut short, and a VAL_ or BA_ line naming it in full would
    * otherwise never match - its value table silently lost. */
-  const size_t cap = sizeof(db.sig[0].name) - 1;
+  const size_t cap = (size_t)db.nameMax - 1;
   for (uint16_t i = 0; i < m.signalCount; i++) {
     const uint16_t s = m.firstSignal + i;
     if (strncmp(db.sig[s].name, name, cap) == 0 &&
@@ -423,8 +440,8 @@ static bool parseBo(DbcDb &db, char *p) {
   m.id          = rawId & 0x1FFFFFFFu;
   m.ext         = (rawId & 0x80000000u) ? 1 : 0;
   m.dlc         = (dlc > 8) ? 8 : dlc;
-  if (strlen(name) > sizeof(m.name) - 1) db.nameClipped++;
-  copyBounded(m.name, sizeof(m.name), name, strlen(name));
+  if (strlen(name) > (size_t)db.nameMax - 1) db.nameClipped++;
+  copyBounded(m.name, db.nameMax, name, strlen(name));
   m.firstSignal = db.sigCount;
   m.signalCount = 0;
   m.muxSignal   = -1;
@@ -537,9 +554,11 @@ static bool parseSg(DbcDb &db, char *p) {
   if (db.sigCount >= db.sigCap) { db.overflow = 1; db.lastSkip = 1; return false; }
 
   DbcSignal &s = db.sig[db.sigCount];
+  const char *slot = s.name;           /* set by dbcAllocate - keep it */
   memset(&s, 0, sizeof(s));
-  if (strlen(name) > sizeof(s.name) - 1) db.nameClipped++;
-  copyBounded(s.name, sizeof(s.name), name, strlen(name));
+  s.name = (char *)slot;
+  if (strlen(name) > (size_t)db.nameMax - 1) db.nameClipped++;
+  copyBounded(s.name, db.nameMax, name, strlen(name));
   copyBounded(s.unit, sizeof(s.unit), unit, strlen(unit));
   s.startBit = (uint8_t)start;
   s.bits     = (uint8_t)bits;
@@ -989,12 +1008,12 @@ bool dbcSignalRef(const DbcDb &db, uint16_t si, char *out, size_t cap) {
  *  only "wants N KB but only 0 KB is free", which reads like a big file rather
  *  than a broken constant. See test_dbc.cpp.
  * -------------------------------------------------------------------------*/
-size_t dbcBytesPerMessage() { return sizeof(DbcMessage); }
+size_t dbcBytesPerMessage() { return sizeof(DbcMessage) + s_nameMax; }
 
 size_t dbcBytesPerSignal() {
   /* The live-value slots are allocated alongside the tables by liveAllocate(),
    * so leaving them out understates a signal by a fifth. */
-  return sizeof(DbcSignal) + LIVE_TEXT_MAX + sizeof(uint32_t) + 1;
+  return sizeof(DbcSignal) + s_nameMax + LIVE_TEXT_MAX + sizeof(uint32_t) + 1;
 }
 
 size_t dbcBytesPerValue() { return sizeof(DbcValDesc); }

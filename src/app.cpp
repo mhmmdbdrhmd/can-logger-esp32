@@ -588,40 +588,19 @@ void appSetup() {
     {
       const BundleInfo bi = bundleUnpack();
       if (bi.found && bi.ok) {
-        LOG_LIVE(LVL_INFO, "setup bundle: unpacked %u file(s), prepared for "
-                           "name_max %u", (unsigned)bi.files,
-                 (unsigned)bi.nameMax);
-        /* EITHER DIRECTION OF MISMATCH MATTERS, and they go wrong differently.
-         * The first version of this warned only when the bundle wanted a
-         * LARGER name_max than the build, and missed the case that actually
-         * turned up on the bench:
-         *
-         *   a bundle prepared for name_max 32, flashed on a name_max 64 build
-         *   -> the maps were sized against 130 bytes a signal and now cost 161
-         *   -> CAN2 did not fit and was truncated to 4 messages of 10
-         *   -> block 26612, below every threshold, dashboard dead
-         *
-         * and nothing said a word, because 32 is not greater than 64. */
-        if (bi.nameMax && bi.nameMax > (uint16_t)DBC_NAME_MAX) {
-          LOG_LIVE(LVL_WARN, "this bundle was built for name_max %u but the "
-                             "firmware is name_max %u - longer names will be "
-                             "CLIPPED, and any two sharing their first %u "
-                             "characters merge into one CSV column. Rebuild "
-                             "the bundle for %u, or flash a firmware built "
-                             "for %u.",
+        /* The name width the maps were prepared for is the width they are
+         * loaded with. It used to be a build setting, and a bundle made for 32
+         * on a 64 build cost 31 bytes a signal nobody had planned for: CAN2
+         * was cut to 4 messages of 10 and the dashboard died, silently. */
+        dbcSetNameMax(bi.nameMax);
+        LOG_LIVE(LVL_INFO, "setup bundle: unpacked %u file(s), names up to %u "
+                           "characters", (unsigned)bi.files,
+                 (unsigned)(dbcNameMax() - 1));
+        if (bi.nameMax && bi.nameMax != dbcNameMax()) {
+          LOG_LIVE(LVL_WARN, "the bundle asks for name_max %u, which this "
+                             "firmware does not offer (16 to %u) - using %u",
                    (unsigned)bi.nameMax, (unsigned)DBC_NAME_MAX,
-                   (unsigned)(DBC_NAME_MAX - 1), (unsigned)DBC_NAME_MAX,
-                   (unsigned)bi.nameMax);
-        } else if (bi.nameMax && bi.nameMax < (uint16_t)DBC_NAME_MAX) {
-          LOG_LIVE(LVL_WARN, "this bundle was built for name_max %u but the "
-                             "firmware is name_max %u - every signal costs "
-                             "more here than the maps were sized for, so the "
-                             "frame maps may be cut short and the dashboard "
-                             "gets less heap than was predicted for them. "
-                             "Flash a firmware built for name_max %u, or "
-                             "rebuild the bundle for %u.",
-                   (unsigned)bi.nameMax, (unsigned)DBC_NAME_MAX,
-                   (unsigned)bi.nameMax, (unsigned)DBC_NAME_MAX);
+                   (unsigned)dbcNameMax());
         }
       } else if (bi.found) {
         LOG_LIVE(LVL_ERROR, "setup bundle found but NOT unpacked: %s. The "

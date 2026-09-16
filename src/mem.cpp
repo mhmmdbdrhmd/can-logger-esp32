@@ -1,6 +1,6 @@
 #include "mem.h"
 #include "logger.h"
-#include "dbc.h"      /* DBC_NAME_MAX - picks the survival line below */
+#include "dbc.h"      /* name_max - named in the survival line below */
 #include <esp_heap_caps.h>
 
 /* WHY NOT ESP.getFreeHeap() / ESP.getMaxAllocHeap().
@@ -225,7 +225,7 @@ void memWebVerdict() {
            "measured run served under 10%% of its requests. The page and the "
            "JSON endpoints will stop answering within the first minute. The "
            "recording is unaffected and will not lose a frame - shrink the "
-           "frame maps, or drop DBC_NAME_MAX to 32, if you want the dashboard "
+           "frame maps, or export the setup with name_max 32, if you want the dashboard "
            "during this run.",
            (unsigned long)block, (unsigned long)MEM_WEB_DEAD);
 }

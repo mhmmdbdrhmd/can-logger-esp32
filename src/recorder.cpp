@@ -486,8 +486,9 @@ static void loadOneDbc(uint8_t bus, const char *path) {
     /* Said out loud, because the cost is invisible until somebody matches CSV
      * rows against the source DBC by name and quietly gets none. */
     LOG_LIVE(LVL_WARN, "%u name(s) are longer than %u characters and are cut "
-                       "short in the CSV - raise DBC_NAME_MAX in dbc.h",
-             (unsigned)db.nameClipped, (unsigned)(DBC_NAME_MAX - 1));
+                       "short in the CSV - export the setup bundle with a "
+                       "larger name_max, which abbreviates them instead",
+             (unsigned)db.nameClipped, (unsigned)(db.nameMax - 1));
   }
 }
 

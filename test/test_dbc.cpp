@@ -313,6 +313,45 @@ int main() {
     dbcFree(v);
   }
 
+  printf("\n== the name width is chosen at run time ==\n");
+  {
+    /* The setup bundle names the width; the tables must honour it, cost less
+     * for it, and a map loaded before the change must keep its own. */
+    const std::string text =
+        "BO_ 100 EngineTemperatureMessage: 8 N\n"
+        " SG_ EngineCoolantTemperature : 0|8@1+ (1,0) [0|255] \"C\" X\n"
+        "VAL_ 100 EngineCoolantTemperature 0 \"cold\" ;\n";
+    DbcDb wide = {};
+    dbcLoadText(wide, text.c_str(), text.size());
+
+    dbcSetNameMax(16);
+    DbcDb narrow = {};
+    dbcLoadText(narrow, text.c_str(), text.size());
+    dbcSetNameMax(DBC_NAME_MAX);
+
+    ck("16 keeps 15 characters",
+       narrow.sigCount == 1 && strcmp(narrow.sig[0].name, "EngineCoolantTe") == 0 &&
+       strcmp(narrow.msg[0].name, "EngineTemperatu") == 0,
+       narrow.sigCount ? narrow.sig[0].name : "-");
+    ck("and says so for both names", narrow.nameClipped == 2,
+       std::to_string(narrow.nameClipped));
+    ck("a full-length VAL_ still binds to the clipped name",
+       narrow.sigCount == 1 && narrow.sig[0].valCount == 1);
+    ck("the wider map was untouched by the change",
+       wide.nameMax == DBC_NAME_MAX &&
+       strcmp(wide.sig[0].name, "EngineCoolantTemperature") == 0);
+    ck("and the narrow one costs 48 bytes less per name",
+       dbcBytes(wide) - dbcBytes(narrow) ==
+       ((size_t)wide.msgCap + wide.sigCap) * (DBC_NAME_MAX - 16),
+       std::to_string(dbcBytes(wide)) + " vs " + std::to_string(dbcBytes(narrow)));
+
+    dbcSetNameMax(7);
+    ck("a width below 16 falls back to the ceiling", dbcNameMax() == DBC_NAME_MAX);
+    dbcSetNameMax(DBC_NAME_MAX);
+    dbcFree(wide);
+    dbcFree(narrow);
+  }
+
   printf("\n== the table cannot be overrun ==\n");
   {
     /* The tables are sized to the file now, so a file with more messages than

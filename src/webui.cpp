@@ -718,15 +718,15 @@ static const char *const kDbcTmpPath[CAN_BUSES] = { DBC_TMP_PATH, DBC2_TMP_PATH 
  *
  * Streamed from the card in the same slices the dashboard page uses, and for
  * the same reason: the maps can be 60 KB and this board does not have 60 KB to
- * assemble them in. The declared name_max is this firmware's own - these files
- * are what it is actually running. */
+ * assemble them in. The declared name_max is the one the maps were loaded
+ * with - these files are what it is actually running. */
 static void handleBundle() {
   static const char *const kNames[] = { "frames.dbc", "frames2.dbc",
                                         "dash.cfg" };
   const char *paths[3] = { DBC_PATH, DBC2_PATH, DASH_PATH };
 
   char head[64];
-  snprintf(head, sizeof(head), "#DCLB1 name_max=%u\n", (unsigned)DBC_NAME_MAX);
+  snprintf(head, sizeof(head), "#DCLB1 name_max=%u\n", (unsigned)dbcNameMax());
 
   /* Content-Length is worked out first so this is a plain response rather than
    * a chunked one - see the note on handleRoot for what chunked encoding cost
@@ -897,10 +897,10 @@ static void handleDbcDone() {
  *  /api/websurvival - will this page keep answering while the logger records?
  *
  *  The design tools serve this too, and NOT with the same thing. They predict,
- *  from the .dbc files, for all three DBC_NAME_MAX settings, and can therefore
+ *  from the .dbc files, for all three name_max settings, and can therefore
  *  offer to change one. This board can only report what it actually came up
- *  with: the map is loaded, the tables are allocated, and it cannot rebuild
- *  itself to try a different name length.
+ *  with: the map is loaded and the tables are allocated, and trying another
+ *  name length means a new bundle and a restart.
  *
  *  So can_choose and can_trim are 0 here, and the page renders a verdict with
  *  no controls under it. That asymmetry is the point rather than a limitation:
@@ -943,9 +943,9 @@ static void handleWebSurvival() {
            "\"can_choose\":0,\"can_trim\":0,\"remedies\":[],"
            "\"options\":[{\"name_max\":%u,\"block\":%lu,"
            "\"guaranteed\":%d,\"chosen\":1}],\"why\":\"%s\"}",
-           ok ? 1 : 0, (unsigned long)block, (unsigned)DBC_NAME_MAX,
+           ok ? 1 : 0, (unsigned long)block, (unsigned)dbcNameMax(),
            (unsigned long)MEM_WEB_SERVES, (unsigned long)MEM_WEB_DEAD,
-           (unsigned)DBC_NAME_MAX, (unsigned long)block, ok ? 1 : 0, why);
+           (unsigned)dbcNameMax(), (unsigned long)block, ok ? 1 : 0, why);
 
   s_srv->sendHeader("Cache-Control", "no-store");
   s_srv->send(200, "application/json", j);

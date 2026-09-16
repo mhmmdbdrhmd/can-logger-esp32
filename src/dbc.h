@@ -88,20 +88,28 @@
  *     vendor, trimmed               52              20       5       0
  *     vendor, full                  57             310      18       0
  *
- * The cost is exact: DbcSignal 112 -> 144 and DbcMessage 48 -> 80, so 32 bytes
- * per signal and per message, plus 1 KB for each bus's node table. On a pair
- * of maps with about fifty signals that is about 5 KB.
+ * But every character is paid for once per message and once per signal, and
+ * the web server stops accepting connections when the largest free block runs
+ * out (see MEM_WEB_SERVES in config.h). A large map at 64 can cost the
+ * dashboard; the same map at 32 or 16 may not.
  *
- * FIVE KILOBYTES IS NOT FREE HERE. The web server stops accepting connections
- * when the largest free block runs out (see MEM_WEB_SERVES in config.h). Read
- * the `ready` heap line after changing this, and if the margin has gone, trade
- * a few characters back rather than losing the dashboard.
+ * So this is the CEILING, and the width actually used is chosen at run time:
+ * the setup bundle names it (`#DCLB1 name_max=32`, see bundle.h), and the
+ * desk tool that wrote the bundle shortened the names to fit - abbreviating,
+ * not cutting - and rewrote the layout to match. The names live in one pool of
+ * dbcNameMax() bytes per entry, allocated with the tables, so a smaller width
+ * returns its memory to the heap without a rebuild.
  *
- * Guarded so a build can trade it back for map size without editing this
- * header, and so the host tests can measure the cost at several values. */
+ * Guarded so the host tests can measure the cost at several values. */
 #ifndef DBC_NAME_MAX
 #define DBC_NAME_MAX    64
 #endif
+
+/* The name width tables are allocated with from now on, nul included. Clamped
+ * to 16..DBC_NAME_MAX; anything else in a bundle means DBC_NAME_MAX. A map that
+ * is already loaded keeps the width it was loaded with (DbcDb::nameMax). */
+void     dbcSetNameMax(uint16_t n);
+uint16_t dbcNameMax();
 #define DBC_UNIT_MAX    10
 #define DBC_LABEL_MAX   16
 #define DBC_VERSION_MAX 96
@@ -110,7 +118,7 @@
 /* Value scaling that cannot be done in integers is rare; when it happens the
  * signal carries a double factor instead and `exact` is 0. */
 struct DbcSignal {
-  char     name[DBC_NAME_MAX];
+  char    *name;         /* into DbcDb::names, DbcDb::nameMax bytes          */
   char     unit[DBC_UNIT_MAX];
 
   uint8_t  startBit;
@@ -150,7 +158,7 @@ struct DbcMessage {
   uint32_t id;
   uint8_t  ext;          /* 1 = 29-bit identifier                            */
   uint8_t  dlc;
-  char     name[DBC_NAME_MAX];
+  char    *name;         /* into DbcDb::names, DbcDb::nameMax bytes          */
   uint16_t firstSignal;
   uint16_t signalCount;
   int16_t  muxSignal;    /* index of the multiplexor signal, -1 = none       */
@@ -231,6 +239,11 @@ struct DbcDb {
   DbcMessage *msg = nullptr;
   DbcSignal  *sig = nullptr;
   DbcValDesc *val = nullptr;
+  /* Every name, nameMax bytes each: messages first, then signals, in table
+   * order. One block rather than a string per entry, so it fragments nothing
+   * and is released with the tables. */
+  char       *names = nullptr;
+  uint16_t   nameMax     = DBC_NAME_MAX;
 
   uint16_t   msgCap      = 0;
   uint16_t   sigCap      = 0;
@@ -249,7 +262,7 @@ struct DbcDb {
    * merely did not fit reported ten thousand "unparsable" lines and sent
    * people hunting for corruption that was not there. */
   uint16_t   skipped     = 0;
-  uint16_t   nameClipped = 0; /* names too long for DBC_NAME_MAX - see above   */
+  uint16_t   nameClipped = 0; /* names longer than nameMax - 1, cut short      */
   /* Parser state, not a result: the last BO_ was NOT stored, so the SG_ lines
    * under it belong to nothing. Without it they were appended to the previous,
    * stored message - which then decoded its frames with another message's

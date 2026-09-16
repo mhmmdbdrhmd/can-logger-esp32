@@ -889,7 +889,7 @@ static const char PAGE_2[] PROGMEM = R"HTML(
   </div>
 </div>
 
-<input type="file" id="filepick" accept=".cfg,.txt,text/plain" hidden>
+<input type="file" id="filepick" accept=".bundle,.cfg,.txt,text/plain" hidden>
 <input type="file" id="dbcpick" accept=".dbc,text/plain" hidden>
 )HTML";
 
@@ -4271,6 +4271,30 @@ q('cfgsheet').onclick = function(e){
 q('filepick').onchange = function(){
   var f = q('filepick').files[0];
   if(!f) return;
+  if(/\.bundle$/i.test(f.name)){
+    /* A whole setup. The logger stores it and restarts, because the bundle is
+       unpacked at boot and its name length sizes the frame map tables - so
+       there is nothing to redraw here, only a page to reload once it is back. */
+    var fd = new FormData();
+    fd.append('file', f, f.name);
+    fetch('/api/bundle', {method:'POST', body:fd})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        q('filepick').value = '';
+        if(!d || !d.ok){
+          toast('Not imported', (d && d.err) || 'the logger refused it', 'bad');
+          return;
+        }
+        q('cfgsheet').classList.remove('on');
+        toast('Setup bundle imported', 'the logger is restarting to unpack '
+              + 'it - this page reloads in 20 s', 'ok');
+        setTimeout(function(){ location.reload(); }, 20000);
+      })
+      .catch(function(){
+        toast('Not imported', 'the logger did not answer', 'bad');
+      });
+    return;
+  }
   f.text().then(function(t){
     return fetch('/api/dash/cfg', {method:'POST', body:t});
   }).then(function(){

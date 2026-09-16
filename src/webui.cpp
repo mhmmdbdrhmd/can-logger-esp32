@@ -400,6 +400,7 @@ static void handleStart() {
 static volatile bool s_wantReboot = false;
 
 bool webRebootRequested() { return s_wantReboot; }
+static void webRequestReboot() { s_wantReboot = true; }
 
 static void handleReboot() {
   /* Answer first, restart later. Rebooting inside the handler would drop the
@@ -705,8 +706,15 @@ static bool s_dbcUpOk   = false;
 static uint32_t s_dbcUpBytes = 0;
 static uint8_t  s_dbcUpBus   = 0;    /* captured at UPLOAD_FILE_START */
 
-static const char *const kDbcPath[CAN_BUSES]    = { DBC_PATH,     DBC2_PATH };
-static const char *const kDbcTmpPath[CAN_BUSES] = { DBC_TMP_PATH, DBC2_TMP_PATH };
+/* One upload path serves both kinds of file: a frame map for a bus, and - at
+ * index CAN_BUSES - a whole setup bundle. Same streaming, same temporary name
+ * until the last byte is in. */
+static const uint8_t kUpBundle = CAN_BUSES;
+static const char *const kDbcPath[CAN_BUSES + 1]    = { DBC_PATH, DBC2_PATH,
+                                                        BUNDLE_PATH };
+static const char *const kDbcTmpPath[CAN_BUSES + 1] = { DBC_TMP_PATH,
+                                                        DBC2_TMP_PATH,
+                                                        BUNDLE_TMP_PATH };
 
 /* GET /api/bundle - the whole setup as one file.
  *
@@ -789,7 +797,7 @@ static void handleDbcUpload() {
     /* Read once, here, and remembered for the rest of the upload: the argument
      * belongs to the request, and the WRITE and END callbacks must not depend
      * on it still being parseable. */
-    s_dbcUpBus   = argBus();
+    s_dbcUpBus   = (s_srv->uri() == "/api/bundle") ? kUpBundle : argBus();
     if (g_rec.recording || !g_rec.sdOk) return;
     SD.remove(kDbcTmpPath[s_dbcUpBus]);
     s_dbcUp = SD.open(kDbcTmpPath[s_dbcUpBus], FILE_WRITE);
@@ -817,6 +825,48 @@ static void handleDbcUpload() {
   if (s_dbcUp) s_dbcUp.close();
   s_dbcUpOk = false;
   SD.remove(kDbcTmpPath[s_dbcUpBus]);
+}
+
+/* POST /api/bundle - a setup bundle from Import. Stored, then the logger
+ * restarts: the bundle is unpacked at boot, before anything reads the maps,
+ * and its name_max sizes the tables - neither can be changed under a map that
+ * is already loaded. */
+static void handleBundleDone() {
+  const char *err = nullptr;
+  if (g_rec.recording)      err = "stop the recording first";
+  else if (!g_rec.sdOk)     err = "no SD card";
+  else if (!s_dbcUpOk)      err = "the upload did not finish";
+  else if (s_dbcUpBytes < 8) err = "the file was empty";
+
+  if (!err) {
+    File f = SD.open(BUNDLE_TMP_PATH, FILE_READ);
+    char magic[7] = {0};
+    if (!f || f.read((uint8_t *)magic, 6) != 6 || strcmp(magic, "#DCLB1") != 0) {
+      err = "not a setup bundle - it should start with #DCLB1";
+    }
+    if (f) f.close();
+  }
+
+  String j;
+  if (err) {
+    SD.remove(BUNDLE_TMP_PATH);
+    j  = "{\"ok\":0,\"err\":\""; jsonStr(j, err); j += "\"}";
+    s_srv->send(409, "application/json", j);
+    return;
+  }
+
+  SD.remove(BUNDLE_PATH);
+  if (!SD.rename(BUNDLE_TMP_PATH, BUNDLE_PATH)) {
+    SD.remove(BUNDLE_TMP_PATH);
+    s_srv->send(500, "application/json",
+                "{\"ok\":0,\"err\":\"could not put the file in place\"}");
+    return;
+  }
+
+  LOG_LIVE(LVL_WARN, "setup bundle uploaded: %lu bytes - restarting to "
+                     "unpack it", (unsigned long)s_dbcUpBytes);
+  s_srv->send(200, "application/json", "{\"ok\":1,\"reboot\":1}");
+  webRequestReboot();
 }
 
 static void handleDbcDone() {
@@ -1187,6 +1237,7 @@ void webBegin() {
   s_srv->on("/api/websurvival", HTTP_GET, handleWebSurvival);
   s_srv->on("/api/dbc",       HTTP_POST, handleDbcDone, handleDbcUpload);
   s_srv->on("/api/bundle",    HTTP_GET,  handleBundle);
+  s_srv->on("/api/bundle",    HTTP_POST, handleBundleDone, handleDbcUpload);
 
   s_srv->on("/api/tx/arm",    HTTP_POST, handleTxArm);
   s_srv->on("/api/tx/send",   HTTP_POST, handleTxSend);

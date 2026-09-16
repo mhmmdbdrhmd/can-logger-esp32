@@ -210,6 +210,7 @@
  * the name length the maps were prepared for. If it is on the card it is
  * unpacked at boot over the three loose files - see bundle.h. */
 #define BUNDLE_PATH         "/logger.bundle"
+#define BUNDLE_TMP_PATH     "/logger.tmp"   /* an upload, until it is complete */
 
 /* CEILINGS on the frame map, not its size.
  *

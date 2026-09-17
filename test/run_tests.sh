@@ -160,7 +160,7 @@ for fn in ("handleDash", "handleStatus"):
         print("  FAIL %s not found" % fn); bad = 1; continue
     end  = api.find("\nstatic ", start + 10)
     body = api[start:end if end > 0 else len(api)]
-    keys = re.findall(r'\\"([a-zA-Z]+)\\":', body)
+    keys = re.findall(r'\\"([a-zA-Z_]+)\\":', body)     # underscores too, as above
     dupes = sorted({k for k in keys if keys.count(k) > 1})
     print("  %s %s emits no field twice%s" % ("ok  " if not dupes else "FAIL",
           fn, "" if not dupes else " - %s" % dupes))

@@ -380,6 +380,10 @@
 
 /* Lines of "live" log kept in RAM for the web terminal. */
 #define WEB_LOG_LINES       80
+/* Lines per /api/log reply, and the buffer that holds one: 16 lines of at most
+ * LOG_LINE_CHARS + 16, with room for escaping. */
+#define WEB_LOG_PER_REPLY   16
+#define WEB_LOG_REPLY_RESERVE 4096
 
 #define TASK_PRIO_CAN       20      /* CAN reader   - must never be starved  */
 #define TASK_PRIO_WRITER    10      /* decode + SD                            */

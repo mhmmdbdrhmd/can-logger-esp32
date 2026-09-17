@@ -786,6 +786,9 @@ static void startRecording() {
   g_rec.queueDropped = 0;
   g_rec.queuePeak    = 0;
   g_rec.drainMaxUs   = 0;
+  g_rec.drainGapMaxUs = 0;     /* per recording, like the other peaks */
+  g_rec.txMaxUs       = 0;
+  g_rec.gapOverruns   = 0;
   s_lostSeen = 0;
   s_lostSaid = 0;
   for (uint8_t b = 0; b < CAN_BUSES; b++) {
@@ -833,6 +836,16 @@ static void stopRecording() {
                         "to the card", g_rec.csvName,
              (unsigned long)((g_rec.sdBytesLost + 1023UL) / 1024UL));
   }
+  /* In bytes, against what an inbound connection needs: "1 KB" printed for
+   * both 1024 and 2307 hid exactly the difference between a dashboard that
+   * answers and one that refuses to connect. */
+  const MemStat ms = memStat();
+  LOG_FILE(LVL_INFO, "summary rx: gapMax=%lu us txMax=%lu us | heap since boot: "
+                     "lowBlock=%lu B (%s %u B a connection needs) allocFail=%lu",
+           (unsigned long)g_rec.drainGapMaxUs, (unsigned long)g_rec.txMaxUs,
+           (unsigned long)ms.lowBlock,
+           ms.lowBlock >= MEM_CONN_BYTES ? "above the" : "BELOW the",
+           (unsigned)MEM_CONN_BYTES, (unsigned long)memAllocFailures());
   for (uint8_t b = 0; b < CAN_BUSES; b++) {
     const BusHealth &h = g_rec.bus[b];
     LOG_FILE(LVL_INFO, "summary CAN%u: frames=%lu ovfEvents=%lu ovfFrames>=%lu "
@@ -1222,20 +1235,32 @@ static void statusTick() {
    * scattered samples of the number that does, which made the web UI's decay
    * impossible to characterise after the fact. Two more heap_caps calls a
    * second closes that. */
+  /* Three lines, not one. As one line it ran past LOG_LINE_CHARS and was cut
+   * at "minHeap=4288 b", so block, lowBlock and allocFail - the figures this
+   * line was extended for - never reached a single recording.
+   *
+   * gap and tx are the receive path's blind spots: the longest time between
+   * two drains, and the longest pass spent in txService(). A long gap on its
+   * own is not loss - the task sleeps through the quiet part of every cycle -
+   * but a long tx is time the controllers were emptied only by the busy hook. */
+  const MemStat ms = memStat();
   LOG_FILE(LVL_DEBUG,
-    "health: queue=%lu peak=%lu drop=%lu drain=%lu us wake=%lu/s "
-    "writes=%lu maxWr=%lu us "
-    "syncs=%lu maxSync=%lu us atRisk<=%lu ms logDrop=%lu heap=%lu minHeap=%lu "
-    "block=%lu lowBlock=%lu allocFail=%lu lastFail=%lu maxFail=%lu",
+    "health: queue=%lu peak=%lu drop=%lu drain=%lu us gap=%lu us tx=%lu us "
+    "wake=%lu/s logDrop=%lu",
     (unsigned long)qNow, (unsigned long)g_rec.queuePeak,
     (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.drainMaxUs,
-    (unsigned long)g_rec.wakeRate,
+    (unsigned long)g_rec.drainGapMaxUs, (unsigned long)g_rec.txMaxUs,
+    (unsigned long)g_rec.wakeRate, (unsigned long)logDroppedCount());
+  LOG_FILE(LVL_DEBUG,
+    "health sd: writes=%lu maxWr=%lu us syncs=%lu maxSync=%lu us atRisk<=%lu ms",
     (unsigned long)g_rec.writeCount, (unsigned long)g_rec.writeMaxUs,
     (unsigned long)g_rec.syncCount, (unsigned long)g_rec.syncMaxUs,
-    (unsigned long)(millis() - s_lastSyncMs),
-    (unsigned long)logDroppedCount(),
-    (unsigned long)memStat().freeNow, (unsigned long)memStat().minFree,
-    (unsigned long)memStat().largest, (unsigned long)memStat().lowBlock,
+    (unsigned long)(millis() - s_lastSyncMs));
+  LOG_FILE(LVL_DEBUG,
+    "health heap: free=%lu minFree=%lu block=%lu lowBlock=%lu allocFail=%lu "
+    "lastFail=%lu maxFail=%lu",
+    (unsigned long)ms.freeNow, (unsigned long)ms.minFree,
+    (unsigned long)ms.largest, (unsigned long)ms.lowBlock,
     (unsigned long)memAllocFailures(), (unsigned long)memAllocFailLast(),
     (unsigned long)memAllocFailMax());
   /* Its own line, short enough to survive LOG_LINE_CHARS, and LIVE so it

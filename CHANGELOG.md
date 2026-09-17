@@ -21,6 +21,22 @@
 - **`lost` comes first on the status line.** The line is cut at
   `LOG_LINE_CHARS`, and with `lost` at the end, `lost 69` was printed as
   `lost 6`. It now follows the time: `REC 1.csv 00:02:21 | lost 0 | ...`.
+- **The heap figures in the `health:` line reach the card.** The line had
+  outgrown `LOG_LINE_CHARS` and was cut at `minHeap=`, so `block`, `lowBlock`
+  and `allocFail` never appeared in a recording. It is now three lines
+  (`health:`, `health sd:`, `health heap:`). The first also carries `gap` and
+  `tx`, the longest time between two drains and the longest pass spent sending,
+  which were measured but never printed.
+- **The closing summary reports the smallest free block in bytes,** against the
+  2308 bytes an inbound connection needs, with the count of refused
+  allocations. "1 KB" hid the difference between a dashboard that answers and
+  one that refuses to connect.
+- **`/api/log` sends at most 16 lines a reply,** from one buffer taken once.
+  With the Log tab open it could build the whole 80-line ring, about 14 KB,
+  and copy it into a second String of the same size. The page polls every
+  700 ms, so it still gets more than 20 lines a second.
+- The host test that checks a handler emits no field twice now sees field
+  names with an underscore.
 
 ## v2.0.1 — nothing the layout uses is trimmed, and a failed SD write is recovered
 

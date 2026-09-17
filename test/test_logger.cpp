@@ -65,6 +65,29 @@ int main() {
                                j4.find("flood 100") == std::string::npos);
   ck("seq keeps counting", s4 == 306, "seq=" + std::to_string(s4));
 
+  /* A capped reply, as /api/log sends it: a few lines at a time, and polling
+   * with the returned sequence walks the rest without skipping or repeating. */
+  {
+    uint32_t at = 0, polls = 0, total = 0;
+    std::string all;
+    for (;;) {
+      String jc;
+      const uint32_t next = webLogToJson(at, jc, 16);
+      const int n = countJson(jc);
+      if (n > 16) { total = 9999; break; }
+      if (n == 0) break;
+      total += n; all += jc; at = next; polls++;
+    }
+    ck("a capped reply never exceeds its cap, and the polls add up to the ring",
+       total == (uint32_t)WEB_LOG_LINES && polls == (WEB_LOG_LINES + 15) / 16,
+       "lines=" + std::to_string(total) + " polls=" + std::to_string(polls));
+    ck("in order, oldest to newest",
+       all.find("flood 220") != std::string::npos &&
+       all.find("flood 220") < all.find("flood 299"));
+    ck("and the last poll ends at the newest sequence", at == s4,
+       "at=" + std::to_string(at));
+  }
+
   /* a client reporting a sequence from before a reboot must not hang */
   String j5; uint32_t s5 = webLogToJson(999999, j5);
   ck("future seq is safe", countJson(j5) == 0 && s5 == s4);

@@ -380,14 +380,20 @@ static void handleStatus() {
 static void handleLog() {
   const uint32_t since = s_srv->hasArg("since")
                        ? (uint32_t)strtoul(s_srv->arg("since").c_str(), nullptr, 10) : 0;
-  String lines;
-  lines.reserve(2048);
-  const uint32_t seq = webLogToJson(since, lines);
-
-  String j;
-  j.reserve(lines.length() + 40);
-  j  = "{\"seq\":"; j += seq;
-  j += ",\"lines\":["; j += lines; j += "]}";
+  /* The same fault as /api/status had (#2 in the bench notes): the whole ring
+   * could come back at once, up to 80 lines, about 14 KB built by appending
+   * and then copied into a second String of the same size - two large blocks
+   * on a heap where 2.3 KB decides whether the dashboard can still take a
+   * connection. Now a few lines a reply, into one buffer taken once. At a
+   * 700 ms poll that is still over 20 lines a second. */
+  static String j;
+  if (!j.reserve(WEB_LOG_REPLY_RESERVE)) {
+    s_srv->send(503, "application/json", "{\"error\":\"no memory\"}");
+    return;
+  }
+  j  = "{\"lines\":[";
+  const uint32_t seq = webLogToJson(since, j, WEB_LOG_PER_REPLY);
+  j += "],\"seq\":"; j += seq; j += "}";
 
   s_srv->sendHeader("Cache-Control", "no-store");
   sendJson(j);

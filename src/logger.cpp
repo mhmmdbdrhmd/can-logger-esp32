@@ -93,7 +93,7 @@ static void appendEscaped(String &out, const char *s) {
   out += '"';
 }
 
-uint32_t webLogToJson(uint32_t since, String &out) {
+uint32_t webLogToJson(uint32_t since, String &out, uint32_t maxLines) {
   if (!s_ringLock) return 0;
   if (xSemaphoreTake(s_ringLock, pdMS_TO_TICKS(50)) != pdTRUE) return since;
 
@@ -105,13 +105,17 @@ uint32_t webLogToJson(uint32_t since, String &out) {
   if (seq > WEB_LOG_LINES && from < seq - WEB_LOG_LINES) from = seq - WEB_LOG_LINES;
   if (from > seq) from = seq;                 /* client saw a reboot */
 
+  /* At most maxLines, and the sequence returned is the last one sent, so the
+   * next poll picks up where this one stopped. */
+  const uint32_t to = (seq - from > maxLines) ? from + maxLines : seq;
+
   bool first = true;
-  for (uint32_t i = from; i < seq; i++) {
+  for (uint32_t i = from; i < to; i++) {
     if (!first) out += ',';
     appendEscaped(out, s_ring[i % WEB_LOG_LINES]);
     first = false;
   }
 
   xSemaphoreGive(s_ringLock);
-  return seq;
+  return to;
 }

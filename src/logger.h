@@ -54,6 +54,8 @@ uint32_t logDroppedCount();
  * last sequence it has and receives only what is new. */
 uint32_t webLogSeq();
 
-/* Appends the lines newer than `since` to `out` as JSON string elements
- * (comma separated, no enclosing brackets). Returns the new sequence. */
-uint32_t webLogToJson(uint32_t since, String &out);
+/* Appends up to `maxLines` of the lines newer than `since` to `out` as JSON
+ * string elements (comma separated, no enclosing brackets). Returns the
+ * sequence of the last line appended, which is what the next poll sends. */
+uint32_t webLogToJson(uint32_t since, String &out,
+                      uint32_t maxLines = WEB_LOG_LINES);

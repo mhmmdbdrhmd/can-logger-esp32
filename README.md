@@ -1531,8 +1531,13 @@ worst microseconds any single pass spent emptying **both** controllers, and it i
 on the dashboard, in `/api/status` and in the `health:` line:
 
 ```
-health: queue=61 peak=124 drop=0 drain=112 us wake=51/s writes=38 maxWr=41200 us ...
+health: queue=61 peak=124 drop=0 drain=112 us gap=19800 us tx=0 us wake=51/s logDrop=0
 ```
+
+`gap` is the longest time between two drains and `tx` the longest pass spent
+sending. A long `gap` alone is not loss, because the task sleeps through the
+quiet part of every bus cycle. A long `tx` is time in which only the send's own
+drains kept the controllers empty.
 
 Under 120 µs is comfortable. Approaching 200 µs means the margin is gone — check
 `CAN_SPI_HZ`, and check nothing has been added to the reader task. A figure you
@@ -1624,7 +1629,7 @@ Measured sync cost and the current exposure window are reported once per second
 into `N.log`:
 
 ```
-health: ... syncs=142 maxSync=8113 us atRisk<=340 ms ...
+health sd: writes=38 maxWr=41200 us syncs=142 maxSync=8113 us atRisk<=340 ms
 ```
 
 ### Getting to zero

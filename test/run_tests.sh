@@ -59,6 +59,7 @@ run_test "logger"                         "$here/test_logger.cpp"  "$src/logger.
 run_test "MCP2515 driver and transmit"    "$here/test_mcp2515.cpp" "$src/mcp2515.cpp"
 run_test "frame-map heap budget"          "$here/test_heapfit.cpp" "$src/dbc.cpp"
 run_test "the setup bundle unpacks"       "$here/test_bundle.cpp"  "$src/bundle.cpp"
+run_test "SD write recovery"            "$here/test_sdutil.cpp"
 run_test "the radio is configured first"  "$here/test_netcfg.cpp"  "$src/netcfg.cpp"
 run_test "signal encoding"                "$here/test_encode.cpp"  "$src/dbc.cpp"
 run_test "dashboard configuration"        "$here/test_dash.cpp"    "$src/dash.cpp" "$src/dbc.cpp"

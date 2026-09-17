@@ -572,6 +572,10 @@ static bool reopenCsv() {
   return (bool)s_csv;
 }
 
+/* Bytes of the CSV the card holds, as far as the writer knows. The recovery
+ * below measures the file against it. */
+static uint64_t s_onCard = 0;
+
 static void flushBuffer(bool force) {
   if (!s_used) return;
   if (!force && s_used < SD_BLOCK_BYTES) return;
@@ -580,6 +584,12 @@ static void flushBuffer(bool force) {
 #if SD_FAULT_TEST_AT_KB
   if (!s_faultDone && g_rec.bytes >= (uint64_t)SD_FAULT_TEST_AT_KB * 1024ULL) {
     s_faultDone = true;
+    /* The way it happened on the bench: part of the block reaches the card
+     * before the write fails. 29 bytes then; an odd number here, so a
+     * recovery that writes them twice breaks a row where it shows. */
+    const size_t part = (s_used > 131) ? 131 : 0;
+    s_csv.write((const uint8_t *)s_buf, part);
+    s_csv.flush();
     s_csv.close();
     s_csv = SD.open(g_rec.csvName, FILE_READ);   /* writes now return 0 */
     LOG_LIVE(LVL_WARN, "TEST: the CSV now refuses writes, as after a card error");
@@ -592,7 +602,26 @@ static void flushBuffer(bool force) {
   if (n != s_used) {
     g_rec.sdWriteFails++;
     const bool again = reopenCsv();
-    if (again) n += s_csv.write((const uint8_t *)s_buf + n, s_used - n);
+    if (again) {
+      /* Continue from where the FILE ends, not from what write() reported -
+       * see sdResume(). size() is exact here: nothing has been written through
+       * this handle yet. */
+      const SdResume r = sdResume(s_onCard, s_csv.size(), s_used);
+      if (r.lostBefore) {
+        g_rec.sdError      = true;
+        g_rec.sdBytesLost += (uint32_t)r.lostBefore;
+        s_onCard   -= r.lostBefore;
+        g_rec.bytes = (g_rec.bytes > r.lostBefore) ? g_rec.bytes - r.lostBefore : 0;
+      }
+      s_csv.write((const uint8_t *)s_buf + r.done, s_used - r.done);
+
+      /* And measure again rather than trust this write either. The flush
+       * commits the length, which is what size() reads. */
+      s_csv.flush();
+      const uint64_t now = s_csv.size();
+      n = (now <= s_onCard) ? 0
+        : (now - s_onCard > s_used) ? s_used : (size_t)(now - s_onCard);
+    }
     if (n != s_used) {
       g_rec.sdError = true;
       g_rec.sdBytesLost += (uint32_t)(s_used - n);
@@ -609,6 +638,7 @@ static void flushBuffer(bool force) {
     }
   }
   const uint32_t dt = micros() - t0;
+  s_onCard    += n;
   g_rec.bytes += n;
   g_rec.writeCount++;
   g_rec.sdBusyUs += dt;       /* a SUBSET of writerBusyUs - see recorder.h */
@@ -656,6 +686,7 @@ static void startRecording() {
   memLog(LVL_INFO, true, "recording, before opening files");
   s_csv = SD.open(g_rec.csvName, FILE_WRITE);
   if (!s_csv) { LOG_LIVE(LVL_ERROR, "cannot create %s", g_rec.csvName); return; }
+  s_onCard = 0;
   drainUnrecorded();
   memLog(LVL_INFO, true, "recording, the .csv open");
 
@@ -1063,8 +1094,10 @@ static void statusTick() {
     s_lostSeen = lost;
   }
 
-  /* Right after the file name: this line is cut at LOG_LINE_CHARS, and rows
-   * that never reached the card must not be the part that is cut. */
+  /* Right after the file name, and `lost` with it: this line is cut at
+   * LOG_LINE_CHARS, and the two numbers that say whether the recording is
+   * complete must not be the part that is cut. At the end, `lost 69` was
+   * printed as `lost 6` once the bus fields grew. */
   char sdLost[40] = "";
   if (g_rec.sdBytesLost) {
     snprintf(sdLost, sizeof(sdLost), " | SD LOST %lu KB",
@@ -1073,15 +1106,14 @@ static void statusTick() {
 
   if (anyOk) {
     LOG_LIVE(g_rec.sdBytesLost ? LVL_ERROR : (anyStuck ? LVL_WARN : LVL_INFO),
-      "%s%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu drain=%lu us "
-      "write=%lu us | lost %lu%s",
-      state, sdLost,
+      "%s | lost %lu%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu "
+      "drain=%lu us write=%lu us%s",
+      state, (unsigned long)lost, sdLost,
       (unsigned long)g_rec.rows, (unsigned long)(g_rec.bytes / 1024ULL),
       perBus[0], perBus[1],
       (unsigned long)qNow, (unsigned)FRAME_QUEUE_LEN,
       (unsigned long)g_rec.queuePeak, (unsigned long)g_rec.drainMaxUs,
-      (unsigned long)g_rec.writeMaxUs,
-      (unsigned long)lost, heap);
+      (unsigned long)g_rec.writeMaxUs, heap);
   } else {
     /* Counted rather than assumed: with one module fitted, "on either bus" is
      * wrong and sends somebody looking at hardware that is not there. */

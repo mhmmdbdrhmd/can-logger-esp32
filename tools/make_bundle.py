@@ -167,37 +167,72 @@ def messages(text):
     return out
 
 
-def drop_message(text, name):
-    """The map without message `name`: its BO_ block, and every VAL_, CM_,
-    BA_ and SIG_VALTYPE_ line about it."""
-    for n, _, start, end in messages(text):
-        if n != name:
+REF_LINE = re.compile(r"^\s*(?:VAL_|SIG_VALTYPE_|SG_MUL_VAL_|BO_TX_BU_|"
+                      r"CM_\s+(?:SG_|BO_)|BA_\s+\"[^\"]*\"\s+(?:SG_|BO_))"
+                      r"\s+(\d+)\b")
+
+
+def drop_messages(text, names):
+    """The map without the messages in `names`: their BO_ blocks, and every
+    VAL_, CM_, BA_ and SIG_VALTYPE_ line about them. One pass."""
+    ids, out, skipping = set(), [], False
+    lines = text.splitlines(keepends=True)
+    for ln in lines:
+        m = re.match(r"\s*BO_\s+(\d+)\s+([A-Za-z_]\w*)\s*:", ln)
+        if m and m.group(2) in names:
+            ids.add(m.group(1))
+    for ln in lines:
+        m = re.match(r"\s*BO_\s+(\d+)\s+([A-Za-z_]\w*)\s*:", ln)
+        if m:
+            skipping = m.group(2) in names
+            if skipping:
+                continue
+        elif skipping and re.match(r"\s*SG_\s", ln):
             continue
-        mid = re.match(r"\s*BO_\s+(\d+)", text[start:end]).group(1)
-        text = text[:start] + text[end:]
-        ref = re.compile(r"^\s*(VAL_|SIG_VALTYPE_|CM_\s+(SG_|BO_)|"
-                         r"BA_\s+\"[^\"]*\"\s+(SG_|BO_)|SG_MUL_VAL_|BO_TX_BU_)"
-                         r"\s+%s\b" % mid)
-        return "".join(ln for ln in text.splitlines(keepends=True)
-                       if not ref.match(ln))
-    return text
+        else:
+            skipping = False
+        r = REF_LINE.match(ln)
+        if r and r.group(1) in ids:
+            continue
+        out.append(ln)
+    return "".join(out)
 
 
-def prune(text, keep, fits):
-    """Drop the largest messages the layout does not use until fits(text).
+def labels_per_message(text):
+    """{message id text: value labels} - what dropping a message saves."""
+    per = {}
+    for ln in text.splitlines():
+        m = re.match(r"\s*VAL_\s+(\d+)\s", ln)
+        if m:
+            per[m.group(1)] = per.get(m.group(1), 0) + len(re.findall(r'"[^"]*"', ln))
+    return per
 
-    -> (text, [(message, signals)]). The largest go first because each one
-    buys the most memory per name lost. Nothing is lost from the RECORDING:
+
+def prune(text, keep, fits, counts):
+    """Drop the largest messages the layout does not use until
+    fits(counts) is true, counts being (messages, signals, value labels).
+
+    -> (text, [(message, signals)]). The largest go first, because each buys
+    the most memory for one name lost. Nothing is lost from the RECORDING:
     frames of a message the map no longer holds are still written whole, as
     raw bytes, and decode offline against the full .dbc."""
+    labels = labels_per_message(text)
+    cands = []
+    for name, sigs, start, _ in messages(text):
+        if name in keep:
+            continue
+        mid = re.match(r"\s*BO_\s+(\d+)", text[start:start + 40]).group(1)
+        cands.append((sigs, labels.get(mid, 0), name))
+    cands.sort(key=lambda c: (-c[0], -c[1]))
     dropped = []
-    while not fits(text):
-        cands = [(n, s) for n, s, _, _ in messages(text) if n not in keep]
-        if not cands:
+    c = counts
+    for sigs, vals, name in cands:
+        if fits(c):
             break
-        name, sigs = max(cands, key=lambda c: c[1])
-        text = drop_message(text, name)
+        c = (c[0] - 1, c[1] - sigs, c[2] - vals)
         dropped.append((name, sigs))
+    if dropped:
+        text = drop_messages(text, {n for n, _ in dropped})
     return text, dropped
 
 

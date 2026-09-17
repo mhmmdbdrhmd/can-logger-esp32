@@ -1436,7 +1436,7 @@ So the interrupt does the **minimum bounded work** and nothing else:
 |---|---|---|
 | INT falls | `canIsr1` / `canIsr2`, in IRAM | Takes the arrival timestamp with `esp_timer_get_time()`, pushes it into **that bus's** ring, and unblocks the reader task. **No SPI, no allocation, no file I/O, no logging.** Constant work, whatever either bus is doing. |
 | drain | **one** CAN task, prio 20 | Empties both receive buffers on controller 1, then controller 2, and keeps going until each reports empty — that is what makes the edge-triggered INT safe when a second frame arrives while INT is still low. A 20 ms timeout re-drains unconditionally, so even a completely missed edge costs latency, never data. |
-| buffer | 512-frame queue | 12 KB of heap; covers the card's worst ~320 ms stall at up to ~1600 frames/s. Kept small because it comes out of the heap the web server needs. |
+| buffer | 256-frame queue | 6 KB of heap; covers the card's worst ~320 ms stall at up to ~800 frames/s. Kept small because it comes out of the heap the web server needs. |
 | decode + write | writer task, prio 10 | Looks the id up in **that bus's** frame map, decodes each signal, formats CSV, fills a 32 KB block, writes it. While blocked in that write the reader simply preempts it. |
 | Wi-Fi / HTTP | Wi-Fi on core 0; the web server in `loop()`, priority 1 on core 1 | Below both tasks above, so it cannot delay a frame. What it CAN run short of is heap, not CPU — see [keeping the dashboard reachable](#keeping-the-dashboard-reachable). |
 
@@ -1701,7 +1701,8 @@ run the same way and two MCP2515 modules rarely carry the same crystal:
 | `SD_BLOCK_BYTES` | 32768 | Bytes per SD write. Raised from 8 KB for the second bus — large writes are far more efficient on SD |
 | `SD_SYNC_INTERVAL_MS` | 1000 | The power-cut exposure window |
 | `PIN_POWER_FAIL` | -1 | See §9 |
-| `FRAME_QUEUE_LEN` | 512 | ≈320 ms of slack at 1 600 frames/s. **Raise it** if `drop` is non-zero while `maxWr` shows a long write — at the cost of heap the dashboard needs |
+| `FRAME_QUEUE_LEN` | 256 | ≈320 ms of slack at 800 frames/s. **Raise it** if `drop` is non-zero while `maxWr` shows a long write — at the cost of heap the dashboard needs |
+| `LOG_QUEUE_LEN` / `TASK_STACK_WRITER` | 16 / 6144 | Also heap. The `.log` file's `stack free` line shows what the writer really uses |
 | `WEB_PAGE_GZIP` / `WEB_SEND_MAX_MS` | 1 / 4000 | Serve the page compressed; give up on a response after 4 s so one slow client cannot hold up the rest |
 | `MEM_WEB_SERVES` / `MEM_WEB_DEAD` | 36852 / 28660 | Largest-free-block marks for the dashboard verdict at boot |
 | `BUS_TRACK_IDS` / `WEB_MAX_SIGNALS` | 24 / 48 | Dashboard table sizes, **per bus** |
@@ -1711,9 +1712,11 @@ run the same way and two MCP2515 modules rarely carry the same crystal:
 Plus the pin map, task priorities and cores, and the Wi-Fi fallbacks.
 
 > **`FRAME_QUEUE_LEN` costs 24 bytes an entry, from the heap** — the same heap
-> the frame maps, the Wi-Fi driver and the web server draw on. 512 entries is
-> 12 KB. At 2048 (48 KB) a pair of ordinary frame maps was enough to leave the
-> dashboard unreachable in station mode while the queue never held more than 13
+> the frame maps, the Wi-Fi driver and the web server draw on. 256 entries is
+> 6 KB. On one board with one small map, the largest free block at start-up
+> was 34 804 B with a 512-entry queue, 48-line log queue and 8 KB writer stack
+> — the page stopped loading within a minute — and 47 092 B with 256, 16 and
+> 6 KB, where every request was served. The queue never held more than 20
 > frames.
 
 ---
@@ -1901,7 +1904,7 @@ interval and the `RXB0CTRL`/`RXB1CTRL` bits are unchanged, and
 both controllers, so they cannot drift back without CI saying so.
 
 Two things in that path **did** change for the second bus, and neither is field
-proven: `FRAME_QUEUE_LEN` (1024 → 2048, since back to 512) and the SPI access pattern (one
+proven: `FRAME_QUEUE_LEN` (1024 → 2048, since back to 256) and the SPI access pattern (one
 `transfer()` per byte → one block transfer per transaction). Both are argued for
 in section 8 and both are measurable on a bench.
 

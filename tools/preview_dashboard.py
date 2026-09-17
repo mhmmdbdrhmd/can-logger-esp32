@@ -236,11 +236,17 @@ def prune_cfg(text, byrefs, nodes):
 def load_dbc(path):
     if not path:
         return {"loaded": 0, "m": []}
+    return parse_dbc(Path(path).read_text(encoding="utf-8", errors="replace"))
 
+
+def parse_dbc(text, name_max=None):
+    """A frame map's text, read. With `name_max`, names are cut the way the
+    firmware cuts them - to name_max - 1 characters - and the count of cut
+    names is returned as "clipped"."""
     msgs, cur = [], None
     vals = {}
     nodes = []
-    for line in Path(path).read_text().splitlines():
+    for line in text.splitlines():
         s = line.strip()
         if s.startswith("BU_"):
             # "BU_: A B" and "BU_ A B" are both in the wild.
@@ -308,7 +314,26 @@ def load_dbc(path):
             sg["v"] = vals.get((msg["_raw"], sg["n"]), [])
         del msg["_raw"]
 
-    return {"loaded": 1 if msgs else 0, "nodes": nodes, "m": msgs}
+    clipped = 0
+    if name_max:
+        cap = name_max - 1
+
+        def cut(n):
+            nonlocal clipped
+            if len(n) > cap:
+                clipped += 1
+                return n[:cap]
+            return n
+        nodes = [n[:cap] for n in nodes]
+        for msg in msgs:
+            msg["n"] = cut(msg["n"])
+            msg["tx"] = msg["tx"][:cap]
+            for sg in msg["s"]:
+                sg["n"] = cut(sg["n"])
+                sg["_msg"] = msg["n"]
+
+    return {"loaded": 1 if msgs else 0, "nodes": nodes, "m": msgs,
+            "clipped": clipped}
 
 
 # ---------------------------------------------------------------------------

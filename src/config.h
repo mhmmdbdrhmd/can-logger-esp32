@@ -348,24 +348,26 @@
  * -------------------------------------------------------------------------*/
 /* Raw frames buffered between the CAN reader task and the decode/write task.
  *
- * 512 * 24 B = 12 KB. The queue absorbs SD card stalls: a healthy write is
- * under 5 ms, the outliers reach ~320 ms, and 512 entries cover a stall that
- * long at up to ~1600 frames/s across both buses.
+ * 256 * 24 B = 6 KB. The queue absorbs SD card stalls: a healthy write is
+ * under 5 ms, the outliers reach ~320 ms, and 256 entries cover a stall that
+ * long at up to ~800 frames/s across both buses.
  *
- * It was 2048 (48 KB), sized for two saturated 500 kbit/s buses. Measured on a
- * real 350 frames/s bus the peak was 13 entries - and those 36 KB came out of
- * the same heap the Wi-Fi driver and the web server need, which is the budget
- * that decides whether the dashboard stays reachable. If you log two busy buses
- * and `qPeak` climbs towards this, raise it and accept a tighter dashboard.
- * Each entry costs 24 bytes. */
+ * It was 2048 (48 KB), then 512, sized for saturated buses. On a real
+ * 350 frames/s bus the peak was 20 entries - and every entry comes out of the
+ * heap the web server needs. Measured on one board with one small map, the
+ * largest free block at ready was 34804 B at 512 (the page stopped loading)
+ * and 40948 B at 256 (every request served). If you log busy buses and `qPeak`
+ * climbs towards this, raise it and accept a tighter dashboard. */
 #ifndef FRAME_QUEUE_LEN
-#define FRAME_QUEUE_LEN     512
+#define FRAME_QUEUE_LEN     256
 #endif
 
 /* Log lines buffered between any task and the single SD-owning writer task.
- * Each is 168 bytes of heap. */
+ * Each is 168 bytes of heap; 16 is 2.7 KB, where 48 was 8 KB. The writer
+ * drains it on every pass, so it only has to hold a burst - and a line that
+ * does not fit is counted (logDrop on the status line), never blocked on. */
 #ifndef LOG_QUEUE_LEN
-#define LOG_QUEUE_LEN       48
+#define LOG_QUEUE_LEN       16
 #endif
 #define LOG_LINE_CHARS      160
 
@@ -382,8 +384,11 @@
 #ifndef TASK_STACK_CAN
 #define TASK_STACK_CAN      4096
 #endif
+/* 6144, not 8192: the stack is heap too, and the .log file's `stack free`
+ * line shows what the writer really uses. Check it after adding to the
+ * writer's work. */
 #ifndef TASK_STACK_WRITER
-#define TASK_STACK_WRITER   8192
+#define TASK_STACK_WRITER   6144
 #endif
 
 /* ---------------------------------------------------------------------------

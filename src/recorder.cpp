@@ -453,12 +453,16 @@ static void loadOneDbc(uint8_t bus, const char *path) {
              (unsigned long)(mm.freeNow / 1024),
              (unsigned long)(mm.largest / 1024));
   }
+  /* The per-entry costs too, in bytes: they are what a desk tool needs to
+   * predict this board's heap from a .dbc, and they change with name_max. */
   LOG_FILE(LVL_INFO, "CAN%u dbc: version='%s' values=%u lineErrors=%u inexact=%u "
-                     "caps=%u/%u/%u bytes=%lu",
+                     "caps=%u/%u/%u bytes=%lu name_max=%u entry=%u/%u/%u",
            busNo, db.version, (unsigned)db.valCount,
            (unsigned)db.lineErrors, (unsigned)db.inexact,
            (unsigned)db.msgCap, (unsigned)db.sigCap,
-           (unsigned)db.valCap, (unsigned long)dbcBytes(db));
+           (unsigned)db.valCap, (unsigned long)dbcBytes(db),
+           (unsigned)db.nameMax, (unsigned)dbcBytesPerMessage(),
+           (unsigned)dbcBytesPerSignal(), (unsigned)dbcBytesPerValue());
 
   if (db.overflow) {
     /* Now genuinely rare: it means the file exceeded the DBC_MAX_* ceilings in
@@ -606,12 +610,17 @@ static void startRecording() {
   snprintf(g_rec.logName,  sizeof(g_rec.logName),  "/%u.log",  idx);
   snprintf(g_rec.metaName, sizeof(g_rec.metaName), "/%u.meta", idx);
 
+  /* What a recording itself costs the heap, step by step: open files carry
+   * buffers, and the web server competes for the same memory. */
+  memLog(LVL_INFO, true, "recording, before opening files");
   s_csv = SD.open(g_rec.csvName, FILE_WRITE);
   if (!s_csv) { LOG_LIVE(LVL_ERROR, "cannot create %s", g_rec.csvName); return; }
   drainUnrecorded();
+  memLog(LVL_INFO, true, "recording, the .csv open");
 
   s_log = SD.open(g_rec.logName, FILE_WRITE);
   drainUnrecorded();
+  memLog(LVL_INFO, true, "recording, the .log open");
   if (!s_log) {
     LOG_LIVE(LVL_WARN, "cannot create %s - continuing without the detailed log",
              g_rec.logName);
@@ -673,6 +682,7 @@ static void startRecording() {
              g_rec.metaName);
   }
   drainUnrecorded();
+  memLog(LVL_INFO, true, "recording, header written");
 
   s_dec.reset(g_dbc);
   for (uint8_t b = 0; b < CAN_BUSES; b++) {
@@ -835,6 +845,15 @@ static void statusTick() {
   const uint32_t dt  = now - s_lastStatusMs;
   if (dt < STATUS_PERIOD_MS) return;
   s_lastStatusMs = now;
+
+  /* Once per recording, when it has settled: the heap the web server is left
+   * with while the recording runs, which is lower than at "ready". */
+  static uint16_t s_settledFor = 0;
+  if (g_rec.recording && s_settledFor != g_rec.fileIndex &&
+      now - g_rec.startMs >= 5000) {
+    s_settledFor = g_rec.fileIndex;
+    memLog(LVL_INFO, true, "recording, 5 s in");
+  }
 
   for (uint8_t b = 0; b < CAN_BUSES; b++) busStatusTick(b, now, dt);
 

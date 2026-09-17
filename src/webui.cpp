@@ -13,6 +13,7 @@
 #include "mem.h"
 
 #include <SD.h>
+#include "sdutil.h"
 #include <WebServer.h>
 #include <lwip/sockets.h>
 #include <sys/time.h>       /* struct timeval for SO_SNDTIMEO; SO_LINGER is in lwip */
@@ -799,7 +800,7 @@ static void handleDbcUpload() {
      * on it still being parseable. */
     s_dbcUpBus   = (s_srv->uri() == "/api/bundle") ? kUpBundle : argBus();
     if (g_rec.recording || !g_rec.sdOk) return;
-    SD.remove(kDbcTmpPath[s_dbcUpBus]);
+    sdRemoveIfThere(kDbcTmpPath[s_dbcUpBus]);
     s_dbcUp = SD.open(kDbcTmpPath[s_dbcUpBus], FILE_WRITE);
     s_dbcUpOk = (bool)s_dbcUp;
     return;
@@ -824,7 +825,7 @@ static void handleDbcUpload() {
   /* ABORTED */
   if (s_dbcUp) s_dbcUp.close();
   s_dbcUpOk = false;
-  SD.remove(kDbcTmpPath[s_dbcUpBus]);
+  sdRemoveIfThere(kDbcTmpPath[s_dbcUpBus]);
 }
 
 /* POST /api/bundle - a setup bundle from Import. Stored, then the logger
@@ -849,15 +850,15 @@ static void handleBundleDone() {
 
   String j;
   if (err) {
-    SD.remove(BUNDLE_TMP_PATH);
+    sdRemoveIfThere(BUNDLE_TMP_PATH);
     j  = "{\"ok\":0,\"err\":\""; jsonStr(j, err); j += "\"}";
     s_srv->send(409, "application/json", j);
     return;
   }
 
-  SD.remove(BUNDLE_PATH);
+  sdRemoveIfThere(BUNDLE_PATH);
   if (!SD.rename(BUNDLE_TMP_PATH, BUNDLE_PATH)) {
-    SD.remove(BUNDLE_TMP_PATH);
+    sdRemoveIfThere(BUNDLE_TMP_PATH);
     s_srv->send(500, "application/json",
                 "{\"ok\":0,\"err\":\"could not put the file in place\"}");
     return;
@@ -885,15 +886,15 @@ static void handleDbcDone() {
   const char *const tmp = kDbcTmpPath[bus];
 
   if (err) {
-    SD.remove(tmp);
+    sdRemoveIfThere(tmp);
     j  = "{\"ok\":0,\"err\":\""; jsonStr(j, err); j += "\"}";
     s_srv->send(409, "application/json", j);
     return;
   }
 
-  SD.remove(dst);
+  sdRemoveIfThere(dst);
   if (!SD.rename(tmp, dst)) {
-    SD.remove(tmp);
+    sdRemoveIfThere(tmp);
     s_srv->send(500, "application/json",
                 "{\"ok\":0,\"err\":\"could not put the file in place\"}");
     return;

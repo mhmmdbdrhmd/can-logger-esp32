@@ -106,6 +106,7 @@ Karte auf **FAT32** formatieren. Optional zwei Textdateien ins Hauptverzeichnis:
 | `frames.dbc` | DBC-Datei für **CAN1**. Damit werden dessen Signale in Echtzeit dekodiert — mit Namen und physikalischen Einheiten. Vorlage: `examples/example.dbc` |
 | `frames2.dbc` | DBC-Datei für **CAN2**. Getrennt, weil dieselbe ID auf zwei Bussen üblicherweise Verschiedenes bedeutet. Fehlt sie, wird CAN2 als Rohdaten aufgezeichnet — das ist kein Fehler |
 | `config.txt` | WLAN-Einstellungen. Fehlt sie, legt der Logger beim ersten Start eine kommentierte Vorlage an |
+| `logger.bundle` | Alternativ: beide DBC-Dateien, das Dashboard und die Namenslänge in einer Datei, exportiert mit `customize.py`. Wird beim nächsten Start entpackt und danach in `logger.applied` umbenannt |
 
 **Ohne DBC-Datei** zeichnet der Logger trotzdem alles auf — dann als rohe
 Datenbytes. Das ist kein Fehler, sondern ein vorgesehener Betriebsmodus: Sie

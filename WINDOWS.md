@@ -374,6 +374,7 @@ reformatted), then optionally put two files in the root:
 | `frames2.dbc` | The frame map for **CAN2**. Separate, because the same identifier usually means different things on two buses. Optional, like the first. |
 | `dash.cfg` | Your dashboard and your sendable values. Without it the web app is health cards and controls only. Made by `customize.bat` — see below. |
 | `config.txt` | Wi-Fi settings. If absent, the logger writes a commented default on first boot — easiest to let it do that and then edit it. |
+| `logger.bundle` | Instead of the first three: all of them in one file, as `customize.bat` exports it. Unpacked at the next start, then renamed `logger.applied`. |
 
 All three are plain text; Notepad is fine. Nothing needs rebuilding when you
 change any of them — edit, put the card back, power cycle.
@@ -393,9 +394,10 @@ Then either:
 - **double-click `customize.bat`** and either pick your file from the list it
   shows, or press **b** to open a normal Windows file browser
 
-It checks the file against the limits the firmware was built with, opens the
-logger's real web page in your browser fed with simulated data, and writes
-everything you build into a `.cfg` next to your `.dbc`.
+It checks the file against the limits the firmware was built with and opens
+the logger's real web page in your browser, fed with simulated data. It writes
+nothing until you press **Export**. Two `.dbc` files dropped at once are one per
+bus; an exported `logger.bundle` dropped on it carries on where you left off.
 
 In the page:
 
@@ -408,14 +410,14 @@ In the page:
    and name. Drag them around, tap one to change it, delete what you do not want.
 3. **Send → Set up sendable values → Fill from the frame map.** Pick the message
    your controller takes its settings from.
+4. **Web UI (top right)** must say **OK**. If it says AT RISK, the logger may
+   stop serving this page while it records; the sheet behind the button offers
+   the fixes — trim a frame map, or keep names shorter.
+5. **Preview (top right)** shows the page as the logger will load it.
+6. **Setup file → Export** saves `logger.bundle`.
 
-Close the window when you are done, then copy **both** files to the card:
-
-```
-CAN1's .dbc  ->  frames.dbc
-CAN2's .dbc  ->  frames2.dbc     (only if the second bus is mapped)
-mine.cfg     ->  dash.cfg
-```
+Copy `logger.bundle` to the root of the card — or open the logger's dashboard
+and **Import** it there; it restarts and picks it up.
 
 If `customize.bat` closes instantly, Python is not on PATH — reinstall it with
 the **Add python.exe to PATH** box ticked.

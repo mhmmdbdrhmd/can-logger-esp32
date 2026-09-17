@@ -10,6 +10,36 @@ Major version because **the CSV schema changed** — see below. Recordings made 
 the single-bus logger are still readable by the desk tools, but a file written
 by this one has an extra column.
 
+### One desk tool, one setup file, and a name length chosen per setup
+
+- **`customize.py` is the one desk tool.** It takes one or two frame maps, or an
+  exported bundle. The page gains **Preview**, which shows the setup the way the
+  logger will load it: names at the chosen length, a map cut down if the logger
+  cannot hold it whole, cells that would no longer resolve left out.
+- **The Web UI badge predicts from the maps** (`tools/heap_model.py`) whether
+  the logger will keep serving the page while it records, for name lengths 64,
+  32 and 16, and offers the fixes as buttons: trim `frames.dbc` or
+  `frames2.dbc` - never a message the layout uses - or a shorter name length.
+- **Export writes one file, `logger.bundle`**: both maps, the layout and the
+  name length (`tools/make_bundle.py`). Names too long for the length are
+  **abbreviated**, not cut (`tools/dbc_abbrev.py`: `EngineCoolantTemperature`
+  -> `EngineCoolTemp`), kept distinct, and the layout is rewritten to match.
+  The logger unpacks it at start-up, once, and renames it `/logger.applied`;
+  **Import** on the logger's own page uploads one and restarts.
+- **The name length is chosen at run time.** Names live in one pool sized from
+  the bundle's `name_max`, so a setup at 32 or 16 gives its memory back to the
+  web server without a rebuild. `DBC_NAME_MAX` is now only the ceiling.
+- **The web server got 12 KB back** by default: `FRAME_QUEUE_LEN` 256,
+  `LOG_QUEUE_LEN` 16, `TASK_STACK_WRITER` 6144. On a bench board with one small
+  map the largest free block at start-up went from 34804 to 47092 bytes, and the
+  page from dying within a minute to answering every request. The `.log` file
+  reports each task's unused stack.
+- **A recording no longer drops frames while it opens its files.** Finding a
+  free file name on a well-used card took 1.5 s and filled the queue; the queue
+  is now drained in between, and those frames are counted but not recorded.
+- **The boot log records the heap at every step of starting a recording**, and
+  each frame map's per-entry cost.
+
 ### Found on a real bench: the dashboard died in station mode, and a Send cost frames
 
 Running this firmware on a real machine - station mode through a router, a
@@ -56,8 +86,8 @@ while the recording ran on untouched.
 - **The radio now starts before the frame maps load.** It needs a few large
   contiguous blocks, and a freshly parsed map had already cut the heap into
   pieces: one vendor map left 80 KB free and Wi-Fi still would not start.
-- **`FRAME_QUEUE_LEN` is 512, not 2048.** The queue comes out of the heap; its
-  measured peak on a 350 frames/s bus was 13.
+- **`FRAME_QUEUE_LEN` is 512, not 2048** (now 256, see above). The queue comes
+  out of the heap; its measured peak on a 350 frames/s bus was 13.
 - The boot log now says, at the end of setup, whether the dashboard can be
   expected to stay reachable - see "Keeping the dashboard reachable" in the
   README for the three zones it reports and where they come from.
@@ -80,7 +110,7 @@ while the recording ran on untouched.
   made a megabyte-class map take over a minute and a half at boot. 512-byte
   blocks now.
 - **Ceilings raised** to 4096 messages / 16384 signals / 16384 value labels,
-  and `DBC_NAME_MAX` to 64: a real vendor map lost 310 names at 32, and two
+  and `DBC_NAME_MAX` to 64 (now the ceiling, see above): a real vendor map lost 310 names at 32, and two
   signals differing only past character 31 became one CSV column.
 - **A readable map that did not fit was reported as thousands of unparsable
   lines.** Skipped definitions are counted apart from malformed ones now, and

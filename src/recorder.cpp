@@ -12,6 +12,7 @@
 
 #include <SPI.h>
 #include <SD.h>
+#include "sdutil.h"
 
 RecStatus     g_rec;
 QueueHandle_t g_frameQueue = nullptr;
@@ -1191,7 +1192,7 @@ static void writeDashFile() {
   /* Write to a temporary name and rename over the top. A power cut halfway
    * through a direct write leaves a half-parsed layout on the card that would
    * then be treated as an edit and imported over the good copy in flash. */
-  SD.remove(DASH_TMP_PATH);
+  sdRemoveIfThere(DASH_TMP_PATH);
   File f = SD.open(DASH_TMP_PATH, FILE_WRITE);
   if (!f) {
     free(buf);
@@ -1204,12 +1205,12 @@ static void writeDashFile() {
 
   if (wrote != n) {
     free(buf);
-    SD.remove(DASH_TMP_PATH);
+    sdRemoveIfThere(DASH_TMP_PATH);
     LOG_FILE(LVL_WARN, "short write to %s - the card may be full", DASH_TMP_PATH);
     return;
   }
 
-  SD.remove(DASH_PATH);
+  sdRemoveIfThere(DASH_PATH);
   if (!SD.rename(DASH_TMP_PATH, DASH_PATH)) {
     free(buf);
     LOG_FILE(LVL_WARN, "could not put %s in place", DASH_PATH);

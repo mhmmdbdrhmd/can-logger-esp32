@@ -1,6 +1,7 @@
 #include "bundle.h"
 #include "logger.h"
 #include <SD.h>
+#include "sdutil.h"
 
 /* The one buffer this uses. 512 bytes is an SD sector and comfortably more than
  * the longest header line; making it larger would only move bytes in bigger
@@ -112,7 +113,7 @@ BundleInfo bundleUnpack() {
      * place of the good one that was there before. */
     char tmp[72];
     snprintf(tmp, sizeof(tmp), "%s.part", path);
-    SD.remove(tmp);
+    sdRemoveIfThere(tmp);
     File out = SD.open(tmp, FILE_WRITE);
     if (!out) {
       snprintf(bi.err, sizeof(bi.err), "cannot write %s", tmp);
@@ -131,13 +132,13 @@ BundleInfo bundleUnpack() {
     out.close();
 
     if (!wrote) {
-      SD.remove(tmp);
+      sdRemoveIfThere(tmp);
       snprintf(bi.err, sizeof(bi.err), "short read on %s", name);
       break;
     }
-    SD.remove(path);
+    sdRemoveIfThere(path);
     if (!SD.rename(tmp, path)) {
-      SD.remove(tmp);
+      sdRemoveIfThere(tmp);
       snprintf(bi.err, sizeof(bi.err), "cannot replace %s", path);
       break;
     }
@@ -158,7 +159,7 @@ BundleInfo bundleUnpack() {
   /* Set aside only once it has fully gone in. A bundle that failed stays where
    * it is, so the next boot tries again and says why again. */
   if (bi.ok) {
-    SD.remove(BUNDLE_DONE_PATH);
+    sdRemoveIfThere(BUNDLE_DONE_PATH);
     if (!SD.rename(BUNDLE_PATH, BUNDLE_DONE_PATH)) {
       snprintf(bi.err, sizeof(bi.err), "unpacked, but could not rename %s - "
                "it will be unpacked again next boot", BUNDLE_PATH);

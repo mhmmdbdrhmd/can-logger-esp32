@@ -379,9 +379,16 @@ anywhere near the machine.
 
 ### How long a name can be
 
-`DBC_NAME_MAX` is 64, so **63 characters** of message and signal name reach the
-CSV. It was 32, and a real vendor map lost 310 names to it — two signals that
-differ only past character 31 become one CSV column. It was 24, which wrote `GuidanceCurvatureCommand` as
+Up to **63 characters** of message and signal name reach the CSV
+(`DBC_NAME_MAX` is 64). It was 32, and a real vendor map lost 310 names to it —
+two signals that differ only past character 31 become one CSV column.
+
+Every character is paid for once per signal, though, from the heap the web
+server needs. So the length actually used is chosen per setup: 64, 32 or 16,
+stored in the setup bundle and applied at start-up. The desk tool shortens
+longer names the way a person would — `EngineCoolantTemperature` becomes
+`EngineCoolTemp` at 16 — keeps every name distinct, and rewrites the layout to
+match, so nothing has to be cut. It was 24, which wrote `GuidanceCurvatureCommand` as
 `GuidanceCurvatureComman` — long enough to look right and short enough that
 matching rows back to the source DBC by exact name silently returned nothing.
 
@@ -967,6 +974,10 @@ when you swap buses — only that file does.
 
 ### Preview it with no hardware
 
+`customize.py` (next section) is the tool to use. It runs
+`tools/preview_dashboard.py`, which can also be started on its own when you
+want its extra switches:
+
 ```bash
 # the real page, against simulated data - opens on http://127.0.0.1:8080.
 # Starts from examples/machine.dbc and the text of examples/dash.cfg, so there
@@ -1000,9 +1011,12 @@ No logger, no wiring, no traffic. All you need is your `.dbc` and Python.
 ```bash
 python3 customize.py                                   # load the .dbc in the page
 python3 customize.py path/to/mine.dbc                  # or start with it
+python3 customize.py can1.dbc can2.dbc                 # one map per bus
+python3 customize.py logger.bundle                     # carry on from an export
 python3 customize.py path/to/mine.dbc --role Tester    # if one of them is you
                                                       # (CAN 1's; CAN 2's is a
                                                       #  button in the page)
+python3 customize.py path/to/mine.dbc --name-max 32    # names up to 31 characters
 ```
 
 **It never asks a question in the terminal.** With no argument the page opens
@@ -1055,16 +1069,35 @@ the frame map**, and pick the message your controller takes its settings from.
 Then fix the inputs: the one that should be a list of four tyre sizes becomes
 *Pick from a list I write*.
 
-**5. Take it with you.** Press **Export** — in the header, behind *Setup file* —
-and copy two files to the root of the SD card:
+**5. Check the logger can still serve it.** *Web UI*, in the header, says **OK**
+or **AT RISK** for these maps — see
+[keeping the dashboard reachable](#keeping-the-dashboard-reachable). The sheet
+behind it shows the answer for each name length, and when the answer is no, it
+offers the ways out as buttons: **trim** `frames.dbc` or `frames2.dbc` (the
+messages the layout uses are always kept; the rest go largest first), or a
+**shorter name length**. Nothing is lost from the recording either way — frames
+a trimmed map no longer names are still written whole, as raw bytes.
 
-```
-mine.dbc        ->  /frames.dbc
-the export      ->  /dash.cfg
-```
+**6. Preview it.** *Preview*, in the header, shows the page the way the logger
+will: the maps as the export carries them, names shortened to the chosen
+length, a map cut down if the logger could not hold it whole, and any cell that
+would no longer resolve left out. Press it again to go back to designing;
+changes made while previewing are not kept.
+
+**7. Take it with you.** Press **Export** — in the header, behind *Setup file*.
+It saves one file, `logger.bundle`: both frame maps, the layout and the name
+length, with names shortened and the layout rewritten to match. Either copy it
+to the root of the SD card as `/logger.bundle`, or **Import** it from the
+logger's own dashboard, which stores it and restarts. The logger unpacks it at
+start-up into `/frames.dbc`, `/frames2.dbc` and `/dash.cfg`, then renames it
+`/logger.applied`, so later changes made in the browser are not undone at the
+next boot.
 
 Power the logger up and it opens on your dashboard, with your sendable values,
 having never been connected to a bus during any of it.
+
+`tools/make_bundle.py` builds the same file from the command line, and
+`tools/heap_model.py` prints the memory verdict for a pair of maps.
 
 #### Checking a frame map on its own
 
@@ -1624,6 +1657,13 @@ python3 customize.py path/to/mine.dbc
 
 # will this frame map load on the logger?
 python3 tools/check_dbc.py path/to/mine.dbc --list
+
+# will the dashboard stay reachable with these maps, at each name length?
+python3 tools/heap_model.py can1.dbc can2.dbc
+
+# the setup as one file for the SD card, names shortened to 31 characters
+python3 tools/make_bundle.py --dbc can1.dbc --dbc2 can2.dbc --cfg dash.cfg \
+                             --name-max 32 -o logger.bundle
 ```
 
 ```bash
@@ -2078,16 +2118,6 @@ documented rather than hidden, but it is the thing to know.
 
 ### The rest, roughly in order of value per unit of work
 
-- **One desk tool, not two.** `customize.py` and `tools/preview_dashboard.py`
-  started with different jobs — one set a logger up for a bus, the other showed
-  the page moving with invented data — and every release since has made them
-  more alike. They now share the frame-map reader, the setup file, the role, the
-  `/api/dbc` upload and the pruning rule, and the pruning rule has already had
-  to be fixed in both. Two programs that must agree about everything are one
-  program with a flag: fold the preview into `customize.py` (or leave a thin
-  `--preview` entry point) and the class of bug where the two drift apart stops
-  existing. The test that asserts the Python and the C prune identically is
-  there to catch that drift; not needing it at all is better.
 - **Surface `TEC`/`REC`/`EFLG`** on the status line and in `N.log`. The
   accessors already exist and are called by nothing (see §14); this is an hour's
   work and it turns "no frames, no idea why" into a diagnosis.

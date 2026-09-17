@@ -430,6 +430,37 @@ int main() {
        ("attempts=" + std::to_string(fake.txAttempts)).c_str());
   }
 
+  printf("\n== the receive path is drained after every lost attempt ==\n");
+  {
+    /* A send that keeps losing was made in the middle of a burst. On the bench
+     * the controller overflowed right after such a send, with no drain between
+     * the attempts or after the last one. The fake clears TXREQ at once, so the
+     * wait loop never runs and only those drains can call the hook. */
+    static std::string seen;
+    seen.clear();
+    MCP2515::setBusyHook([](void *ctx) {
+      seen += std::to_string(((FakeMcp *)ctx)->txAttempts);
+    }, &fake);
+
+    fake.txSim = FakeMcp::SIM_LOSE_ARB_ALWAYS;
+    fake.txAttempts = 0;
+    CanFrame t;
+    memset(&t, 0, sizeof(t));
+    t.id = 0x7F0; t.len = 1;
+    can.sendFrame(t, 3);
+    ck("drained after attempt 1, 2 and 3, and before returning", seen == "1233",
+       ("hook saw attempts " + seen).c_str());
+
+    seen.clear();
+    fake.txSim = FakeMcp::SIM_ACCEPT;
+    fake.txAttempts = 0;
+    can.sendFrame(t, 3);
+    ck("a send that went out is drained after as well", seen == "1",
+       ("hook saw attempts " + seen).c_str());
+
+    MCP2515::setBusyHook(nullptr, nullptr);
+  }
+
   printf("\n== a wedged controller does not block every later send ==\n");
   {
     fake.txSim = FakeMcp::SIM_WEDGE;

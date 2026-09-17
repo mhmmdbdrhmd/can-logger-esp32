@@ -168,6 +168,11 @@ public:
   typedef void (*BusyHook)(void *ctx);
   static void setBusyHook(BusyHook hook, void *ctx);
 
+  /* Runs the hook once, now, if one is installed. For the work a caller does
+   * after a send - logging, bookkeeping - which is also time in which nothing
+   * is being received. */
+  static void serviceBusy();
+
   /* Sends one frame and waits for the controller to finish with it. Blocks for
    * at most a few milliseconds - it is called from the CAN task, which is the
    * only task allowed to touch this chip. See setBusyHook() above: without a

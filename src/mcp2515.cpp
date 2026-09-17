@@ -237,12 +237,16 @@ void MCP2515::setBusyHook(BusyHook hook, void *ctx) {
   s_busyCtx  = ctx;
 }
 
-static inline void busyWait100us() {
+void MCP2515::serviceBusy() {
   if (s_busyHook && !s_inBusy) {
     s_inBusy = true;
     s_busyHook(s_busyCtx);
     s_inBusy = false;
   }
+}
+
+static inline void busyWait100us() {
+  MCP2515::serviceBusy();
   delayMicroseconds(100);
 }
 
@@ -400,6 +404,9 @@ MCP2515::TxResult MCP2515::sendFrame(const CanFrame &f, uint8_t attempts,
       /* Normal on a busy bus, and the one case worth retrying: a higher
        * priority identifier simply got there first. */
       last = TX_ARB_LOST;
+      /* The frame that won is arriving now, and on a bus that just beat us it
+       * is usually one of a burst. Empty the buffers before trying again. */
+      serviceBusy();
       continue;
     }
     if (ctrl & TXB_TXERR) {
@@ -416,6 +423,7 @@ MCP2515::TxResult MCP2515::sendFrame(const CanFrame &f, uint8_t attempts,
     break;
   }
 
+  serviceBusy();
   const uint8_t tecAfter = readReg(REG_TEC);
   if (tecDelta) *tecDelta = (int16_t)tecAfter - (int16_t)tecBefore;
 

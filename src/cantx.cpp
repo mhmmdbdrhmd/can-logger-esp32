@@ -425,6 +425,11 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
     g_tx.failed++;
     LOG_LIVE(LVL_ERROR, "TX CAN%u 0x%lX failed: %s", (unsigned)(bus + 1),
              (unsigned long)f.id, txStatusText(o.status));
+    /* A send that lost arbitration every time was made in the middle of a
+     * burst, and the burst is still arriving. Formatting that line took long
+     * enough to overflow the controller: measured on the bench, one failed
+     * send in three cost a frame before this was here. */
+    MCP2515::serviceBusy();
     return;
   }
 
@@ -449,6 +454,7 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
     LOG_FILE(LVL_INFO, "TX CAN%u raw 0x%lX, %u bytes", (unsigned)(bus + 1),
              (unsigned long)f.id, (unsigned)f.len);
   }
+  MCP2515::serviceBusy();          /* the same reason as the failure above */
 }
 
 void txBegin() {

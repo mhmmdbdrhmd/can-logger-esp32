@@ -320,6 +320,7 @@ static void handleStatus() {
 
   j  = "{\"sd\":";      j += g_rec.sdOk ? 1 : 0;
   j += ",\"sdErr\":";   j += g_rec.sdError ? 1 : 0;
+  j += ",\"sdLost\":";  j += (g_rec.sdBytesLost + 1023UL) / 1024UL;
   j += ",\"sdType\":\"";j += g_rec.sdType; j += '"';
   j += ",\"sdMB\":";    j += (uint32_t)g_rec.sdSizeMB;
   j += ",\"rec\":";     j += g_rec.recording ? 1 : 0;
@@ -531,6 +532,7 @@ static void handleDash() {
   j += ",\"rec\":";   j += g_rec.recording ? 1 : 0;
   j += ",\"sd\":";    j += g_rec.sdOk ? 1 : 0;
   j += ",\"sdErr\":"; j += g_rec.sdError ? 1 : 0;
+  j += ",\"sdLost\":"; j += (g_rec.sdBytesLost + 1023UL) / 1024UL;
   j += ",\"sdType\":\""; j += g_rec.sdType; j += '"';
   j += ",\"sdMB\":";  j += (uint32_t)g_rec.sdSizeMB;
 

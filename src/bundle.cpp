@@ -42,6 +42,7 @@ BundleInfo bundleUnpack() {
 
   if (!SD.exists(BUNDLE_PATH)) {
     /* Nothing new. The one applied earlier still decides the name length. */
+    if (!SD.exists(BUNDLE_DONE_PATH)) return bi;
     File a = SD.open(BUNDLE_DONE_PATH, FILE_READ);
     if (!a) return bi;
     char head[160];

@@ -6,6 +6,7 @@
 #include <string>
 #define FILE_WRITE "w"
 #define FILE_READ  "r"
+#define FILE_APPEND "a"
 enum { CARD_NONE, CARD_MMC, CARD_SD, CARD_SDHC };
 
 /* A CARD THAT ACTUALLY HOLDS FILES.

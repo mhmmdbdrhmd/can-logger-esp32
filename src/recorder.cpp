@@ -555,20 +555,60 @@ static uint16_t nextFileIndex() {
 }
 
 /* ------------------------------------------------------------------------ */
+#if SD_FAULT_TEST_AT_KB
+static bool s_faultDone = false;
+#endif
+
+/* Close the CSV and open it again for appending.
+ *
+ * FatFS remembers a failed write on the open file and refuses every later
+ * write to it, for good - while the .log beside it, a different open file,
+ * carries on normally. On the bench that turned one card hiccup at 4 min 30 s
+ * into a recording that silently stopped growing for the remaining five
+ * minutes, with `lost 0` on the status line. A fresh open clears it. */
+static bool reopenCsv() {
+  s_csv.close();
+  s_csv = SD.open(g_rec.csvName, FILE_APPEND);
+  return (bool)s_csv;
+}
+
 static void flushBuffer(bool force) {
   if (!s_used) return;
   if (!force && s_used < SD_BLOCK_BYTES) return;
   if (!s_csv) { s_used = 0; return; }
 
+#if SD_FAULT_TEST_AT_KB
+  if (!s_faultDone && g_rec.bytes >= (uint64_t)SD_FAULT_TEST_AT_KB * 1024ULL) {
+    s_faultDone = true;
+    s_csv.close();
+    s_csv = SD.open(g_rec.csvName, FILE_READ);   /* writes now return 0 */
+    LOG_LIVE(LVL_WARN, "TEST: the CSV now refuses writes, as after a card error");
+  }
+#endif
+
   const uint32_t t0 = micros();
-  const size_t   n  = s_csv.write((const uint8_t *)s_buf, s_used);
-  const uint32_t dt = micros() - t0;
+  size_t n = s_csv.write((const uint8_t *)s_buf, s_used);
 
   if (n != s_used) {
-    g_rec.sdError = true;
-    LOG_LIVE(LVL_ERROR, "SD write failed: %u of %u bytes - card full or removed?",
-             (unsigned)n, (unsigned)s_used);
+    g_rec.sdWriteFails++;
+    const bool again = reopenCsv();
+    if (again) n += s_csv.write((const uint8_t *)s_buf + n, s_used - n);
+    if (n != s_used) {
+      g_rec.sdError = true;
+      g_rec.sdBytesLost += (uint32_t)(s_used - n);
+    }
+    LOG_LIVE(n == s_used ? LVL_WARN : LVL_ERROR,
+             "SD write failed at %lu KB of %s; reopened it %s - %s%lu KB not "
+             "recorded so far",
+             (unsigned long)(g_rec.bytes / 1024ULL), g_rec.csvName,
+             again ? "and wrote the block" : "- COULD NOT reopen it",
+             n == s_used ? "recovered, " : "",
+             (unsigned long)(g_rec.sdBytesLost / 1024UL));
+    if (n != s_used && !again) {
+      LOG_LIVE(LVL_ERROR, "card full or removed?");
+    }
   }
+  const uint32_t dt = micros() - t0;
   g_rec.bytes += n;
   g_rec.writeCount++;
   g_rec.sdBusyUs += dt;       /* a SUBSET of writerBusyUs - see recorder.h */
@@ -700,6 +740,12 @@ static void startRecording() {
   g_rec.syncCount  = 0;
   g_rec.syncMaxUs  = 0;
   g_rec.powerFail  = false;
+  g_rec.sdWriteFails = 0;
+  g_rec.sdBytesLost  = 0;
+  g_rec.sdError      = false;
+#if SD_FAULT_TEST_AT_KB
+  s_faultDone = false;
+#endif
 
   /* Health counters describe THIS recording. Without this, a single frame lost
    * during boot - before any file existed - would mark every later recording
@@ -745,10 +791,17 @@ static void stopRecording() {
            g_rec.csvName, (unsigned long)g_rec.rows,
            (unsigned long)(g_rec.bytes / 1024ULL), (unsigned long)secs);
   LOG_FILE(LVL_INFO, "summary: dropped=%lu queuePeak=%lu writes=%lu "
-                     "maxWrite=%lu us drainMax=%lu us",
+                     "maxWrite=%lu us drainMax=%lu us sdWriteFails=%lu "
+                     "sdBytesLost=%lu",
            (unsigned long)g_rec.queueDropped, (unsigned long)g_rec.queuePeak,
            (unsigned long)g_rec.writeCount, (unsigned long)g_rec.writeMaxUs,
-           (unsigned long)g_rec.drainMaxUs);
+           (unsigned long)g_rec.drainMaxUs, (unsigned long)g_rec.sdWriteFails,
+           (unsigned long)g_rec.sdBytesLost);
+  if (g_rec.sdBytesLost) {
+    LOG_LIVE(LVL_ERROR, "%s is INCOMPLETE: %lu KB of rows could not be written "
+                        "to the card", g_rec.csvName,
+             (unsigned long)((g_rec.sdBytesLost + 1023UL) / 1024UL));
+  }
   for (uint8_t b = 0; b < CAN_BUSES; b++) {
     const BusHealth &h = g_rec.bus[b];
     LOG_FILE(LVL_INFO, "summary CAN%u: frames=%lu ovfEvents=%lu ovfFrames>=%lu "
@@ -1010,11 +1063,19 @@ static void statusTick() {
     s_lostSeen = lost;
   }
 
+  /* Right after the file name: this line is cut at LOG_LINE_CHARS, and rows
+   * that never reached the card must not be the part that is cut. */
+  char sdLost[40] = "";
+  if (g_rec.sdBytesLost) {
+    snprintf(sdLost, sizeof(sdLost), " | SD LOST %lu KB",
+             (unsigned long)((g_rec.sdBytesLost + 1023UL) / 1024UL));
+  }
+
   if (anyOk) {
-    LOG_LIVE(anyStuck ? LVL_WARN : LVL_INFO,
-      "%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu drain=%lu us "
+    LOG_LIVE(g_rec.sdBytesLost ? LVL_ERROR : (anyStuck ? LVL_WARN : LVL_INFO),
+      "%s%s | %lu rows %lu KB | %s | %s | q=%lu/%u peak=%lu drain=%lu us "
       "write=%lu us | lost %lu%s",
-      state,
+      state, sdLost,
       (unsigned long)g_rec.rows, (unsigned long)(g_rec.bytes / 1024ULL),
       perBus[0], perBus[1],
       (unsigned long)qNow, (unsigned)FRAME_QUEUE_LEN,

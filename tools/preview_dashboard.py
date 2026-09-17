@@ -734,7 +734,7 @@ def main():
         # The firmware sends the health counters here as well, so the dashboard
         # is one request rather than two. Mirror that, minus the big tables.
         st = make_status()
-        for k in ("rec", "sd", "sdErr", "sdType", "sdMB", "lost", "qDrop",
+        for k in ("rec", "sd", "sdErr", "sdLost", "sdType", "sdMB", "lost", "qDrop",
                   "drain", "risk", "file", "elapsed", "rows", "kb", "pf",
                   "up", "heap", "ap", "ip", "fw"):
             d[k] = st[k]
@@ -815,7 +815,7 @@ def main():
         ]
 
         return {
-            "sd": 1, "sdErr": 0, "sdType": "SDHC", "sdMB": 15193,
+            "sd": 1, "sdErr": 0, "sdLost": 0, "sdType": "SDHC", "sdMB": 15193,
             "rec": 1, "file": "1.csv", "elapsed": int(t),
             "rows": int(t * 220), "kb": int(t * 15), "pf": 0, "risk": 1000,
             "lost": 0, "qDrop": 0, "qPeak": 61, "qLen": 2048,

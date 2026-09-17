@@ -1754,7 +1754,8 @@ function paintHealth(d){
   if(!d.sd){ setDot('d_sd','bad'); q('t_sd').textContent = 'NOT FOUND';
              q('s_sd').textContent = 'Insert a FAT32 card and restart'; }
   else if(d.sdErr){ setDot('d_sd','bad'); q('t_sd').textContent = 'WRITE ERROR';
-             q('s_sd').textContent = 'Card may be full or was removed'; }
+             q('s_sd').textContent = (d.sdLost ? d.sdLost + ' KB of rows not '
+               + 'recorded - ' : '') + 'card may be full or was removed'; }
   else { setDot('d_sd','ok'); q('t_sd').textContent = 'READY';
              q('s_sd').textContent = d.sdType + ', ' + (d.sdMB/1024).toFixed(1) + ' GB'; }
 

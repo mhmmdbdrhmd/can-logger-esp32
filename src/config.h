@@ -213,6 +213,13 @@
 #define BUNDLE_TMP_PATH     "/logger.tmp"   /* an upload, until it is complete */
 #define BUNDLE_DONE_PATH    "/logger.applied" /* a bundle, once unpacked       */
 
+/* TEST ONLY. Once the CSV passes this many KB, the next write is made to fail
+ * the way a card error leaves a file on FatFS - every later write refused -
+ * so the recovery can be exercised on a bench. 0 = off; never ship it on. */
+#ifndef SD_FAULT_TEST_AT_KB
+#define SD_FAULT_TEST_AT_KB 0
+#endif
+
 /* CEILINGS on the frame map, not its size.
  *
  * The tables are counted from the file and allocated to fit it (see dbc.h), so

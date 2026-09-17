@@ -93,6 +93,11 @@ struct RecStatus {
   /* ---- storage ---- */
   bool     sdOk        = false;
   bool     sdError     = false;   /* a write failed after mounting          */
+  /* CSV writes that failed, and the bytes that could not be written even
+   * after reopening the file - rows that are NOT in the recording. Reset per
+   * recording. */
+  uint32_t sdWriteFails = 0;
+  uint32_t sdBytesLost  = 0;
   uint64_t sdSizeMB    = 0;
   const char *sdType   = "-";
 

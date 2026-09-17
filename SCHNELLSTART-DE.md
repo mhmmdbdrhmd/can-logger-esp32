@@ -126,7 +126,7 @@ nummeriert: `1.csv`, `2.csv`, …, jeweils mit einer `1.log` daneben.
 Am seriellen Monitor (115200 Baud) erscheint einmal pro Sekunde eine Zeile:
 
 ```
-[   142.003] I REC 1.csv 00:02:21 | 141000 rows 3672 KB | 220 f/s | 7 ids | lost 0
+[   142.003] I REC 1.csv 00:02:21 | lost 0 | 141000 rows 3672 KB | 220 f/s | 7 ids
 ```
 
 **`lost 0` ist die wichtige Zahl.** Sie bedeutet, dass nachweislich kein

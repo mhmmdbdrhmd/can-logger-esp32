@@ -1058,8 +1058,8 @@ def main():
                 since = int(m.group(1)) if m else 0
                 tick = int(time.time() - t0)
                 lines = base_log + [
-                    f"[{i:10.3f}] I REC 1.csv 00:00:{i:02d} | {i*220} rows "
-                    f"{i*15} KB | 220 f/s | {len(maps[0]['m'])+1} ids | lost 0"
+                    f"[{i:10.3f}] I REC 1.csv 00:00:{i:02d} | lost 0 | {i*220} rows "
+                    f"{i*15} KB | 220 f/s | {len(maps[0]['m'])+1} ids"
                     for i in range(2, tick + 2)
                 ]
                 self._json({"seq": len(lines), "lines": lines[since:]})

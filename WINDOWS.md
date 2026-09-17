@@ -430,7 +430,7 @@ Press the board's `EN`/`RST` button — the banner only prints at boot. You shou
 see:
 
 ```
-[     0.412] I ==== Dual CAN Logger ESP32 v2.0.1 ====
+[     0.412] I ==== Dual CAN Logger ESP32 v2.0.2 ====
 [     0.690] I SD card OK: SDHC, 15193 MB
 [     0.741] I CAN1 frame map: 6 messages, 19 signals from /frames.dbc
 [     0.758] I CAN2: no /frames2.dbc on the card - recording raw payload bytes.
@@ -451,7 +451,7 @@ Then connect a phone or laptop to the Wi-Fi network **`CAN-Logger`**
 From then on it is one status line per second:
 
 ```
-[   142.003] I REC 1.csv 00:02:21 | 141000 rows 3672 KB | 220 f/s | 7 ids | lost 0
+[   142.003] I REC 1.csv 00:02:21 | lost 0 | 141000 rows 3672 KB | 220 f/s | 7 ids
 ```
 
 ---

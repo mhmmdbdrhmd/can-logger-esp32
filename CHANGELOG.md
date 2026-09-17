@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.0.2 — a failed Send no longer costs frames, and a recovered SD write no longer breaks a row
+
+- **A Send that loses arbitration no longer loses received frames.** On a busy
+  bus a Send can lose arbitration on all three attempts. The receive buffers
+  were emptied while a send was waiting, but not between attempts and not
+  after the last one, and writing the error line took long enough for the
+  controller to overflow. On the bench, 220 failed sends cost 69 frames in one
+  10-minute recording. The buffers are now emptied after every attempt and
+  after the logging that follows a send. The same bench, with 117 failed sends
+  in 10 minutes, recorded `lost 0`. `test_mcp2515.cpp` checks the drains.
+- **A recovered SD write no longer duplicates bytes.** When a write fails, the
+  card may already hold the start of the block. The recovery added in v2.0.1
+  wrote the whole block again, and on the bench 29 bytes appeared twice and
+  broke one row. The recovery now reads the file's length on the card and
+  continues from there. Bytes the card dropped before the block are counted as
+  lost. `SD_FAULT_TEST_AT_KB` now lets part of the block reach the card before
+  the failure, which is how it happened. `test_sdutil.cpp` covers the
+  arithmetic.
+- **`lost` comes first on the status line.** The line is cut at
+  `LOG_LINE_CHARS`, and with `lost` at the end, `lost 69` was printed as
+  `lost 6`. It now follows the time: `REC 1.csv 00:02:21 | lost 0 | ...`.
+
 ## v2.0.1 — nothing the layout uses is trimmed, and a failed SD write is recovered
 
 - **Trimming keeps what the dashboard and the Send tab use.** The Web UI sheet

@@ -1,6 +1,6 @@
 <h1 align="center">dual-can-logger-esp32</h1>
 <p align="center"><i>ESP32 logger for two CAN buses at once, with optional DBC decoding</i></p>
-<p align="center"><img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <img alt="release" src="https://img.shields.io/badge/release-v2.0.1-8957E5?style=flat-square"></p>
+<p align="center"><img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <img alt="release" src="https://img.shields.io/badge/release-v2.0.2-8957E5?style=flat-square"></p>
 
 > Log **two CAN buses at once** to one SD card, on one clock, with **nothing
 > bus-specific compiled in** — identifiers, scaling and units all come from DBC
@@ -462,7 +462,7 @@ and Windows all send the same bytes, so the same two commands do it everywhere:
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image dual-can-logger-esp32-v2.0.1-4mb-merged.bin
+python3 tools/flash.py --image dual-can-logger-esp32-v2.0.2-4mb-merged.bin
 ```
 
 It finds the board itself, and says what to try if the chip never enters
@@ -637,7 +637,7 @@ The serial stream is deliberately one line per second so it stays informative
 without becoming an I/O cost of its own:
 
 ```
-[   142.003] I REC 1.csv 00:02:21 | 141000 rows 3672 KB | CAN1 rx=358/s irq=358/s 14% | CAN2 rx=143/s irq=143/s 42% | q=61/2048 peak=124 drain=112 us | lost 0
+[   142.003] I REC 1.csv 00:02:21 | lost 0 | 141000 rows 3672 KB | CAN1 rx=358/s irq=358/s 14% | CAN2 rx=143/s irq=143/s 42% | q=61/2048 peak=124 drain=112 us
 ```
 
 Both buses on one line, each with its own frame rate, interrupt rate and load,
@@ -1409,6 +1409,12 @@ logger than one that cannot send at all.
 One-shot attempts the frame once, so TEC moves by 8 and the failure is reported
 instead of escalating. Losing arbitration is retried in software up to
 `TX_ATTEMPTS` times, because on a busy bus that is normal and is not a failure.
+
+A send runs in the CAN task, so it is time away from receiving. The receive
+buffers are emptied while the controller works on the frame, after every lost
+attempt, and after the send is logged. The last two were missing before
+v2.0.2: on a bench bus at 350 frames/s, 220 sends that lost every attempt cost
+69 received frames in 10 minutes. With them, 117 such sends cost none.
 The answer comes back as one of:
 
 | | |
@@ -1983,10 +1989,12 @@ wiring, bit timing and throughput figures are reasoned from the datasheets and
 the code, not measured by me.
 
 **NOT verified — transmitting to a real ECU.** The encoder is proven against its
-own decoder and the driver against a simulated controller, but no frame from this
-firmware has been put on a real wire or acknowledged by a real node. The one-shot
-and bus-off reasoning comes from the MCP2515 datasheet, not from a scope. Bench
-it against a node you can afford to confuse before pointing it at a machine.
+own decoder and the driver against a simulated controller. On a bench bus, raw
+frames on an identifier no node uses were sent thousands of times at up to 5 a
+second and acknowledged, while the logger recorded the bus without loss. No
+frame has been sent to a node that acts on it, and the one-shot and bus-off
+reasoning comes from the MCP2515 datasheet, not from a scope. Bench it against
+a node you can afford to confuse before pointing it at a machine.
 
 **NOT verified — the power-cut path specifically.** The sync interval, the
 emergency-close sequence and the hold-up capacitor sizing are reasoned from how

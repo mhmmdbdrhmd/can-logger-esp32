@@ -38,24 +38,41 @@ bool busLastPayload(const BusStats &, uint32_t, bool, uint8_t *, uint8_t *) { re
 
 static int fails = 0;
 
+static std::string slurp(const char *path) {
+  std::string t;
+  FILE *f = fopen(path, "rb");
+  if (!f) return t;
+  int c;
+  while ((c = fgetc(f)) != EOF) t += (char)c;
+  fclose(f);
+  return t;
+}
+
 static void ck(const char *what, bool ok, const std::string &detail = "") {
   printf("  %-4s %s%s%s\n", ok ? "ok" : "FAIL", what,
          detail.empty() ? "" : " - ", detail.c_str());
   if (!ok) fails++;
 }
 
-/* A controller that answers every send the same way. */
+/* A controller that answers every send the same way, and keeps what it was
+   handed - the payload is the point of the group test below. */
 struct FakeCan {
   MCP2515::TxResult answer = MCP2515::TX_ARB_LOST;
   int sends = 0;
+  MCP2515::TxResult thenAnswer = MCP2515::TX_ARB_LOST;
+  int switchAfter = -1;             /* answer thenAnswer from this send on */
+  CanFrame last[8];
 };
 static FakeCan s_fake;
 
 /* MCP2515 is a real class here; only the two calls cantx makes are needed, so
  * they are defined for this binary instead of linking the driver. */
-MCP2515::TxResult MCP2515::sendFrame(const CanFrame &, uint8_t, int16_t *tec) {
+MCP2515::TxResult MCP2515::sendFrame(const CanFrame &f, uint8_t, int16_t *tec) {
+  if (s_fake.sends < 8) s_fake.last[s_fake.sends] = f;
   s_fake.sends++;
   if (tec) *tec = 0;
+  if (s_fake.switchAfter >= 0 && s_fake.sends > s_fake.switchAfter)
+    return s_fake.thenAnswer;
   return s_fake.answer;
 }
 bool MCP2515::canTransmit() { return true; }
@@ -131,6 +148,78 @@ int main() {
     txService(can, 0);
     ck("sent once, counted once", s_fake.sends == 1 && g_tx.sent == 1,
        "sends=" + std::to_string(s_fake.sends));
+  }
+
+  printf("\n== a retry sends the frame that was built, not a rebuilt one ==\n");
+  {
+    /* The case that makes this matter: two values that share one frame. The
+       first is HELD, the second completes the frame and sends it. A retry that
+       rebuilds finds the held value gone - the frame goes out with the second
+       value and a zeroed first one, which on a multiplexed command is a valid
+       frame carrying wrong numbers. */
+    DbcDb &db = g_dbc[0];
+    std::string dbc = slurp("examples/machine.dbc");
+    std::string cfg = slurp("examples/dash.cfg");
+    dbcLoadText(db, dbc.c_str(), dbc.size());
+    dashReset(g_dash);
+    dashParse(g_dash, cfg.c_str(), cfg.size());
+    DbcDb maps[CAN_BUSES];
+    for (int i = 0; i < CAN_BUSES; i++) maps[i] = db;
+    dashResolve(g_dash, maps);
+    txArm(true, "test");
+
+    /* Send 0 is TyreSize, send 1 is SpeedLimit - both in MachineConfig. */
+    ck("the example layout has the two values this needs",
+       txCommandUsed(g_dash.tx[0]) && txCommandUsed(g_dash.tx[1]));
+
+    s_fake.answer      = MCP2515::TX_ARB_LOST;   /* lose the first pass  */
+    s_fake.thenAnswer  = MCP2515::TX_OK;         /* win the second       */
+    s_fake.switchAfter = 1;
+    s_fake.sends       = 0;
+    g_tx.sent = g_tx.failed = 0;
+    const uint8_t ring0 = g_tx.ringCount;
+
+    txSendPart(0, 690.0f, true);      /* held: writes into the frame  */
+    txSendPart(1, 8.0f,  false);      /* completes it and sends       */
+    txService(can, 0);                /* pass 1: lost arbitration     */
+    txService(can, 0);                /* pass 2: goes out             */
+
+    ck("it was sent on the second pass", s_fake.sends == 2 && g_tx.sent == 1,
+       "sends=" + std::to_string(s_fake.sends));
+    bool same = true;
+    for (int i = 0; i < 8; i++) if (s_fake.last[0].data[i] != s_fake.last[1].data[i]) same = false;
+    char a[32], b[32];
+    snprintf(a, sizeof(a), "%02X%02X%02X%02X%02X%02X%02X%02X",
+             s_fake.last[0].data[0], s_fake.last[0].data[1], s_fake.last[0].data[2],
+             s_fake.last[0].data[3], s_fake.last[0].data[4], s_fake.last[0].data[5],
+             s_fake.last[0].data[6], s_fake.last[0].data[7]);
+    snprintf(b, sizeof(b), "%02X%02X%02X%02X%02X%02X%02X%02X",
+             s_fake.last[1].data[0], s_fake.last[1].data[1], s_fake.last[1].data[2],
+             s_fake.last[1].data[3], s_fake.last[1].data[4], s_fake.last[1].data[5],
+             s_fake.last[1].data[6], s_fake.last[1].data[7]);
+    ck("and the retry carried the SAME payload, held value and all", same,
+       std::string("first ") + a + ", retry " + b);
+    ck("the held value is actually in there (not a pair of zeroes)",
+       s_fake.last[1].data[0] != 0 || s_fake.last[1].data[1] != 0,
+       std::string("payload ") + b);
+
+    /* One outcome for one ticket. The dashboard keeps the first it sees, so a
+       recorded loss on the retried pass reports a Send that went out as
+       failed. */
+    int forTicket = 0, failedRecords = 0;
+    for (int i = 0; i < TX_RESULT_RING; i++) {
+      const TxOutcome &o = g_tx.ring[i];
+      if (o.ticket == 0 || o.status == TXS_PENDING) continue;
+      if (o.cmd == 1) {
+        forTicket++;
+        if (o.status != TXS_OK) failedRecords++;
+      }
+    }
+    ck("exactly one outcome was recorded for it, and it says OK",
+       forTicket == 1 && failedRecords == 0,
+       "records=" + std::to_string(forTicket) +
+       " failures=" + std::to_string(failedRecords));
+    (void)ring0;
   }
 
   printf("\n%s (%d failure%s)\n", fails ? "FAILED" : "ALL PASSED",

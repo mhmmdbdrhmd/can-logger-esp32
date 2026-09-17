@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.0.3 — the retry added in v2.0.2 could send the wrong payload
+
+**Use this instead of v2.0.2 if you use the Send tab.** The retry across CAN
+passes that v2.0.2 introduced was wrong in two ways, both found in review of
+that release and both reproduced on the host:
+
+- **A retried Send rebuilt its frame, and a grouped or multiplexed command
+  rebuilt into the wrong bytes.** Several values that share one frame are
+  assembled in a holding buffer, and that buffer is consumed when the frame
+  goes out. A retry built the frame a second time, found the held values gone,
+  and transmitted the selector with a zeroed payload — a valid-looking command
+  carrying wrong numbers to whatever acts on it. A retry now carries the frame
+  that was already built and sends exactly those bytes.
+- **A retried Send was reported as failed even when it went out.** The outcome
+  was recorded before the decision to retry, so the dashboard — which keeps the
+  first result it sees for a ticket — showed "the bus was too busy to get on"
+  for a Send that succeeded a pass later. Nothing is recorded now until the
+  result is final. This also stops one retried Send filling the four-deep
+  result ring and evicting every other Send's outcome.
+- A retry that cannot be put back (the request queue is full) is reported as a
+  failure instead of disappearing silently.
+- A cyclic repeat is marked "do not retry" with its own flag, so the failure
+  line no longer claims a cyclic send was "retried on later passes too".
+- `test/test_cantx.cpp` covers all of it, including a real grouped send built
+  from `examples/machine.dbc`: with the fix removed, the test reports the held
+  value going out as zero.
+
 ## v2.0.2 — a failed Send no longer costs frames, and a recovered SD write no longer breaks a row
 
 - **A Send that loses arbitration no longer loses received frames.** On a busy

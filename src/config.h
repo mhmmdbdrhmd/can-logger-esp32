@@ -684,4 +684,4 @@
 #define PROF_LIVE_LINE      0
 
 #define FIRMWARE_NAME    "Dual CAN Logger ESP32"
-#define FIRMWARE_VERSION "2.0.2"
+#define FIRMWARE_VERSION "2.0.3"

@@ -13,6 +13,18 @@ TxState g_tx;
 struct TxRequest {
   uint32_t ticket;
   uint8_t  tries;        /* passes of the CAN task this one has cost already */
+  uint8_t  noRetry;      /* 1 = never put back, whatever happens            */
+
+  /* A retry carries the frame that was already built rather than building it
+   * again. Rebuilding is not equivalent: a grouped or multiplexed command is
+   * assembled from values held in s_pending, and that buffer is consumed when
+   * the frame is sent - a second build would put the selector on the wire with
+   * a zeroed payload, which is a valid-looking command carrying wrong values. */
+  uint8_t  built;        /* 1 = frame, applied and clamped below are valid   */
+  uint8_t  clamped;
+  float    applied;
+  CanFrame frame;
+
   uint8_t  cmd;          /* index into g_dash.tx, or 0xFF for a raw frame */
   uint8_t  bus;          /* which controller sends it: 0 = CAN1, 1 = CAN2  */
   uint8_t  hold;         /* 1 = write into the frame but do not send it yet */
@@ -327,7 +339,7 @@ static bool buildSignalFrame(const TxCommand &c, uint8_t bus, float value,
 
 /* True when the caller should put this request back for a later pass: it lost
  * arbitration every attempt and has passes left. */
-static bool perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
+static bool perform(MCP2515 &can, uint8_t bus, TxRequest &r) {
   TxPending &pend = s_pending[bus];
 
   TxOutcome o;
@@ -354,7 +366,13 @@ static bool perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
   float    applied = r.value;
   bool     clamped = false;
 
-  if (r.cmd == TX_RAW_CMD) {
+  if (r.built) {
+    /* A pass that already built this one: nothing is rebuilt, and nothing is
+     * taken from the group buffer a second time. */
+    f       = r.frame;
+    applied = r.applied;
+    clamped = r.clamped != 0;
+  } else if (r.cmd == TX_RAW_CMD) {
     memset(&f, 0, sizeof(f));
     f.id  = r.id;
     f.ext = r.ext;
@@ -422,18 +440,28 @@ static bool perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
   o.clamped  = clamped ? 1 : 0;
   o.tecDelta = tec;
   memcpy(o.data, f.data, 8);
+
+  /* Losing arbitration is not the frame's fault and not the bus's: a burst was
+   * in the way. The attempts inside sendFrame() are back to back, so all of
+   * them land inside that same burst. Giving it back to the queue costs
+   * nothing and tries again on a later pass, after the receive path has been
+   * drained and the burst has had time to end.
+   *
+   * Decided BEFORE record(). The dashboard keys outcomes on the ticket and
+   * keeps the first one it sees for that ticket, so recording this pass would
+   * report a Send that then went out perfectly well as having failed. */
+  if (res == MCP2515::TX_ARB_LOST && !r.noRetry && r.tries < TX_RETRY_PASSES) {
+    r.built   = 1;
+    r.frame   = f;
+    r.applied = applied;
+    r.clamped = clamped ? 1 : 0;
+    MCP2515::serviceBusy();
+    return true;
+  }
+
   record(o);
 
   if (res != MCP2515::TX_OK) {
-    /* Losing arbitration is not the frame's fault and not the bus's: a burst
-     * was in the way. The attempts inside sendFrame() are back to back, so all
-     * of them land inside that same burst. Giving it back to the queue costs
-     * nothing and tries again on a later pass, after the receive path has been
-     * drained and the burst has had time to end. */
-    if (res == MCP2515::TX_ARB_LOST && r.tries < TX_RETRY_PASSES) {
-      MCP2515::serviceBusy();
-      return true;
-    }
     g_tx.failed++;
     LOG_LIVE(LVL_ERROR, "TX CAN%u 0x%lX failed: %s%s", (unsigned)(bus + 1),
              (unsigned long)f.id, txStatusText(o.status),
@@ -515,9 +543,15 @@ void txService(MCP2515 &can, uint8_t bus) {
         /* Held, not requeued here: the queue is drained in this loop, so a
          * request put straight back would be picked up again in the same pass
          * and lose to the same burst. requeueOthers() runs after the loop. */
-        if (perform(can, bus, r) && nHeld < TX_QUEUE_LEN) {
-          r.tries++;
-          held[nHeld++] = r;
+        if (perform(can, bus, r)) {
+          if (nHeld < TX_QUEUE_LEN) {
+            r.tries++;
+            held[nHeld++] = r;
+          } else {
+            /* Nowhere to put it back. Reported rather than dropped: a Send
+             * that simply disappears is worse than one that says it failed. */
+            (void)refuse(r.cmd, r.bus, r.value, TXS_QUEUE_FULL);
+          }
         }
       } else if (nHeld < TX_QUEUE_LEN) {
         held[nHeld++] = r;
@@ -553,8 +587,9 @@ void txService(MCP2515 &can, uint8_t bus) {
     r.bus    = bus;
     r.value  = g_tx.cyclicValue[i];
     /* A cyclic repeat is not retried across passes: the next period is along
-     * in a few milliseconds and carries the same value. */
-    r.tries = TX_RETRY_PASSES;
+     * in a few milliseconds and carries the same value. Its own flag, so that
+     * `tries` keeps meaning what it says - the failure line below reads it. */
+    r.noRetry = 1;
     (void)perform(can, bus, r);
   }
 }

@@ -18,8 +18,10 @@ by this one has an extra column.
   cannot hold it whole, cells that would no longer resolve left out.
 - **The Web UI badge predicts from the maps** (`tools/heap_model.py`) whether
   the logger will keep serving the page while it records, for name lengths 64,
-  32 and 16, and offers the fixes as buttons: trim `frames.dbc` or
-  `frames2.dbc` - never a message the layout uses - or a shorter name length.
+  32 and 16, and offers the fixes as buttons: trim `frames.dbc`,
+  `frames2.dbc` or both, or a shorter name length. A trim never drops a
+  message that a dashboard cell or a sendable value uses, and the page sends
+  any layout change still waiting to be saved before it trims.
 - **Export writes one file, `logger.bundle`**: both maps, the layout and the
   name length (`tools/make_bundle.py`). Names too long for the length are
   **abbreviated**, not cut (`tools/dbc_abbrev.py`: `EngineCoolantTemperature`

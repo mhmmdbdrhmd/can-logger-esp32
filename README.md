@@ -1073,10 +1073,17 @@ Then fix the inputs: the one that should be a list of four tyre sizes becomes
 or **AT RISK** for these maps — see
 [keeping the dashboard reachable](#keeping-the-dashboard-reachable). The sheet
 behind it shows the answer for each name length, and when the answer is no, it
-offers the ways out as buttons: **trim** `frames.dbc` or `frames2.dbc` (the
-messages the layout uses are always kept; the rest go largest first), or a
-**shorter name length**. Nothing is lost from the recording either way — frames
-a trimmed map no longer names are still written whole, as raw bytes.
+offers the ways out as buttons: **trim** `frames.dbc`, `frames2.dbc` or both,
+at this name length or a shorter one, or just a **shorter name length**. Each
+button says how many signals each map keeps, so the trade-off is visible.
+
+Build the dashboard and the sendable values **before** trimming: a trim never
+drops a message that a dashboard cell or a sendable value uses — it keeps that
+message whole, so a setpoint keeps the signals it shares a frame with — and
+takes the largest of the others first. Nothing is lost from the recording
+either way: frames a trimmed map no longer names are still written whole, as
+raw bytes. If the messages the layout uses are on their own too much, the sheet
+says so, and the way out is fewer cells or setpoints.
 
 **6. Preview it.** *Preview*, in the header, shows the page the way the logger
 will: the maps as the export carries them, names shortened to the chosen

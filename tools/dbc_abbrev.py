@@ -88,7 +88,7 @@ NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 
 
 def split_words(name):
-    """-> (words, separator). RION_Accel_X -> (['RION','Accel','X'], '_');
+    """-> (words, separator). IMU_Accel_X -> (['IMU','Accel','X'], '_');
     EngineCoolantTemp -> (['Engine','Coolant','Temp'], '')."""
     if "_" in name.strip("_"):
         return [w for w in name.split("_") if w], "_"

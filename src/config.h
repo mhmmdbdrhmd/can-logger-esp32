@@ -590,8 +590,41 @@
 
 /* Attempts before a send is reported as having lost arbitration. Losing it once
  * on a busy bus is normal; losing it three times running means the identifier
- * is too low a priority to get on the wire. */
+ * is too low a priority to get on the wire.
+ *
+ * These are attempts back to back, inside one pass of the CAN task. A burst
+ * from a sensor lasts longer than that, so on a bus whose traffic is bursty
+ * they are all spent inside the same burst - which is why the second knob
+ * exists and why raising this one does less than it looks. */
+#ifndef TX_ATTEMPTS
 #define TX_ATTEMPTS         3
+#endif
+
+/* How many further passes of the CAN task may retry a send that lost
+ * arbitration every time. The request goes back on the queue and is tried
+ * again on the next pass, which is after the receive buffers have been drained
+ * and, at 350 frames/s, a few milliseconds later - long enough for a burst to
+ * end, where more immediate attempts only land inside the same burst.
+ *
+ * Measured on the bench, twice, at 5 sends/s into a bursty 350 frames/s bus.
+ * Two rounds in the same order because the bus phase drifts over minutes and
+ * one round would credit whichever arm ran in a quiet stretch - round 2 caught
+ * the bad phase, which is what makes it the useful one:
+ *
+ *                              round 1        round 2
+ *     3 attempts, no passes    9 failed       602 of 1265 failed
+ *     6 attempts, no passes    1 failed       1 failed
+ *     3 attempts, 3 passes     0 failed       0 failed
+ *
+ * No frames were lost in any of the six runs. Six attempts back to back work
+ * nearly as well and were not taken: on a bus with nothing to acknowledge a
+ * frame, each attempt waits the full 20 ms, so six of them block the receive
+ * path for 120 ms. Passes cost nothing while the bus is quiet.
+ *
+ * 0 restores the old behaviour. */
+#ifndef TX_RETRY_PASSES
+#define TX_RETRY_PASSES     3
+#endif
 
 /* ---------------------------------------------------------------------------
  *  14. WEB SERVER AND MEMORY

@@ -12,6 +12,7 @@ TxState g_tx;
  * value - nothing here points at anything that could be freed underneath it. */
 struct TxRequest {
   uint32_t ticket;
+  uint8_t  tries;        /* passes of the CAN task this one has cost already */
   uint8_t  cmd;          /* index into g_dash.tx, or 0xFF for a raw frame */
   uint8_t  bus;          /* which controller sends it: 0 = CAN1, 1 = CAN2  */
   uint8_t  hold;         /* 1 = write into the frame but do not send it yet */
@@ -324,7 +325,9 @@ static bool buildSignalFrame(const TxCommand &c, uint8_t bus, float value,
   return true;
 }
 
-static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
+/* True when the caller should put this request back for a later pass: it lost
+ * arbitration every attempt and has passes left. */
+static bool perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
   TxPending &pend = s_pending[bus];
 
   TxOutcome o;
@@ -343,7 +346,7 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
     pend.msg = -1;      /* an abandoned group leaves nothing behind */
     pend.mux = -1;
     record(o);
-    return;
+    return false;
   }
 
   CanFrame f;
@@ -376,7 +379,7 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
       pend.mux = -1;
       record(o);
       g_tx.failed++;
-      return;
+      return false;
     }
 
     /* Hold the frame for the next member of the group. Nothing goes on the
@@ -400,7 +403,7 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
       o.clamped = clamped ? 1 : 0;
       memcpy(o.data, f.data, 8);
       record(o);
-      return;
+      return false;
     }
   }
 
@@ -422,15 +425,25 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
   record(o);
 
   if (res != MCP2515::TX_OK) {
+    /* Losing arbitration is not the frame's fault and not the bus's: a burst
+     * was in the way. The attempts inside sendFrame() are back to back, so all
+     * of them land inside that same burst. Giving it back to the queue costs
+     * nothing and tries again on a later pass, after the receive path has been
+     * drained and the burst has had time to end. */
+    if (res == MCP2515::TX_ARB_LOST && r.tries < TX_RETRY_PASSES) {
+      MCP2515::serviceBusy();
+      return true;
+    }
     g_tx.failed++;
-    LOG_LIVE(LVL_ERROR, "TX CAN%u 0x%lX failed: %s", (unsigned)(bus + 1),
-             (unsigned long)f.id, txStatusText(o.status));
+    LOG_LIVE(LVL_ERROR, "TX CAN%u 0x%lX failed: %s%s", (unsigned)(bus + 1),
+             (unsigned long)f.id, txStatusText(o.status),
+             r.tries ? " (retried on later passes too)" : "");
     /* A send that lost arbitration every time was made in the middle of a
      * burst, and the burst is still arriving. Formatting that line took long
      * enough to overflow the controller: measured on the bench, one failed
      * send in three cost a frame before this was here. */
     MCP2515::serviceBusy();
-    return;
+    return false;
   }
 
   g_tx.sent++;
@@ -455,6 +468,7 @@ static void perform(MCP2515 &can, uint8_t bus, const TxRequest &r) {
              (unsigned long)f.id, (unsigned)f.len);
   }
   MCP2515::serviceBusy();          /* the same reason as the failure above */
+  return false;
 }
 
 void txBegin() {
@@ -498,7 +512,13 @@ void txService(MCP2515 &can, uint8_t bus) {
 
     while (xQueueReceive(s_queue, &r, 0) == pdTRUE) {
       if (r.bus == bus) {
-        perform(can, bus, r);
+        /* Held, not requeued here: the queue is drained in this loop, so a
+         * request put straight back would be picked up again in the same pass
+         * and lose to the same burst. requeueOthers() runs after the loop. */
+        if (perform(can, bus, r) && nHeld < TX_QUEUE_LEN) {
+          r.tries++;
+          held[nHeld++] = r;
+        }
       } else if (nHeld < TX_QUEUE_LEN) {
         held[nHeld++] = r;
       } else {
@@ -532,6 +552,9 @@ void txService(MCP2515 &can, uint8_t bus) {
     r.cmd    = i;
     r.bus    = bus;
     r.value  = g_tx.cyclicValue[i];
-    perform(can, bus, r);
+    /* A cyclic repeat is not retried across passes: the next period is along
+     * in a few milliseconds and carries the same value. */
+    r.tries = TX_RETRY_PASSES;
+    (void)perform(can, bus, r);
   }
 }

@@ -1410,6 +1410,25 @@ One-shot attempts the frame once, so TEC moves by 8 and the failure is reported
 instead of escalating. Losing arbitration is retried in software up to
 `TX_ATTEMPTS` times, because on a busy bus that is normal and is not a failure.
 
+Those attempts are back to back, inside one pass of the CAN task, so on a bus
+whose traffic arrives in bursts they are all spent inside the same burst. A
+send that loses them all therefore goes back on the queue and is tried again on
+a later pass — `TX_RETRY_PASSES`, three of them — after the receive buffers
+have been drained and a few milliseconds have passed. Measured twice at 5
+sends/s into a bursty 350 frames/s bus, the second round catching the bus in a
+bad phase:
+
+| | round 1 | round 2 |
+|---|---|---|
+| 3 attempts, no later passes | 9 failed | **602 of 1265 failed** |
+| 6 attempts, no later passes | 1 failed | 1 failed |
+| 3 attempts, 3 later passes | **0 failed** | **0 failed** |
+
+No frames were lost in any of the six runs. More attempts back to back is the
+obvious alternative and was not taken: against a node that never acknowledges,
+each attempt waits the full 20 ms, so six of them hold the receive path for
+120 ms — while a later pass costs nothing at all.
+
 A send runs in the CAN task, so it is time away from receiving. The receive
 buffers are emptied while the controller works on the frame, after every lost
 attempt, and after the send is logged. The last two were missing before
@@ -1421,7 +1440,7 @@ The answer comes back as one of:
 |---|---|
 | **sent and acknowledged** | at least one other node ACKed it, and TEC went *down* — which is the independent evidence, not just a status bit |
 | **nothing on the bus acknowledged it** | the ACK slot stayed empty. The most common reason a Send does not work, so it gets its own answer rather than a generic bus error |
-| **the bus was too busy to get on** | lost arbitration every attempt |
+| **the bus was too busy to get on** | lost arbitration on every attempt, and on `TX_RETRY_PASSES` later passes as well |
 | **listen-only mode** | `CAN1_LISTEN_ONLY` / `CAN2_LISTEN_ONLY` is set for that bus, so the logger physically cannot drive it. Said out loud, rather than failing quietly |
 
 ### Encoding

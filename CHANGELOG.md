@@ -37,6 +37,14 @@
   700 ms, so it still gets more than 20 lines a second.
 - The host test that checks a handler emits no field twice now sees field
   names with an underscore.
+- **A Send that loses arbitration is retried on a later pass of the CAN task**
+  (`TX_RETRY_PASSES`, 3), after the receive buffers have been drained and long
+  enough for a burst to end. The attempts inside `sendFrame()` are back to
+  back, so on a bursty bus they are all spent inside the same burst. Measured
+  twice at 5 sends/s into a bursty 350 frames/s bus: 9 and 602 failed sends
+  without it, 0 and 0 with it, no frames lost either way. Six attempts back to
+  back scored 1 and 1 and were not taken - on a bus that acknowledges nothing,
+  six attempts block the receive path for 120 ms.
 
 ## v2.0.1 — nothing the layout uses is trimmed, and a failed SD write is recovered
 

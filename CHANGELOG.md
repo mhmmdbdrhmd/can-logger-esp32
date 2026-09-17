@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.0.1 — nothing the layout uses is trimmed, and a failed SD write is recovered
+
+- **Trimming keeps what the dashboard and the Send tab use.** The Web UI sheet
+  can now trim both frame maps together when neither alone is enough, and it
+  lists each trade-off it found - both maps at the current name length, or one
+  map with shorter names - with how many signals each map keeps. A message
+  that a dashboard cell or a sendable value names is never dropped, and is
+  kept whole. The page saves any layout change still waiting before it trims,
+  previews or exports. When the messages the layout uses are too much on their
+  own, the sheet says so. `test/test_desk.py` pins the largest messages in a
+  layout and checks that nothing it uses is lost.
+- **A failed SD write no longer stops the recording in silence.** FatFS keeps
+  an error on an open file once a write fails and refuses every later write to
+  it. On a bench board, one card error four and a half minutes into a
+  recording left the CSV frozen for the rest of it, while the `.log` beside it
+  carried on and the status line said `lost 0`. The CSV is now reopened for
+  appending and the write retried. Anything that still cannot be written is
+  counted: `SD LOST n KB` on the status line, on the page's SD card, in
+  `/api/status` as `sdLost`, and in a closing line that calls the file
+  incomplete. `SD_FAULT_TEST_AT_KB` injects the failure for a bench test.
+- The core no longer prints "does not exist" errors when the firmware removes
+  or checks for a file that is not there.
+
 ## v2.0.0 — two buses
 
 The logger now records **two CAN buses at once**, on one clock, into one file.

@@ -1,6 +1,6 @@
 <h1 align="center">dual-can-logger-esp32</h1>
 <p align="center"><i>ESP32 logger for two CAN buses at once, with optional DBC decoding</i></p>
-<p align="center"><img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <img alt="release" src="https://img.shields.io/badge/release-v2.0.0-8957E5?style=flat-square"></p>
+<p align="center"><img alt="platform" src="https://img.shields.io/badge/platform-ESP32-E7352C?style=flat-square"> <img alt="framework" src="https://img.shields.io/badge/framework-Arduino%20%7C%20PlatformIO-00979D?style=flat-square&logo=arduino&logoColor=white"> <img alt="license" src="https://img.shields.io/badge/license-MIT-3FB950?style=flat-square"> <img alt="build" src="https://img.shields.io/badge/build-esp32dev%20compiles-58A6FF?style=flat-square"> <img alt="release" src="https://img.shields.io/badge/release-v2.0.1-8957E5?style=flat-square"></p>
 
 > Log **two CAN buses at once** to one SD card, on one clock, with **nothing
 > bus-specific compiled in** — identifiers, scaling and units all come from DBC
@@ -462,7 +462,7 @@ and Windows all send the same bytes, so the same two commands do it everywhere:
 
 ```bash
 pip install esptool
-python3 tools/flash.py --image dual-can-logger-esp32-v2.0.0-4mb-merged.bin
+python3 tools/flash.py --image dual-can-logger-esp32-v2.0.1-4mb-merged.bin
 ```
 
 It finds the board itself, and says what to try if the chip never enters

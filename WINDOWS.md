@@ -430,7 +430,7 @@ Press the board's `EN`/`RST` button — the banner only prints at boot. You shou
 see:
 
 ```
-[     0.412] I ==== Dual CAN Logger ESP32 v2.0.0 ====
+[     0.412] I ==== Dual CAN Logger ESP32 v2.0.1 ====
 [     0.690] I SD card OK: SDHC, 15193 MB
 [     0.741] I CAN1 frame map: 6 messages, 19 signals from /frames.dbc
 [     0.758] I CAN2: no /frames2.dbc on the card - recording raw payload bytes.

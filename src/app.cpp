@@ -691,8 +691,9 @@ void appSetup() {
   /* Installed before any controller is opened, so the very first transmit
    * already keeps the receive path alive. Without it a Send from the dashboard
    * blocks this task for up to 20 ms per attempt, and at 350 frames/s that is
-   * enough for the controller to overflow in silence. Measured: 32 frames lost
-   * across 5 runs without the hook, none across 15 with it. */
+   * enough for the controller to overflow in silence. With the hook, a
+   * 10-minute recording at 350 frames/s with a Send every second lost no
+   * frame; the case without it has not been measured. */
   MCP2515::setBusyHook(canBusyHook, nullptr);
 
   s_canSpi.begin(PIN_CAN_SCK, PIN_CAN_MISO, PIN_CAN_MOSI, PIN_CAN1_CS);

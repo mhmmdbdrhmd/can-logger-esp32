@@ -97,8 +97,9 @@ while the recording ran on untouched.
 - **A transmit stopped the receive path.** `sendFrame()` waits up to 20 ms per
   attempt for the controller, in the only task that empties the receive
   buffers; at 350 frames/s that is enough to overflow. The wait now drains both
-  controllers between polls. Measured before the fix: 32 frames lost across
-  5 runs; after: none across 15.
+  controllers between polls. With it, a 10-minute recording at 350 frames/s
+  with one Send every second lost no frame; a run without it has not been
+  made, so how often the old wait cost frames is not measured.
 - **The receive task wrote to the SD card.** The overflow and sticky-flag paths
   called `LOG_FILE` from the task with the microsecond deadline, onto the card
   the CSV was being written to. They are counted now, and reported on the status

@@ -495,6 +495,133 @@ if not bad:
 sys.exit(1 if bad else 0)
 SHORT
 
+echo
+echo "=== a bundle from the desk tool unpacks on the logger, and still resolves ==="
+# tools/make_bundle.py shortens names and rewrites the layout to match; the
+# firmware unpacks the result and loads it at the bundle's name_max. What has to
+# hold end to end: the bytes that come out are the bytes that went in, nothing
+# is clipped, and not one cell, setpoint or role is dropped as unresolvable -
+# which is exactly what happens if a map is shortened and its layout is not.
+"$CXX" "${FLAGS[@]}" -x c++ - "$src/bundle.cpp" "$src/dash.cpp" "$src/dbc.cpp" \
+    -o "$out/t_bundle" <<'TBUNDLE' || fail=1
+#include "bundle.h"
+#include "dash.h"
+#include "logger.h"
+#include "SD.h"
+#include <stdio.h>
+uint32_t g_fakeMs = 0;
+FakeSerial Serial;
+FakeEsp    ESP;
+FakeSD     SD;
+void logPost(LogLevel, bool, const char *, ...) {}
+static std::string slurp(const char *path) {
+  std::string t;
+  FILE *f = fopen(path, "rb");
+  if (!f) return t;
+  int c;
+  while ((c = fgetc(f)) != EOF) t += (char)c;
+  fclose(f);
+  return t;
+}
+static void spill(const std::string &dir, const char *name) {
+  const std::string body = SDFiles::get((std::string("/") + name).c_str());
+  FILE *f = fopen((dir + "/" + name).c_str(), "wb");
+  if (f) { fwrite(body.data(), 1, body.size(), f); fclose(f); }
+}
+int main(int argc, char **argv) {
+  if (argc < 3) return 1;
+  SDFiles::clear();
+  SDFiles::put("/logger.bundle", slurp(argv[1]));
+  const BundleInfo bi = bundleUnpack();
+  dbcSetNameMax(bi.nameMax);
+  for (const char *n : {"frames.dbc", "frames2.dbc", "dash.cfg"}) spill(argv[2], n);
+
+  DbcDb maps[CAN_BUSES];
+  const std::string d1 = SDFiles::get("/frames.dbc"), d2 = SDFiles::get("/frames2.dbc");
+  dbcLoadText(maps[0], d1.c_str(), d1.size());
+  dbcLoadText(maps[1], d2.c_str(), d2.size());
+  const std::string ct = SDFiles::get("/dash.cfg");
+  DashConfig cfg;
+  dashReset(cfg);
+  dashParse(cfg, ct.data(), ct.size());
+  unsigned cells = 0, sends = 0;
+  for (int i = 0; i < DASH_MAX_CELLS; i++) cells += dashCellUsed(cfg.cell[i]);
+  for (int i = 0; i < TX_MAX_COMMANDS; i++) sends += txCommandUsed(cfg.tx[i]);
+  const unsigned dropped = dashDropUnresolved(cfg, maps);
+  printf("ok %d files %u name_max %u clipped1 %u clipped2 %u dropped %u cells %u sends %u "
+         "role1 %s role2 %s\n",
+         bi.ok ? 1 : 0, (unsigned)bi.files, (unsigned)maps[0].nameMax,
+         (unsigned)maps[0].nameClipped, (unsigned)maps[1].nameClipped, dropped,
+         cells, sends, cfg.role[0][0] ? cfg.role[0] : "-",
+         cfg.role[1][0] ? cfg.role[1] : "-");
+  return 0;
+}
+TBUNDLE
+
+# A layout that reads both buses, with names far too long for 16, and a role on
+# CAN2 that has to be shortened along with the node it names.
+python3 - "$here/../examples/dash.cfg" "$out/both.cfg" <<'BOTH'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+lines = open(src).read().splitlines()
+lines += [
+    'role "SteeringControllerUnit" bus=2',
+    "cell 20 widget=gauge sig=EngineTemperatureInformation.EngineCoolantTemperatureMeasured bus=2 lo=-40 hi=215",
+    "cell 21 widget=number sig=TransmissionOilTemperatureInformation.EngineCoolantTemperatureMeasured bus=2",
+    "cell 22 widget=bar sig=EngineTemperatureInformation.AccelerometerLongitudinalAxis_Y bus=2 lo=-12 hi=12",
+]
+open(dst, "w").write("\n".join(lines) + "\n")
+BOTH
+mkdir -p "$out/unpacked"
+for nm in 16 32 64; do
+    python3 - "$here/../tools" "$here/../examples/machine.dbc" "$out/longnames.dbc" \
+        "$out/both.cfg" "$nm" "$out/b.bundle" "$out/b.json" <<'MKB' || fail=1
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import make_bundle
+d1, d2, cfg = (open(p).read() for p in sys.argv[2:5])
+data, rep = make_bundle.build(d1, d2, cfg, int(sys.argv[5]))
+open(sys.argv[6], "wb").write(data)
+nm, files = make_bundle.unpack(data)
+assert nm == int(sys.argv[5]) and files["dash.cfg"] == rep["cfg"], "python round trip"
+json.dump({"texts": rep["texts"], "cfg": rep["cfg"]}, open(sys.argv[7], "w"))
+MKB
+    "$out/t_bundle" "$out/b.bundle" "$out/unpacked" > "$out/tb.txt"
+    python3 - "$out/b.json" "$out/unpacked" "$out/tb.txt" "$nm" "$out/both.cfg" <<'CHKB' || fail=1
+import json, os, re, sys
+rep = json.load(open(sys.argv[1]))
+d, res, nm = sys.argv[2], open(sys.argv[3]).read().split(), int(sys.argv[4])
+got = dict(zip(res[0::2], res[1::2]))
+want = rep["texts"]
+want["dash.cfg"] = rep["cfg"]
+problems = []
+for name, body in want.items():
+    if open(os.path.join(d, name), encoding="utf-8").read() != body:
+        problems.append("%s came out different" % name)
+src = open(sys.argv[5]).read()
+cells = len(re.findall(r"^cell ", src, re.M))
+sends = len(re.findall(r"^send ", src, re.M))
+if got["ok"] != "1" or got["files"] != "3":
+    problems.append("unpacked %s file(s), ok=%s" % (got["files"], got["ok"]))
+if int(got["name_max"]) != nm:
+    problems.append("loaded at name_max %s" % got["name_max"])
+if got["clipped1"] != "0" or got["clipped2"] != "0":
+    problems.append("names were clipped")
+if got["dropped"] != "0":
+    problems.append("%s layout item(s) no longer resolve" % got["dropped"])
+if int(got["cells"]) != cells or int(got["sends"]) != sends:
+    problems.append("%s cells / %s sends, wanted %d / %d"
+                    % (got["cells"], got["sends"], cells, sends))
+if got["role2"] == "-" or len(got["role2"]) > nm - 1:
+    problems.append("the CAN2 role is %r" % got["role2"])
+if problems:
+    print("  FAIL name_max %d: %s" % (nm, "; ".join(problems)))
+    sys.exit(1)
+print("  ok   name_max %-2d  3 files byte-exact, %d cells + %d sends all resolve, "
+      "role %s" % (nm, cells, sends, got["role2"]))
+CHKB
+done
+
 if python3 "$here/../tools/check_dbc.py" "$here/../examples/example.dbc" > "$out/chk" 2>&1; then
     echo "  ok   check_dbc.py reports a clean file as clean"
 else

@@ -496,6 +496,14 @@ sys.exit(1 if bad else 0)
 SHORT
 
 echo
+echo "=== trimming keeps what the dashboard and the Send tab use ==="
+if python3 "$here/test_desk.py" > "$out/desk.txt" 2>&1; then
+    grep -E "^  (ok|FAIL)" "$out/desk.txt" | head -6
+    echo "  ok   test_desk.py: every check passed"
+else
+    sed "s/^/       /" "$out/desk.txt" | tail -40; fail=1
+fi
+echo
 echo "=== a bundle from the desk tool unpacks on the logger, and still resolves ==="
 # tools/make_bundle.py shortens names and rewrites the layout to match; the
 # firmware unpacks the result and loads it at the bundle's name_max. What has to

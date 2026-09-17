@@ -2026,12 +2026,22 @@ function pollLog(){
  * The delay is what keeps it cheap. Dragging a cell across the grid is one
  * write when you let go, not one per frame. */
 var saveTimer = null;
+var cfgDirty = false;
 function markDirty(){
+  cfgDirty = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveCfg, 1200);
 }
+/* A change still waiting for its save, sent now. Anything that acts on the
+   layout the server holds - trimming a frame map, Preview, Export - goes
+   through this first: a trim that ran against the layout from a second ago
+   would drop the message behind the cell or setpoint just added. */
+function flushCfg(){
+  return cfgDirty ? saveCfg() : Promise.resolve();
+}
 function saveCfg(){
   clearTimeout(saveTimer);
+  cfgDirty = false;
   return fetch('/api/dash/cfg', {method:'POST', body:dumpCfg()})
     .then(function(r){ return r.json(); })
     .then(function(d){
@@ -3887,7 +3897,8 @@ function exportSetup(){
      plus the DBC_NAME_MAX this firmware was built with, and the logger unpacks
      it at boot - so moving a setup is copying one file instead of three that
      have to match. */
-  fetch('/api/bundle').then(function(r){ return r.blob(); }).then(function(b){
+  flushCfg().then(function(){ return fetch('/api/bundle'); })
+    .then(function(r){ return r.blob(); }).then(function(b){
     var a = el('a');
     a.href = URL.createObjectURL(b);
     a.download = 'logger.bundle';
@@ -4218,7 +4229,7 @@ q('websheet').onclick  = function(e){
    largest first - so it cannot empty the dashboard being designed. */
 function applyRemedy(action){
   toast('Applying', 'working out the smaller setup');
-  fetch(action, {method:'POST'})
+  flushCfg().then(function(){ return fetch(action, {method:'POST'}); })
     .then(function(r){ return r.json(); })
     .then(function(d){
       if(!d || !d.ok){
@@ -4477,7 +4488,9 @@ fetch('/api/desk').then(function(r){ return r.ok ? r.json() : null; })
   .catch(function(){});
 q('prevbtn').onclick = function(){
   var on = DESK && DESK.preview ? 0 : 1;
-  fetch('/api/desk?preview=' + on, {method:'POST'})
+  flushCfg().then(function(){
+    return fetch('/api/desk?preview=' + on, {method:'POST'});
+  })
     .then(function(r){ return r.json(); })
     .then(function(x){
       DESK = x;

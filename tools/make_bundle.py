@@ -119,7 +119,7 @@ def rewrite_cfg(cfg, maps):
         mm, sm, nm = maps.get(line_bus(line), ({}, {}, {}))
         if s.startswith(("cell ", "send ")):
             line = re.sub(
-                r"(\bsig=)([A-Za-z_]\w*)\.([A-Za-z_]\w*)",
+                r"(\bsig=\"?)([A-Za-z_]\w*)\.([A-Za-z_]\w*)",
                 lambda x: "%s%s.%s" % (x.group(1), mm.get(x.group(2), x.group(2)),
                                        sm.get(x.group(3), x.group(3))), line)
             line = re.sub(r"(\bmsel=)([A-Za-z_]\w*)",
@@ -134,11 +134,14 @@ def rewrite_cfg(cfg, maps):
 
 
 def cfg_messages(cfg, bus):
-    """Messages the layout uses on one bus - the ones pruning must keep."""
+    """Messages the layout uses on one bus - the ones pruning must keep:
+    every dashboard cell and every sendable value that names a signal. A
+    message is kept whole, so a setpoint still has every signal it shares a
+    frame with, and a multiplexed one keeps its selector."""
     keep = set()
     for line in cfg.splitlines():
         if line.lstrip().startswith(("cell ", "send ")) and line_bus(line) == bus:
-            keep.update(re.findall(r"\bsig=([A-Za-z_]\w*)\.", line))
+            keep.update(re.findall(r'\bsig="?([A-Za-z_]\w*)\.', line))
     return keep
 
 
@@ -208,32 +211,52 @@ def labels_per_message(text):
     return per
 
 
-def prune(text, keep, fits, counts):
-    """Drop the largest messages the layout does not use until
-    fits(counts) is true, counts being (messages, signals, value labels).
+def prune_maps(texts, keeps, fits, counts, only=None):
+    """Drop the largest messages the layout does not use, from any of the
+    maps, until fits(counts) is true.
 
-    -> (text, [(message, signals)]). The largest go first, because each buys
-    the most memory for one name lost. Nothing is lost from the RECORDING:
+    texts, keeps, counts: one entry per bus - the map text, the messages the
+    layout uses there (dashboard cells and sendable values), and its
+    (messages, signals, value labels). `only`: the buses that may be trimmed;
+    None means all of them.
+
+    -> (texts, [(bus, message, signals)]). The largest go first, whichever map
+    they are in, because each buys the most memory for one name lost. A message
+    the layout uses is never a candidate. Nothing is lost from the RECORDING:
     frames of a message the map no longer holds are still written whole, as
     raw bytes, and decode offline against the full .dbc."""
-    labels = labels_per_message(text)
     cands = []
-    for name, sigs, start, _ in messages(text):
-        if name in keep:
+    for b, text in enumerate(texts):
+        if not text or (only is not None and b not in only):
             continue
-        mid = re.match(r"\s*BO_\s+(\d+)", text[start:start + 40]).group(1)
-        cands.append((sigs, labels.get(mid, 0), name))
+        labels = labels_per_message(text)
+        for name, sigs, start, _ in messages(text):
+            if name in keeps[b]:
+                continue
+            mid = re.match(r"\s*BO_\s+(\d+)", text[start:start + 40]).group(1)
+            cands.append((sigs, labels.get(mid, 0), b, name))
     cands.sort(key=lambda c: (-c[0], -c[1]))
     dropped = []
-    c = counts
-    for sigs, vals, name in cands:
+    c = [tuple(x) if x else None for x in counts]
+    for sigs, vals, b, name in cands:
         if fits(c):
             break
-        c = (c[0] - 1, c[1] - sigs, c[2] - vals)
-        dropped.append((name, sigs))
-    if dropped:
-        text = drop_messages(text, {n for n, _ in dropped})
-    return text, dropped
+        m, s, v = c[b]
+        c[b] = (m - 1, s - sigs, v - vals)
+        dropped.append((b, name, sigs))
+    texts = list(texts)
+    for b in range(len(texts)):
+        names = {n for bb, n, _ in dropped if bb == b}
+        if names:
+            texts[b] = drop_messages(texts[b], names)
+    return texts, dropped
+
+
+def prune(text, keep, fits, counts):
+    """prune_maps() for one map: fits takes that map's counts alone.
+    -> (text, [(message, signals)])"""
+    texts, dropped = prune_maps([text], [keep], lambda c: fits(c[0]), [counts])
+    return texts[0], [(n, s) for _, n, s in dropped]
 
 
 # ---------------------------------------------------------------------------

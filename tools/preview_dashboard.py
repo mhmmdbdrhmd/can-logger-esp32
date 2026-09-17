@@ -865,7 +865,12 @@ def main():
         for b, label in ((0, "frames.dbc"), (1, "frames2.dbc")):
             text = files.get(label, "")
             caps, cut = fits[b]
-            if text and cut:
+            if text and cut and not caps:
+                # No room at all: the logger loads nothing for this bus.
+                text = ""
+                notes.append("CAN%d map not loaded at all - no room left for "
+                             "it" % (b + 1))
+            elif text and cut:
                 # Keep what the firmware keeps: the first messages and signals
                 # of the file, up to the tables it could allocate.
                 text = _first_of(text, caps)
@@ -915,27 +920,39 @@ def main():
                     "keeps its first part and records the rest raw.")
         remedies = []
         if not ok:
-            # Trimming one map, at this name length or - when that is not
-            # enough - at the longest shorter one where it is.
-            for b in (0, 1):
-                if not src[b]:
-                    continue
-                for n in [nm] + [x for x in heap_model.NAME_MAX_CHOICES if x < nm]:
-                    kept, dropped = trim_plan(b, nm=n)
-                    if kept is None:
+            # Trimming - one map, or both when neither alone is enough - at
+            # this name length and at each shorter one. They are different
+            # trade-offs (longer names, or more of the other map kept), so all
+            # are offered; a shorter length is only offered while it lets a
+            # map keep more than the longer one did.
+            # Whatever the dashboard and the Send tab use is never trimmed.
+            mapped = [b for b in (0, 1) if src[b]]
+            offered = {}
+            for n in [nm] + [x for x in heap_model.NAME_MAX_CHOICES if x < nm]:
+                found = []
+                for which in [[b] for b in mapped] + ([mapped] if len(mapped) > 1 else []):
+                    if found and len(which) > 1:
+                        break              # a single map is enough
+                    plan = trim_plan(which, nm=n)
+                    if plan is None:
                         continue
-                    label = "frames.dbc" if b == 0 else "frames2.dbc"
-                    text = ("Trim %s (CAN %d): keep %d of %d signals, dropping "
-                            "%d message(s) the layout does not use"
-                            % (label, b + 1, kept, counts[b][1], dropped))
+                    key = tuple(which)
+                    kept = tuple(plan[b][0] for b in which)
+                    if key in offered and offered[key] >= kept:
+                        continue           # a longer name length did as well
+                    offered[key] = kept
+                    parts = ["%s (CAN %d): keep %d of %d signals"
+                             % ("frames.dbc" if b == 0 else "frames2.dbc",
+                                b + 1, plan[b][0], counts[b][1]) for b in which]
+                    text = ("Trim %s - only messages the dashboard and the Send "
+                            "tab do not use are dropped" % " and ".join(parts))
                     if n != nm:
-                        text = ("Keep names to %d characters AND t%s"
-                                % (n - 1, text[1:]))
-                    remedies.append({
+                        text = "Keep names to %d characters AND t%s" % (n - 1, text[1:])
+                    found.append({
                         "text": text,
-                        "action": "/api/websurvival/trim?bus=%d&name_max=%d"
-                                  % (b + 1, n)})
-                    break
+                        "action": "/api/websurvival/trim?bus=%s&name_max=%d"
+                                  % ("all" if len(which) > 1 else which[0] + 1, n)})
+                remedies += found
             for o in opts:
                 if o["guaranteed"] and not o["chosen"]:
                     remedies.append({
@@ -943,30 +960,44 @@ def main():
                                 "longer ones are abbreviated"
                                 % (o["name_max"] - 1, o["block"]),
                         "action": "/api/websurvival?name_max=%d" % o["name_max"]})
+            if not remedies:
+                # Only the layout itself is left to give. Said, rather than an
+                # empty sheet that reads as "nothing can be done".
+                remedies.append({
+                    "text": "The messages your dashboard cells and sendable "
+                            "values use are, on their own, more than the "
+                            "logger can hold and still serve this page - even "
+                            "with names kept to 15 characters. Remove some "
+                            "cells or sendable values, or ones from the "
+                            "largest messages, and check again."})
         return {"available": 1, "guaranteed": 1 if ok else 0, "block": blk,
                 "name_max": nm, "serves_at": heap_model.SAFE_BLOCK,
                 "dead_at": heap_model.DEAD_AT, "can_choose": 1, "can_trim": 0,
                 "remedies": remedies, "options": opts, "why": why}
 
-    def trim_plan(b, apply=False, nm=None):
-        """(signals kept, messages dropped) if trimming bus b's map reaches
-        the target at name_max `nm` with the other map as it is, else
-        (None, 0)."""
+    def trim_plan(buses, apply=False, nm=None):
+        """Trim the maps of `buses` (0 and/or 1) until the dashboard is
+        guaranteed at name_max `nm`, never dropping a message a dashboard
+        cell or a sendable value uses. -> {bus: (signals kept, messages
+        dropped)}, or None if that cannot reach the target."""
         counts = map_counts()
         nm = nm or state["name_max"]
 
         def fits(c):
-            trial = list(counts)
-            trial[b] = c if c[0] > 0 else None
+            trial = [x if x and x[0] > 0 else None for x in c]
             return heap_model.predict(trial, nm) >= heap_model.SAFE_BLOCK
-        keep = make_bundle.cfg_messages(state["design_cfg"], b + 1)
-        text, dropped = make_bundle.prune(src[b], keep, fits, counts[b])
-        c = heap_model.counts(text)
-        if not fits(c):
-            return None, 0
+        keeps = [make_bundle.cfg_messages(state["design_cfg"], b + 1)
+                 for b in (0, 1)]
+        texts, dropped = make_bundle.prune_maps(list(src), keeps, fits,
+                                                counts, only=set(buses))
+        after = [heap_model.counts(t) if t else None for t in texts]
+        if not fits(after):
+            return None
         if apply:
-            src[b] = text
-        return c[1], len(dropped)
+            for b in buses:
+                src[b] = texts[b]
+        return {b: (after[b][1], sum(1 for bb, _, _ in dropped if bb == b))
+                for b in buses}
 
     class H(http.server.BaseHTTPRequestHandler):
         def _send(self, body, ctype="application/json", code=200):
@@ -1077,8 +1108,10 @@ def main():
                 return
 
             if p == "/api/websurvival/trim":
-                b = int((qs.get("bus") or ["1"])[0]) - 1
-                if b not in (0, 1) or not src[b]:
+                which = (qs.get("bus") or ["1"])[0]
+                buses = ([b for b in (0, 1) if src[b]] if which == "all"
+                         else [int(which) - 1] if which in ("1", "2") else [])
+                if not buses or not all(src[b] for b in buses):
                     self._json({"ok": 0, "err": "that bus has no frame map"})
                     return
                 try:
@@ -1087,22 +1120,32 @@ def main():
                     nm = state["name_max"]
                 if nm not in heap_model.NAME_MAX_CHOICES:
                     nm = state["name_max"]
-                kept, dropped = trim_plan(b, apply=True, nm=nm)
-                if kept is None:
-                    self._json({"ok": 0, "err": "trimming this map cannot reach "
-                                "the target while keeping every message the "
-                                "layout uses - try a shorter name_max"})
+                plan = trim_plan(buses, apply=True, nm=nm)
+                if plan is None:
+                    self._json({"ok": 0, "err": "trimming cannot reach the "
+                                "target while keeping every message the "
+                                "dashboard and the Send tab use - try a "
+                                "shorter name_max"})
                     return
                 state["name_max"] = nm
                 use_design()
-                state["design_cfg"], _ = prune_cfg(
+                # Nothing should go here - the trim kept every message the
+                # layout names. Counted and reported if it ever does.
+                state["design_cfg"], lost = prune_cfg(
                     state["design_cfg"], byrefs,
                     [list(m.get("nodes", [])) for m in maps])
                 refresh()
-                print("CAN%d frame map trimmed: %d signals kept, %d messages "
-                      "dropped (in memory only - Export to keep it)"
-                      % (b + 1, kept, dropped), flush=True)
-                self._json({"ok": 1, "signals": kept, "dropped": dropped})
+                for b, (kept, dropped) in plan.items():
+                    print("CAN%d frame map trimmed: %d signals kept, %d "
+                          "messages dropped (in memory only - Export to keep "
+                          "it)" % (b + 1, kept, dropped), flush=True)
+                if lost:
+                    print("WARNING: %d layout item(s) lost to the trim" % lost,
+                          flush=True)
+                self._json({"ok": 1,
+                            "signals": sum(k for k, _ in plan.values()),
+                            "dropped": sum(d for _, d in plan.values()),
+                            "lost": lost})
                 return
 
             if p == "/api/bundle":

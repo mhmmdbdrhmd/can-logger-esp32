@@ -42,6 +42,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "webpage.cpp"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import heap_model                                            # noqa: E402
+import make_bundle                                           # noqa: E402
 
 
 def load_page():
@@ -231,6 +235,32 @@ def prune_cfg(text, byrefs, nodes):
         else:
             out.append(line)
     return "\n".join(out) + "\n", dropped
+
+
+def _first_of(text, caps):
+    """The map as a loader with room for `caps` (messages, signals, value
+    labels) keeps it: definitions in file order until a table is full; a
+    message that did not fit takes its signals with it."""
+    msgs = sigs = vals = 0
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        t = line.lstrip()
+        if t.startswith("BO_ "):
+            skip = msgs >= caps[0]
+            msgs += 0 if skip else 1
+            if skip:
+                continue
+        elif t.startswith("SG_ "):
+            if skip or sigs >= caps[1]:
+                continue
+            sigs += 1
+        elif t.startswith("VAL_ "):
+            n = len(re.findall(r'"[^"]*"', t))
+            if vals + n > caps[2]:
+                continue
+            vals += n
+        out.append(line)
+    return "".join(out)
 
 
 def load_dbc(path):
@@ -505,6 +535,13 @@ def main():
                          "'fallback' is a search that decoded nothing and used "
                          "the config.h value. Only affects the words next to "
                          "the rate.")
+    ap.add_argument("--name-max", type=int, default=None, choices=(64, 32, 16),
+                    help="the longest name the logger keeps, nul included. "
+                         "Longer names are abbreviated in the exported bundle. "
+                         "Changeable in the page, under Web UI.")
+    ap.add_argument("--bundle",
+                    help="start from a setup bundle (logger.bundle) instead of "
+                         "separate files")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--run", default="",
                     help="JavaScript to run once the page has loaded. Only for "
@@ -514,6 +551,12 @@ def main():
 
     if args.no_dbc:
         args.dbc = None
+    bundle_files = {}
+    if args.bundle:
+        nm, bundle_files = make_bundle.unpack(Path(args.bundle).read_bytes())
+        if nm in (64, 32, 16) and args.name_max is None:
+            args.name_max = nm
+        args.dbc = args.dbc2 = None
 
     # Opening on an empty setup is what made an earlier review conclude the
     # example sendable values had been deleted - they were in examples/dash.cfg
@@ -539,7 +582,14 @@ def main():
     # unmapped) or a refusal, and neither let anybody lay out a CAN2 cell at a
     # desk. Every signal is tagged with the bus it came from, so a value can be
     # attributed without carrying the index alongside it everywhere.
-    maps   = [load_dbc(args.dbc), load_dbc(args.dbc2)]
+    # The design sources: each bus's map as TEXT, full names, trimmed only when
+    # the page asks. Preview turns them into what the logger would load; the
+    # design view shows them as they are.
+    def _read(pth):
+        return Path(pth).read_text(encoding="utf-8", errors="replace") if pth else ""
+    src    = [_read(args.dbc) or bundle_files.get("frames.dbc", ""),
+              _read(args.dbc2) or bundle_files.get("frames2.dbc", "")]
+    maps   = [parse_dbc(t) if t else {"loaded": 0, "m": []} for t in src]
     flats  = [[], []]
     byrefs = [{}, {}]
 
@@ -552,7 +602,9 @@ def main():
     rebind(0)
     rebind(1)
 
-    if args.cfg and Path(args.cfg).exists():
+    if bundle_files.get("dash.cfg"):
+        start_cfg = bundle_files["dash.cfg"]
+    elif args.cfg and Path(args.cfg).exists():
         start_cfg = Path(args.cfg).read_text()
     elif seed_text is not None:
         start_cfg = seed_text
@@ -575,6 +627,9 @@ def main():
 
     state = {
         "cfg": start_cfg,
+        "design_cfg": start_cfg,   # the layout being designed, full names
+        "preview": False,          # showing what the logger would load
+        "name_max": args.name_max or 64,
         "gen": 1,
         "armed": False,
         "arm_until": 0.0,
@@ -787,6 +842,132 @@ def main():
         "[     1.201] I RECORDING STARTED -> /1.csv (+ /1.log)",
     ]
 
+    # -- design, preview, and the memory question --------------------------
+    def map_counts():
+        return [heap_model.counts(t) if t else None for t in src]
+
+    def use_design():
+        """Show the design sources as they are."""
+        for b in (0, 1):
+            maps[b] = parse_dbc(src[b]) if src[b] else {"loaded": 0, "m": []}
+            rebind(b)
+
+    def use_preview():
+        """Show what the LOGGER would load: the bundle Export would write,
+        unpacked, read at its name_max the way src/dbc.cpp reads it, fitted
+        to the heap the way the loader fits it, and the layout held to the
+        result the way dashDropUnresolved() holds it."""
+        nm = state["name_max"]
+        data, _ = make_bundle.build(src[0], src[1], state["design_cfg"], nm)
+        _, files = make_bundle.unpack(data)
+        fits = heap_model.fit(map_counts(), nm)
+        notes = []
+        for b, label in ((0, "frames.dbc"), (1, "frames2.dbc")):
+            text = files.get(label, "")
+            caps, cut = fits[b]
+            if text and cut:
+                # Keep what the firmware keeps: the first messages and signals
+                # of the file, up to the tables it could allocate.
+                text = _first_of(text, caps)
+                notes.append("CAN%d map cut to %d of its messages - the "
+                             "logger could not hold it all" % (b + 1, caps[0]))
+            maps[b] = parse_dbc(text, nm) if text else {"loaded": 0, "m": []}
+            rebind(b)
+        cfg, gone = prune_cfg(files.get("dash.cfg", ""), byrefs,
+                              [list(m.get("nodes", [])) for m in maps])
+        state["cfg"] = cfg
+        if gone:
+            notes.append("%d layout item(s) would not resolve" % gone)
+        return notes
+
+    def refresh():
+        state["gen"] += 1
+        if state["preview"]:
+            return use_preview()
+        use_design()
+        state["cfg"] = state["design_cfg"]
+        return []
+
+    def desk_state(notes=()):
+        blk = heap_model.predict(map_counts(), state["name_max"])
+        ok, _ = heap_model.verdict(blk)
+        summary = ("name_max %d, largest free block %d B - %s"
+                   % (state["name_max"], blk,
+                      "guaranteed" if ok else "NOT guaranteed"))
+        if notes:
+            summary += "; " + "; ".join(notes)
+        return {"ok": 1, "preview": 1 if state["preview"] else 0,
+                "name_max": state["name_max"], "summary": summary}
+
+    def web_survival():
+        counts = map_counts()
+        nm = state["name_max"]
+        opts = []
+        for n in heap_model.NAME_MAX_CHOICES:
+            b = heap_model.predict(counts, n)
+            opts.append({"name_max": n, "block": b,
+                         "guaranteed": 1 if b >= heap_model.SAFE_BLOCK else 0,
+                         "chosen": 1 if n == nm else 0})
+        blk = heap_model.predict(counts, nm)
+        ok, why = heap_model.verdict(blk)
+        if any(cut for _, cut in heap_model.fit(counts, nm)):
+            why += (" A frame map is too large to load whole; the logger "
+                    "keeps its first part and records the rest raw.")
+        remedies = []
+        if not ok:
+            # Trimming one map, at this name length or - when that is not
+            # enough - at the longest shorter one where it is.
+            for b in (0, 1):
+                if not src[b]:
+                    continue
+                for n in [nm] + [x for x in heap_model.NAME_MAX_CHOICES if x < nm]:
+                    kept, dropped = trim_plan(b, nm=n)
+                    if kept is None:
+                        continue
+                    label = "frames.dbc" if b == 0 else "frames2.dbc"
+                    text = ("Trim %s (CAN %d): keep %d of %d signals, dropping "
+                            "%d message(s) the layout does not use"
+                            % (label, b + 1, kept, counts[b][1], dropped))
+                    if n != nm:
+                        text = ("Keep names to %d characters AND t%s"
+                                % (n - 1, text[1:]))
+                    remedies.append({
+                        "text": text,
+                        "action": "/api/websurvival/trim?bus=%d&name_max=%d"
+                                  % (b + 1, n)})
+                    break
+            for o in opts:
+                if o["guaranteed"] and not o["chosen"]:
+                    remedies.append({
+                        "text": "Keep names to %d characters (block %d B) - "
+                                "longer ones are abbreviated"
+                                % (o["name_max"] - 1, o["block"]),
+                        "action": "/api/websurvival?name_max=%d" % o["name_max"]})
+        return {"available": 1, "guaranteed": 1 if ok else 0, "block": blk,
+                "name_max": nm, "serves_at": heap_model.SAFE_BLOCK,
+                "dead_at": heap_model.DEAD_AT, "can_choose": 1, "can_trim": 0,
+                "remedies": remedies, "options": opts, "why": why}
+
+    def trim_plan(b, apply=False, nm=None):
+        """(signals kept, messages dropped) if trimming bus b's map reaches
+        the target at name_max `nm` with the other map as it is, else
+        (None, 0)."""
+        counts = map_counts()
+        nm = nm or state["name_max"]
+
+        def fits(c):
+            trial = list(counts)
+            trial[b] = c if c[0] > 0 else None
+            return heap_model.predict(trial, nm) >= heap_model.SAFE_BLOCK
+        keep = make_bundle.cfg_messages(state["design_cfg"], b + 1)
+        text, dropped = make_bundle.prune(src[b], keep, fits, counts[b])
+        c = heap_model.counts(text)
+        if not fits(c):
+            return None, 0
+        if apply:
+            src[b] = text
+        return c[1], len(dropped)
+
     class H(http.server.BaseHTTPRequestHandler):
         def _send(self, body, ctype="application/json", code=200):
             if isinstance(body, str):
@@ -822,6 +1003,25 @@ def main():
                 bus = int((qs.get("bus") or ["1"])[0])
                 bus = bus if 1 <= bus <= 2 else 1
                 self._json(dict(maps[bus - 1], bus=bus))
+            elif p == "/api/desk":
+                # Only this tool answers. The logger 404s it, which is how the
+                # page knows not to offer Preview there.
+                self._json(desk_state())
+            elif p == "/api/websurvival":
+                self._json(web_survival())
+            elif p == "/api/bundle":
+                data, _ = make_bundle.build(src[0], src[1], state["design_cfg"],
+                                            state["name_max"])
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition",
+                                 'attachment; filename="logger.bundle"')
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                print("exported logger.bundle: %d bytes, name_max %d"
+                      % (len(data), state["name_max"]), flush=True)
             elif p == "/api/log":
                 m = re.search(r"since=(\d+)", self.path)
                 since = int(m.group(1)) if m else 0
@@ -852,7 +1052,82 @@ def main():
             body = raw.decode("utf-8", "replace")
             form = dict(urllib.parse.parse_qsl(body))
 
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+            if p == "/api/desk":
+                state["preview"] = (qs.get("preview") or ["0"])[0] == "1"
+                notes = refresh()
+                print("preview %s" % ("on" if state["preview"] else "off"),
+                      flush=True)
+                self._json(desk_state(notes))
+                return
+
+            if p == "/api/websurvival":
+                try:
+                    nm = int((qs.get("name_max") or ["0"])[0])
+                except ValueError:
+                    nm = 0
+                if nm not in heap_model.NAME_MAX_CHOICES:
+                    self._json({"ok": 0, "err": "name_max is 16, 32 or 64"})
+                    return
+                state["name_max"] = nm
+                refresh()
+                print("name_max is now %d" % nm, flush=True)
+                self._json({"ok": 1, "name_max": nm})
+                return
+
+            if p == "/api/websurvival/trim":
+                b = int((qs.get("bus") or ["1"])[0]) - 1
+                if b not in (0, 1) or not src[b]:
+                    self._json({"ok": 0, "err": "that bus has no frame map"})
+                    return
+                try:
+                    nm = int((qs.get("name_max") or [state["name_max"]])[0])
+                except ValueError:
+                    nm = state["name_max"]
+                if nm not in heap_model.NAME_MAX_CHOICES:
+                    nm = state["name_max"]
+                kept, dropped = trim_plan(b, apply=True, nm=nm)
+                if kept is None:
+                    self._json({"ok": 0, "err": "trimming this map cannot reach "
+                                "the target while keeping every message the "
+                                "layout uses - try a shorter name_max"})
+                    return
+                state["name_max"] = nm
+                use_design()
+                state["design_cfg"], _ = prune_cfg(
+                    state["design_cfg"], byrefs,
+                    [list(m.get("nodes", [])) for m in maps])
+                refresh()
+                print("CAN%d frame map trimmed: %d signals kept, %d messages "
+                      "dropped (in memory only - Export to keep it)"
+                      % (b + 1, kept, dropped), flush=True)
+                self._json({"ok": 1, "signals": kept, "dropped": dropped})
+                return
+
+            if p == "/api/bundle":
+                _, data = _multipart_file(raw, self.headers.get("Content-Type", ""))
+                try:
+                    nm, files = make_bundle.unpack(data)
+                except ValueError as exc:
+                    self._json({"ok": 0, "err": str(exc)})
+                    return
+                src[0] = files.get("frames.dbc", "")
+                src[1] = files.get("frames2.dbc", "")
+                state["design_cfg"] = files.get("dash.cfg", "") or DEFAULT_CFG
+                if nm in heap_model.NAME_MAX_CHOICES:
+                    state["name_max"] = nm
+                refresh()
+                print("setup bundle imported: %d file(s), name_max %d"
+                      % (len(files), state["name_max"]), flush=True)
+                self._json({"ok": 1})
+                return
+
             if p == "/api/dbc":
+                if state["preview"]:
+                    self._json({"ok": 0, "err": "leave Preview first - it shows "
+                                "what the logger would load, not the design"})
+                    return
                 # Which bus's map this replaces. The page puts it in the query
                 # string, and the logger reads it the same way; a request
                 # without one means CAN1, so nothing that predates the second
@@ -878,6 +1153,7 @@ def main():
                     self._json({"ok": 0, "err": "no BO_ messages in that file"})
                     return
 
+                src[bus - 1] = data.decode("utf-8", "replace")
                 maps[bus - 1] = new
                 rebind(bus - 1)
                 if bus == 1:
@@ -901,6 +1177,7 @@ def main():
                 # the result is worth keeping.
                 nodes = [list(m.get("nodes", [])) for m in maps]
                 state["cfg"], gone = prune_cfg(state["cfg"], byrefs, nodes)
+                state["design_cfg"] = state["cfg"]
                 state["gen"] += 1
                 # Only this bus's overrides: a value written on the OTHER bus
                 # still names a signal its own map describes.
@@ -930,6 +1207,10 @@ def main():
                 # directory it was pointed at. Export in the page is how a setup
                 # leaves this tool.
                 state["cfg"] = body
+                if not state["preview"]:
+                    # In Preview the layout is the logger's copy; changes made
+                    # there are shown but go when Preview is left.
+                    state["design_cfg"] = body
                 state["gen"] += 1
                 self._json({"ok": 1, "errors": 0, "missing": 0, "gen": state["gen"]})
 

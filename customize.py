@@ -1,17 +1,39 @@
 #!/usr/bin/env python3
 """
-Set the logger's dashboard and sendable values up at a desk, before going out.
+Set the logger up at a desk, before going out: dashboard, sendable values,
+both frame maps and the name length - and see it the way the logger will.
 
     python3 customize.py                  open the page with no frame map, and
                                           load one from it with Frame map: CAN 1
     python3 customize.py path/to/mine.dbc start with this frame map
+    python3 customize.py can1.dbc can2.dbc
+                                          one frame map per bus
+    python3 customize.py logger.bundle    carry on from an exported setup
     python3 customize.py --browse         pick one in your file browser first
     python3 customize.py mine.dbc --role Tester
                                           say which node the logger IS, so Fill
                                           can tell a command from a reading.
                                           Leave it out and nothing is split -
                                           change it any time from the page.
+    python3 customize.py mine.dbc --name-max 32
+                                          start with names kept to 31 characters
     python customize.py                   (Windows)
+
+In the page:
+
+  Web UI (header)  whether the logger will still serve this page while it
+                   records, with these maps. If not, it offers the way out:
+                   trim frames.dbc or frames2.dbc (messages the layout uses are
+                   always kept), or a shorter name length (16, 32 or 64 -
+                   longer names are abbreviated, not cut).
+  Preview          the page as the logger will show it: the maps as the
+                   exported bundle carries them, read at that name length,
+                   cut down if the logger could not hold them whole. Press it
+                   again to go back to designing.
+  Export           ONE file, logger.bundle: both frame maps, the layout and
+                   the name length. Put it on the SD card as /logger.bundle, or
+                   Import it from the logger's own dashboard; the logger
+                   unpacks it at its next start.
 
 Or just double-click this file. On Windows you can also drag a .dbc onto it.
 
@@ -21,9 +43,9 @@ which is the same button the logger itself has. One map per bus, as on the
 logger: the CAN 2 button loads CAN 2's, and neither disturbs the other.
 
 It opens the logger's real web page in your browser, fed with simulated data.
-Press Export in the page to save the setup you have built, then copy it onto
-the SD card as /dash.cfg alongside your frame maps as /frames.dbc (CAN1) and
-/frames2.dbc (CAN2), and the logger starts up with your dashboard already on it.
+Press Export in the page to save the setup you have built as logger.bundle,
+and put that one file on the SD card - the logger starts up with your frame
+maps and your dashboard already on it.
 
 IT WRITES NO FILES AT ALL. This tool used to pair a .cfg with every .dbc it was
 shown, which left files in whatever directory you had pointed it at and opened
@@ -113,26 +135,47 @@ def main():
         role = argv[i + 1].strip('"')
         del argv[i:i + 2]
 
+    name_max = None
+    if "--name-max" in argv:
+        i = argv.index("--name-max")
+        try:
+            name_max = int(argv[i + 1])
+        except (IndexError, ValueError):
+            name_max = 0
+        if name_max not in (16, 32, 64):
+            print("--name-max is 16, 32 or 64")
+            return 2
+        del argv[i:i + 2]
+
     args = [a for a in argv if a not in ("--browse", "-b")]
-    # No question, ever. A frame map given here is used; otherwise the page
-    # opens empty and its own Frame map button loads one - which is the same
-    # button the logger has, so there is one way to do it rather than two.
-    dbc = None
-    if args and Path(args[0].strip('"')).suffix.lower() == ".dbc":
-        dbc = Path(args[0].strip('"'))            # or dragged onto the icon
+    # No question, ever. Files given here are used; otherwise the page opens
+    # empty and its own Frame map button loads one - which is the same button
+    # the logger has, so there is one way to do it rather than two.
+    files = [Path(a.strip('"')) for a in args]
+    dbc = dbc2 = bundle = None
+    dbcs = [f for f in files if f.suffix.lower() == ".dbc"]
+    bundles = [f for f in files if f.suffix.lower() == ".bundle"]
+    if bundles:
+        bundle = bundles[0]
+    elif dbcs:
+        dbc = dbcs[0]                             # or dragged onto the icon
+        dbc2 = dbcs[1] if len(dbcs) > 1 else None
     elif argv and not args:
         dbc = browse()                            # --browse, straight to it
 
-    if dbc is not None and not dbc.is_file():
-        print("\nNo such file: %s" % dbc)
-        return 2
+    for f in (dbc, dbc2, bundle):
+        if f is not None and not f.is_file():
+            print("\nNo such file: %s" % f)
+            return 2
 
-    if dbc is not None:
+    for f in (dbc, dbc2):
+        if f is None:
+            continue
         # Check it against the logger's limits first. A frame map the ESP32
         # cannot hold is better found now than after a drive to the machine.
         from check_dbc import check
         print()
-        rc = check(str(dbc))
+        rc = check(str(f))
         if rc != 0:
             print("\nCarrying on anyway - you can still lay out whatever it did "
                   "read.\n")
@@ -149,31 +192,36 @@ def main():
     url = "http://127.0.0.1:%d/" % port
 
     print("\n" + "=" * 68)
-    print("  frame map   %s"
-          % (dbc if dbc is not None
-             else "none yet - load one with Frame map, top right"))
-    print("  your setup  %s"
-          % ("%s   (read from there; Export to save your changes)" % cfg
-             if have_cfg else "starts empty - Export in the page when you "
-                              "want to keep it"))
+    if bundle is not None:
+        print("  setup       %s" % bundle)
+    else:
+        print("  CAN1 map    %s"
+              % (dbc if dbc is not None
+                 else "none yet - load one with Frame map, top right"))
+        print("  CAN2 map    %s" % (dbc2 if dbc2 is not None else "none"))
+        print("  your setup  %s"
+              % ("%s   (read from there; Export to save your changes)" % cfg
+                 if have_cfg else "starts empty - Export in the page when you "
+                                  "want to keep it"))
     print("  open        %s" % url)
     print("  role        %s"
           % (role if role else "not set - both Fill buttons offer everything "
                                "(change it in the page, top right)"))
     print("=" * 68)
 
-    steps = [] if dbc is not None else ["Frame map (top right) -> load your .dbc"]
+    steps = [] if (dbc or bundle) else ["Frame map (top right) -> load your .dbc"]
     steps += ["Role (top right)     -> which of these is this logger, or skip",
               "Dashboard -> Customize dashboard -> Fill from frame map",
-              "Send -> Set up sendable values -> Fill from the frame map"]
+              "Send -> Set up sendable values -> Fill from the frame map",
+              "Web UI (top right)   -> must say OK; if not, take a fix it offers",
+              "Preview (top right)  -> check it the way the logger will show it"]
     print()
     for n, line in enumerate(steps, 1):
         print("  %d. %s" % (n, line))
     print("""
-  Then press Export, and copy onto the SD card:
-      CAN1's .dbc        ->  /frames.dbc
-      CAN2's .dbc        ->  /frames2.dbc   (only if the second bus is mapped)
-      the exported file  ->  /dash.cfg
+  Then press Export. It saves ONE file, logger.bundle - both frame maps, the
+  layout and the name length. Copy it onto the SD card as /logger.bundle, or
+  Import it from the logger's dashboard; the logger unpacks it when it starts.
 
   Two buses, two frame maps: the same identifier usually means different things
   on each, so they are separate files. A cell or a sendable value remembers
@@ -190,8 +238,15 @@ def main():
     # --cfg only when there is already a file to read; it is never written back.
     # Export in the page is the one way a setup leaves this tool.
     sys.argv = ["preview_dashboard.py", "--port", str(port)]
-    sys.argv += ["--cfg", str(cfg)] if have_cfg else ["--empty"]
-    sys.argv += ["--dbc", str(dbc)] if dbc is not None else ["--no-dbc"]
+    if bundle is not None:
+        sys.argv += ["--bundle", str(bundle), "--empty"]
+    else:
+        sys.argv += ["--cfg", str(cfg)] if have_cfg else ["--empty"]
+        sys.argv += ["--dbc", str(dbc)] if dbc is not None else ["--no-dbc"]
+        if dbc2 is not None:
+            sys.argv += ["--dbc2", str(dbc2)]
+    if name_max:
+        sys.argv += ["--name-max", str(name_max)]
     if role:
         sys.argv += ["--role", role]
     try:

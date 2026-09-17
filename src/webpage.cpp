@@ -508,6 +508,10 @@ static const char PAGE_2[] PROGMEM = R"HTML(
        that launched the tool, where the person laying out a dashboard in a
        browser never saw it. -->
   <button id="webbtn" class="hbtn">Web UI: &mdash;</button>
+  <!-- Only the desk tool shows this: it switches the page between the layout
+       being designed and what the logger would load from the exported bundle -
+       shortened names, a map cut to fit, cells that no longer resolve. -->
+  <button id="prevbtn" class="hbtn" hidden>Preview</button>
   <span id="conn">connecting...</span>
 </header>
 
@@ -883,7 +887,6 @@ static const char PAGE_2[] PROGMEM = R"HTML(
     <div id="webfix"></div>
 
     <div class="acts">
-      <button id="web_trim">Trim the map to fit</button>
       <button id="web_close" class="pri">Done</button>
     </div>
   </div>
@@ -4188,11 +4191,15 @@ function drawWebSheet(){
   if(rem.length){
     var c = el('div', 'card');
     c.appendChild(el('h2', null, 'Any one of these makes it certain'));
-    rem.forEach(function(r){ c.appendChild(el('div', 'sub', '· ' + r.text)); });
+    rem.forEach(function(r){
+      if(!r.action){ c.appendChild(el('div', 'sub', '· ' + r.text)); return; }
+      var b = el('button', null, r.text);
+      b.style.marginTop = '8px';
+      b.onclick = function(){ applyRemedy(r.action); };
+      c.appendChild(b);
+    });
     fx.appendChild(c);
   }
-  q('web_trim').style.display =
-    (d && d.can_trim && !d.guaranteed) ? '' : 'none';
 }
 
 q('webbtn').onclick = function(){
@@ -4206,13 +4213,12 @@ q('websheet').onclick  = function(e){
   if(e.target === q('websheet')) q('websheet').classList.remove('on');
 };
 
-/* Prunes the map, abbreviates what is left, rewrites the layout references to
-   match, and hands back one bundle. The messages the layout USES are never
-   dropped - the rest go largest first - so trimming cannot empty the dashboard
-   that is being designed. */
-q('web_trim').onclick = function(){
-  toast('Trimming the frame map', 'pruning, abbreviating and rewriting refs');
-  fetch('/api/websurvival/trim', {method:'POST'})
+/* A remedy the desk tool offered: trim one bus's map, or a shorter name
+   length. Trimming never drops a message the layout uses - the rest go
+   largest first - so it cannot empty the dashboard being designed. */
+function applyRemedy(action){
+  toast('Applying', 'working out the smaller setup');
+  fetch(action, {method:'POST'})
     .then(function(r){ return r.json(); })
     .then(function(d){
       if(!d || !d.ok){
@@ -4240,13 +4246,15 @@ q('web_trim').onclick = function(){
            what run_tests.sh checks for, and weakening that check to allow one
            convenience would cost more than the sentence is worth. The reload
            below redraws the layout, so the change is visible anyway. */
-        toast('Frame map trimmed',
-              d.signals + ' signal(s) kept, ' + d.dropped + ' dropped'
-              + ' — now guaranteed', 'ok');
+        toast(d.signals !== undefined ? 'Frame map trimmed' : 'Changed',
+              d.signals !== undefined
+                ? d.signals + ' signal(s) kept, ' + d.dropped + ' message(s) '
+                  + 'dropped — now guaranteed'
+                : 'the dashboard is now guaranteed', 'ok');
       });
     })
-    .catch(function(){ toast('Not trimmed', 'the tool did not answer', 'bad'); });
-};
+    .catch(function(){ toast('Not changed', 'the tool did not answer', 'bad'); });
+}
 
 q('setupbtn').onclick = function(){
   /* Counted from the logger's own copy, not this browser's, so the sheet
@@ -4286,6 +4294,7 @@ q('filepick').onchange = function(){
           return;
         }
         q('cfgsheet').classList.remove('on');
+        if(!d.reboot){ location.reload(); return; }
         toast('Setup bundle imported', 'the logger is restarting to unpack '
               + 'it - this page reloads in 20 s', 'ok');
         setTimeout(function(){ location.reload(); }, 20000);
@@ -4449,6 +4458,40 @@ loadCfg().then(function(){ showTab(location.hash.slice(1) || 'dash'); });
    opens a sheet. A logger without the endpoint leaves the badge blank
    rather than showing an error - see loadWebSurv(). */
 loadWebSurv();
+
+/* Preview. /api/desk exists only in the desk tool, so on a logger this
+   request 404s and the button stays hidden. In Preview the page shows what
+   the logger would load from the bundle Export writes: names shortened to
+   the chosen length, a map cut down if it cannot be held whole, and cells
+   that would no longer resolve left out. */
+var DESK = null;
+function drawPrevBtn(){
+  var b = q('prevbtn');
+  b.hidden = !DESK;
+  if(!DESK) return;
+  b.textContent = DESK.preview ? 'Preview: ON' : 'Preview';
+  b.className = 'hbtn' + (DESK.preview ? ' set' : '');
+}
+fetch('/api/desk').then(function(r){ return r.ok ? r.json() : null; })
+  .then(function(x){ DESK = x; drawPrevBtn(); })
+  .catch(function(){});
+q('prevbtn').onclick = function(){
+  var on = DESK && DESK.preview ? 0 : 1;
+  fetch('/api/desk?preview=' + on, {method:'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(x){
+      DESK = x;
+      drawPrevBtn();
+      DBCS[0] = null; DBCS[1] = null;
+      return Promise.all([loadDbc(1, true), loadDbc(2, true)])
+        .then(loadCfg).then(loadWebSurv).then(function(){
+          toast(on ? 'Preview - as the logger will load it'
+                   : 'Back to the design',
+                on ? x.summary + '. Changes made here are not kept.'
+                   : 'full names and full frame maps', 'ok');
+        });
+    });
+};
 </script>
 </body></html>
 )HTML";
